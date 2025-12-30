@@ -1,0 +1,18 @@
+{
+  "name": "voice-to-3d-print-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@google/model-viewer": "^3.5.0",
+    "@pipecat-ai/client": "^0.1.0",
+    "next": "14.2.7",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

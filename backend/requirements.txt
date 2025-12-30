@@ -1,0 +1,7 @@
+pipecat-ai[webrtc,deepgram,openai]
+fastapi
+uvicorn[standard]
+python-multipart
+meshlib
+httpx
+pydantic

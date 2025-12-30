@@ -1,0 +1,17 @@
+# Env
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node
+node_modules/
+.next/
+
+# Output artifacts
+backend/data/output/
+
+# OS
+.DS_Store
