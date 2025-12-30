@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config import settings
+from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt
 from services.generation import GenerationResult, generate_model
 from services.library import search_library
@@ -58,6 +59,10 @@ class IntentResponse(BaseModel):
     prompt: str
 
 
+class STTResponse(BaseModel):
+    transcript: str
+
+
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -99,6 +104,17 @@ async def intent(request: IntentRequest) -> IntentResponse:
     if not prompt:
         raise HTTPException(status_code=500, detail="Failed to extract prompt.")
     return IntentResponse(prompt=prompt)
+
+
+@app.post("/stt", response_model=STTResponse)
+async def stt(audio: UploadFile = File(...)) -> STTResponse:
+    try:
+        content = await audio.read()
+        transcript = await transcribe_audio(content, content_type=audio.content_type or "")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return STTResponse(transcript=transcript)
 
 
 @app.get("/library/search")

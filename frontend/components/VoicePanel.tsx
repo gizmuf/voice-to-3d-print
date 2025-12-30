@@ -31,14 +31,21 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [interim, setInterim] = useState<string | null>(null);
   const [provider, setProvider] = useState("meshy");
+  const [sttProvider, setSttProvider] = useState("browser");
   const [libraryResults, setLibraryResults] = useState<LibraryItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || defaultBackendUrl;
 
   const supportsSpeech = typeof window !== "undefined" &&
     ((window as Window).SpeechRecognition || (window as Window).webkitSpeechRecognition);
+  const supportsRecording = typeof window !== "undefined" &&
+    typeof MediaRecorder !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia;
 
   useEffect(() => {
     if (!supportsSpeech) return;
@@ -188,16 +195,85 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     }
   };
 
-  const startListening = () => {
-    if (!recognitionRef.current || isProcessing) return;
-    setStatus("listening");
-    setIsListening(true);
-    recognitionRef.current.start();
+  const startListening = async () => {
+    if (isProcessing) return;
+    if (sttProvider === "browser") {
+      if (!recognitionRef.current) return;
+      setStatus("listening");
+      setIsListening(true);
+      recognitionRef.current.start();
+      return;
+    }
+
+    if (!supportsRecording) {
+      setStatus("error");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4"
+      ];
+      const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      chunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
+        await sendToDeepgram(blob);
+      };
+      recorderRef.current = recorder;
+      setStatus("recording");
+      setIsListening(true);
+      recorder.start();
+    } catch (error) {
+      console.error(error);
+      setStatus("error");
+      setIsListening(false);
+    }
   };
 
   const stopListening = () => {
-    recognitionRef.current?.stop();
+    if (sttProvider === "browser") {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    recorderRef.current?.stop();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
     setIsListening(false);
+  };
+
+  const sendToDeepgram = async (blob: Blob) => {
+    setStatus("transcribing");
+    try {
+      const formData = new FormData();
+      formData.append("audio", blob, "audio.webm");
+      const response = await fetch(`${backendUrl}/stt`, {
+        method: "POST",
+        body: formData
+      });
+      if (!response.ok) throw new Error("STT failed");
+      const data = await response.json();
+      if (data.transcript) {
+        await handleFinalTranscript(data.transcript);
+      } else {
+        setStatus("error");
+      }
+    } catch (error) {
+      console.error(error);
+      setStatus("error");
+    }
   };
 
   return (
@@ -213,6 +289,26 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       </div>
 
       <div className="panel-body">
+        <div className="field-row">
+          <label htmlFor="stt">Speech input</label>
+          <select
+            id="stt"
+            value={sttProvider}
+            onChange={(event) => setSttProvider(event.target.value)}
+          >
+            <option value="browser">Browser STT (free)</option>
+            <option value="deepgram" disabled={!supportsRecording}>
+              Deepgram STT (server)
+            </option>
+          </select>
+          {!supportsSpeech && sttProvider === "browser" ? (
+            <span className="muted">Browser STT not supported here.</span>
+          ) : null}
+          {!supportsRecording && sttProvider === "deepgram" ? (
+            <span className="muted">Recording not supported in this browser.</span>
+          ) : null}
+        </div>
+
         <div className="field-row">
           <label htmlFor="provider">3D provider</label>
           <select
@@ -232,13 +328,21 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
           onPointerUp={stopListening}
           onPointerLeave={stopListening}
           aria-pressed={isListening}
-          disabled={!supportsSpeech}
+          disabled={
+            sttProvider === "browser" ? !supportsSpeech : !supportsRecording
+          }
         >
-          {supportsSpeech
-            ? isListening
-              ? "Listening..."
-              : "Push to Talk"
-            : "Speech not supported"}
+          {sttProvider === "browser"
+            ? supportsSpeech
+              ? isListening
+                ? "Listening..."
+                : "Push to Talk"
+              : "Speech not supported"
+            : supportsRecording
+              ? isListening
+                ? "Recording..."
+                : "Push to Record"
+              : "Recording not supported"}
         </button>
 
         <div className="status-card">

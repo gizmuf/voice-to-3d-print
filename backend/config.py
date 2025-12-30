@@ -8,6 +8,8 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
+    deepgram_base_url: str = os.getenv("DEEPGRAM_BASE_URL", "https://api.deepgram.com")
+    deepgram_model: str = os.getenv("DEEPGRAM_MODEL", "nova-2")
     gemini_proxy_url: str = os.getenv(
         "GEMINI_PROXY_URL",
         "https://gut-feeling-api-242245666842.us-central1.run.app/generate",

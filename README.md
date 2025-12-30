@@ -4,13 +4,13 @@ A voice-driven pipeline that captures speech, extracts 3D design intent, generat
 
 ## Stack
 - **Frontend:** Next.js + React + browser SpeechRecognition + `<model-viewer>`
-- **Voice Orchestration:** Browser STT + Gemini intent extraction via proxy
+- **Voice Orchestration:** Browser STT (default) or Deepgram STT + Gemini intent extraction via proxy
 - **3D Generation:** Meshy (default) with Tripo as an optional provider
 - **Manufacturing:** MeshLib repair + PrusaSlicer CLI
 
 ## Architecture Flow
-1. User speaks in browser (Web Speech API).
-2. Browser transcribes speech locally.
+1. User speaks in browser (Web Speech API or Deepgram recording).
+2. Speech is transcribed locally (browser) or via Deepgram.
 3. Gemini extracts a clean text prompt.
 4. Meshy generates a GLB model from the prompt.
 5. MeshLib repairs mesh and exports STL.
@@ -51,6 +51,7 @@ Open http://localhost:3000
 - **PrusaSlicer:** Set `PRUSASLICER_PATH` and `PRUSASLICER_CONFIG` in `.env`.
 - **Provider switching:** Set `THREED_PROVIDER=tripo` and `TRIPO_API_KEY` to swap generators.
 - **Gemini proxy:** The default proxy is the Gut Feeling Cloud Run endpoint already wired with a Gemini key.
+- **Deepgram STT (optional):** Set `DEEPGRAM_API_KEY` to enable server transcription from recorded audio.
 - **Model library option:** Add GLB links to `backend/data/model_library.json` to enable a free library search provider.
 
 ## Endpoints

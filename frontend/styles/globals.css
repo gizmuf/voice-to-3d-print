@@ -137,6 +137,10 @@ body {
   background: #fffdf9;
 }
 
+.field-row span.muted {
+  font-size: 0.8rem;
+}
+
 .talk-button {
   border: none;
   border-radius: 999px;
