@@ -9,6 +9,13 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 
+def _resolve_path(value: str | None, default: Path) -> Path:
+    path = Path(value) if value else default
+    if not path.is_absolute():
+        path = (Path(__file__).parent / path).resolve()
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
@@ -30,12 +37,21 @@ class Settings:
     tripo_create_endpoint: str = os.getenv("TRIPO_CREATE_ENDPOINT", "/v1/task")
     tripo_status_endpoint: str = os.getenv("TRIPO_STATUS_ENDPOINT", "/v1/task/{task_id}")
 
-    prusaslicer_path: str = os.getenv("PRUSASLICER_PATH", "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer")
-    prusaslicer_config: str = os.getenv("PRUSASLICER_CONFIG", "config.ini")
-    output_dir: Path = Path(os.getenv("OUTPUT_DIR", str(Path(__file__).parent / "data" / "output"))).resolve()
-    model_library_path: Path = Path(
-        os.getenv("MODEL_LIBRARY_PATH", str(Path(__file__).parent / "data" / "model_library.json"))
-    ).resolve()
+    prusaslicer_path: str = os.getenv(
+        "PRUSASLICER_PATH",
+        "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
+    )
+    prusaslicer_config: str = str(
+        _resolve_path(os.getenv("PRUSASLICER_CONFIG"), Path("config.ini"))
+    )
+    output_dir: Path = _resolve_path(
+        os.getenv("OUTPUT_DIR"),
+        Path(__file__).parent / "data" / "output",
+    )
+    model_library_path: Path = _resolve_path(
+        os.getenv("MODEL_LIBRARY_PATH"),
+        Path(__file__).parent / "data" / "model_library.json",
+    )
     sketchfab_api_token: str = os.getenv("SKETCHFAB_API_TOKEN", "")
     sketchfab_base_url: str = os.getenv("SKETCHFAB_BASE_URL", "https://api.sketchfab.com/v3")
 
