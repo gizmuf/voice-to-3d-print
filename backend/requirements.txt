@@ -5,3 +5,5 @@ meshlib
 httpx
 pydantic
 python-dotenv
+trimesh
+numpy

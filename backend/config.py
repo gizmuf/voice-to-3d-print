@@ -31,11 +31,12 @@ class Settings:
     meshy_api_key: str = os.getenv("MESHY_API_KEY", "")
     tripo_api_key: str = os.getenv("TRIPO_API_KEY", "")
     meshy_base_url: str = os.getenv("MESHY_BASE_URL", "https://api.meshy.ai")
-    tripo_base_url: str = os.getenv("TRIPO_BASE_URL", "https://api.tripo.ai")
-    meshy_create_endpoint: str = os.getenv("MESHY_CREATE_ENDPOINT", "/v1/text-to-3d")
-    meshy_status_endpoint: str = os.getenv("MESHY_STATUS_ENDPOINT", "/v1/text-to-3d/{task_id}")
-    tripo_create_endpoint: str = os.getenv("TRIPO_CREATE_ENDPOINT", "/v1/task")
-    tripo_status_endpoint: str = os.getenv("TRIPO_STATUS_ENDPOINT", "/v1/task/{task_id}")
+    tripo_base_url: str = os.getenv("TRIPO_BASE_URL", "https://api.tripo3d.ai")
+    meshy_create_endpoint: str = os.getenv("MESHY_CREATE_ENDPOINT", "/openapi/v2/text-to-3d")
+    meshy_status_endpoint: str = os.getenv("MESHY_STATUS_ENDPOINT", "/openapi/v2/text-to-3d/{task_id}")
+    tripo_create_endpoint: str = os.getenv("TRIPO_CREATE_ENDPOINT", "/v2/openapi/task")
+    tripo_status_endpoint: str = os.getenv("TRIPO_STATUS_ENDPOINT", "/v2/openapi/task/{task_id}")
+    tripo_upload_endpoint: str = os.getenv("TRIPO_UPLOAD_ENDPOINT", "/v2/openapi/upload/sts")
 
     prusaslicer_path: str = os.getenv(
         "PRUSASLICER_PATH",

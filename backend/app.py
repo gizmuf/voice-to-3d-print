@@ -11,7 +11,7 @@ from config import settings
 from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt
 from services.generation import GenerationResult, generate_model
-from services.library import search_library
+from services.library import resolve_library_item, search_library
 from slicer_service import ProcessResult, process_model
 
 app = FastAPI(title="Voice-to-3D-Print Backend")
@@ -48,7 +48,7 @@ class ProcessResponse(BaseModel):
     job_id: str
     glb_url: str
     stl_url: str
-    gcode_url: str
+    gcode_url: str | None
 
 
 class IntentRequest(BaseModel):
@@ -65,7 +65,10 @@ class STTResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True}
+    return {
+        "ok": True,
+        "sketchfab_enabled": bool(settings.sketchfab_api_token),
+    }
 
 
 @app.post("/generate", response_model=GenerateResponse)
@@ -94,7 +97,11 @@ def process(request: ProcessRequest) -> ProcessResponse:
         job_id=result.job_id,
         glb_url=f"{job_prefix}/{result.glb_path.name}",
         stl_url=f"{job_prefix}/{result.stl_path.name}",
-        gcode_url=f"{job_prefix}/{result.gcode_path.name}",
+        gcode_url=(
+            f"{job_prefix}/{result.gcode_path.name}"
+            if result.gcode_path is not None
+            else None
+        ),
     )
 
 
@@ -120,3 +127,14 @@ async def stt(audio: UploadFile = File(...)) -> STTResponse:
 @app.get("/library/search")
 async def library_search(query: str = "", provider: str = "local") -> dict:
     return {"items": await search_library(query, provider)}
+
+
+@app.get("/library/resolve")
+async def library_resolve(uid: str, provider: str = "local") -> dict:
+    try:
+        glb_url = await resolve_library_item(uid, provider)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not glb_url:
+        raise HTTPException(status_code=404, detail="No downloadable GLB found.")
+    return {"glb_url": glb_url}

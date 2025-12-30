@@ -12,6 +12,8 @@ node_modules/
 
 # Output artifacts
 backend/data/output/
+backend/logs/
+frontend/logs/
 
 # Local secrets
 Keys/

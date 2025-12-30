@@ -1,5 +1,6 @@
 "use client";
 
+import type { FormEvent, MouseEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 const defaultBackendUrl = "http://localhost:8000";
@@ -19,7 +20,7 @@ type LibraryItem = {
   id: string;
   title: string;
   tags?: string[];
-  glb_url: string;
+  glb_url?: string;
   source?: string;
   license?: string;
 };
@@ -30,11 +31,14 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const [intent, setIntent] = useState<string | null>(null);
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [interim, setInterim] = useState<string | null>(null);
-  const [provider, setProvider] = useState("meshy");
+  const [provider, setProvider] = useState("parametric");
   const [sttProvider, setSttProvider] = useState("browser");
   const [librarySource, setLibrarySource] = useState("local");
   const [libraryResults, setLibraryResults] = useState<LibraryItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [manualText, setManualText] = useState("");
+  const [speechSupport, setSpeechSupport] = useState(false);
+  const [recordingSupport, setRecordingSupport] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -42,14 +46,18 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || defaultBackendUrl;
 
-  const supportsSpeech = typeof window !== "undefined" &&
-    ((window as Window).SpeechRecognition || (window as Window).webkitSpeechRecognition);
-  const supportsRecording = typeof window !== "undefined" &&
-    typeof MediaRecorder !== "undefined" &&
-    !!navigator.mediaDevices?.getUserMedia;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const supportsSpeech =
+      !!(window as Window).SpeechRecognition || !!(window as Window).webkitSpeechRecognition;
+    const supportsRecording =
+      typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+    setSpeechSupport(supportsSpeech);
+    setRecordingSupport(supportsRecording);
+  }, []);
 
   useEffect(() => {
-    if (!supportsSpeech) return;
+    if (!speechSupport) return;
 
     const SpeechRecognitionCtor =
       (window as Window).SpeechRecognition || (window as Window).webkitSpeechRecognition;
@@ -98,11 +106,21 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     return () => {
       recognition.stop();
     };
-  }, [supportsSpeech]);
+  }, [speechSupport]);
 
   const handleFinalTranscript = async (text: string) => {
     setTranscripts((prev) => [...prev.slice(-5), text]);
     await runPipeline(text);
+  };
+
+  const handleManualSubmit = async (
+    event?: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement>
+  ) => {
+    event?.preventDefault();
+    const trimmed = manualText.trim();
+    if (!trimmed || isProcessing) return;
+    setManualText("");
+    await handleFinalTranscript(trimmed);
   };
 
   const runPipeline = async (text: string) => {
@@ -113,7 +131,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     setLibraryResults([]);
 
     try {
-      const prompt = await fetchIntent(text);
+      const prompt = provider === "parametric" ? text : await fetchIntent(text);
       if (!prompt) throw new Error("No prompt extracted");
 
       setIntent(prompt);
@@ -134,7 +152,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
       onModelUrl(resolveUrl(backendUrl, processed.glb_url));
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
-      setStatus("gcode-ready");
+      setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
     } catch (error) {
       console.error(error);
       setStatus("error");
@@ -183,16 +201,33 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     return (data.items || []) as LibraryItem[];
   };
 
+  const resolveLibraryItem = async (item: LibraryItem): Promise<string | null> => {
+    if (item.glb_url) return item.glb_url;
+    const response = await fetch(
+      `${backendUrl}/library/resolve?uid=${encodeURIComponent(item.id)}&provider=${librarySource}`
+    );
+    if (!response.ok) throw new Error("Library item download failed");
+    const data = await response.json();
+    return data.glb_url ?? null;
+  };
+
   const useLibraryItem = async (item: LibraryItem) => {
     try {
-      setStatus("slicing");
-      const processed = await processModel(item.glb_url);
-      onModelUrl(resolveUrl(backendUrl, processed.glb_url));
+      setStatus("fetching-model");
+      const resolvedUrl = await resolveLibraryItem(item);
+      if (!resolvedUrl) {
+        throw new Error("No downloadable GLB available");
+      }
+      onModelUrl(resolvedUrl);
+      onGcodeUrl(null);
+      setStatus("preview-ready");
+      const processed = await processModel(resolvedUrl);
+      onModelUrl(resolveUrl(backendUrl, processed.glb_url) || resolvedUrl);
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
-      setStatus("gcode-ready");
+      setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
     } catch (error) {
       console.error(error);
-      setStatus("error");
+      setStatus("preview-ready");
     }
   };
 
@@ -206,7 +241,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       return;
     }
 
-    if (!supportsRecording) {
+    if (!recordingSupport) {
       setStatus("error");
       return;
     }
@@ -298,14 +333,14 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
             onChange={(event) => setSttProvider(event.target.value)}
           >
             <option value="browser">Browser STT (free)</option>
-            <option value="deepgram" disabled={!supportsRecording}>
+            <option value="deepgram" disabled={!recordingSupport}>
               Deepgram STT (server)
             </option>
           </select>
-          {!supportsSpeech && sttProvider === "browser" ? (
+          {!speechSupport && sttProvider === "browser" ? (
             <span className="muted">Browser STT not supported here.</span>
           ) : null}
-          {!supportsRecording && sttProvider === "deepgram" ? (
+          {!recordingSupport && sttProvider === "deepgram" ? (
             <span className="muted">Recording not supported in this browser.</span>
           ) : null}
         </div>
@@ -317,6 +352,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
             value={provider}
             onChange={(event) => setProvider(event.target.value)}
           >
+            <option value="parametric">Parametric (free)</option>
             <option value="meshy">Meshy (paid)</option>
             <option value="tripo">Tripo (paid)</option>
             <option value="library">Model library</option>
@@ -337,6 +373,36 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
           </div>
         ) : null}
 
+        <form className="field-row" onSubmit={handleManualSubmit}>
+          <label htmlFor="manual-text">Text prompt (optional)</label>
+          <textarea
+            id="manual-text"
+            rows={3}
+            placeholder="Describe the object you want to print..."
+            value={manualText}
+            onChange={(event) => setManualText(event.target.value)}
+            disabled={isProcessing}
+          />
+          {provider === "parametric" ? (
+            <div className="parametric-hint">
+              Examples: “box 80x40x20 mm, hollow, wall 3 mm”, “cylinder dia 40
+              mm height 60 mm, hole 10 mm”, “sphere 50 mm, rounded 2 mm”, “phone
+              stand angle 65 deg”.
+            </div>
+          ) : null}
+          <div className="text-input-actions">
+            <button
+              type="submit"
+              className="text-submit"
+              disabled={!manualText.trim() || isProcessing}
+              onClick={handleManualSubmit}
+            >
+              Generate from text
+            </button>
+            <span className="muted">Uses the same pipeline as voice.</span>
+          </div>
+        </form>
+
         <button
           className={`talk-button ${isListening ? "active" : ""}`}
           onPointerDown={startListening}
@@ -344,16 +410,16 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
           onPointerLeave={stopListening}
           aria-pressed={isListening}
           disabled={
-            sttProvider === "browser" ? !supportsSpeech : !supportsRecording
+            sttProvider === "browser" ? !speechSupport : !recordingSupport
           }
         >
           {sttProvider === "browser"
-            ? supportsSpeech
+            ? speechSupport
               ? isListening
                 ? "Listening..."
                 : "Push to Talk"
               : "Speech not supported"
-            : supportsRecording
+            : recordingSupport
               ? isListening
                 ? "Recording..."
                 : "Push to Record"
@@ -375,11 +441,11 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
         {provider === "library" ? (
           <div className="library-card">
-            <div className="status-label">Library results</div>
-            {libraryResults.length === 0 ? (
-              <p className="muted">No matches yet. Speak a prompt to search.</p>
-            ) : (
-              <div className="library-list">
+          <div className="status-label">Library results</div>
+          {libraryResults.length === 0 ? (
+            <p className="muted">No matches yet. Speak or type a prompt to search.</p>
+          ) : (
+            <div className="library-list">
                 {libraryResults.map((item) => (
                   <button
                     key={item.id}
@@ -402,7 +468,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
           <div className="status-label">Live Transcript</div>
           <div className="transcript-list">
             {transcripts.length === 0 ? (
-              <div className="muted">Waiting for speech...</div>
+              <div className="muted">Waiting for input...</div>
             ) : (
               transcripts.map((line, index) => (
                 <p key={`${line}-${index}`}>{line}</p>

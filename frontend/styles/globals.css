@@ -137,8 +137,53 @@ body {
   background: #fffdf9;
 }
 
+.field-row textarea {
+  border-radius: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  padding: 12px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  background: #fffdf9;
+  resize: vertical;
+}
+
 .field-row span.muted {
   font-size: 0.8rem;
+}
+
+.text-input-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.parametric-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(0, 0, 0, 0.08);
+  line-height: 1.4;
+}
+
+.text-submit {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  background: linear-gradient(135deg, #ffd27b, #f4a66a);
+  color: #1a120d;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(244, 166, 106, 0.35);
+}
+
+.text-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .talk-button {

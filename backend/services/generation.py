@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from config import settings
+from services.parametric import generate_parametric_model
 
 
 @dataclass
@@ -24,6 +25,12 @@ def _extract_glb_url(payload: Dict[str, Any]) -> Optional[str]:
         value = payload.get(key)
         if isinstance(value, str) and value:
             return value
+    output = payload.get("output")
+    if isinstance(output, dict):
+        for key in ("pbr_model", "model", "base_model", "glb", "glb_url", "url"):
+            value = output.get(key)
+            if isinstance(value, str) and value:
+                return value
     model_urls = payload.get("model_urls") or payload.get("modelUrls")
     if isinstance(model_urls, dict):
         for key in ("glb", "glb_url", "model", "url"):
@@ -39,7 +46,24 @@ async def generate_model(prompt: str, *, provider: Optional[str] = None) -> Gene
         return await _generate_meshy(prompt)
     if provider == "tripo":
         return await _generate_tripo(prompt)
+    if provider == "parametric":
+        return _generate_parametric(prompt)
     raise ValueError(f"Unsupported provider: {provider}")
+
+
+def _generate_parametric(prompt: str) -> GenerationResult:
+    result = generate_parametric_model(prompt)
+    return GenerationResult(
+        provider="parametric",
+        task_id=result.job_id,
+        status="completed",
+        glb_url=f"/artifacts/{result.job_id}/{result.glb_path.name}",
+        raw={
+            "shape": result.shape,
+            "dimensions_mm": result.dimensions_mm,
+            "notes": result.notes,
+        },
+    )
 
 
 async def _generate_meshy(prompt: str) -> GenerationResult:
@@ -79,7 +103,7 @@ async def _generate_tripo(prompt: str) -> GenerationResult:
     url = f"{settings.tripo_base_url}{settings.tripo_create_endpoint}"
     headers = {"Authorization": f"Bearer {settings.tripo_api_key}"}
     payload = {
-        "type": "text-to-3d",
+        "type": "text_to_model",
         "prompt": prompt,
     }
 
@@ -128,7 +152,7 @@ async def _poll_generation(
                     raw=data,
                 )
 
-            if status in {"failed", "error", "canceled"}:
+            if status in {"failed", "error", "canceled", "cancelled", "banned", "expired", "unknown"}:
                 raise RuntimeError(f"{provider} generation failed: {data}")
 
             if time.monotonic() - start > timeout_s:
