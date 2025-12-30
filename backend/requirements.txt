@@ -1,4 +1,4 @@
-pipecat-ai[webrtc,deepgram,openai]
+pipecat-ai[webrtc,deepgram]
 fastapi
 uvicorn[standard]
 python-multipart

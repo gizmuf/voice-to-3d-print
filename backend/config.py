@@ -8,8 +8,11 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    gemini_proxy_url: str = os.getenv(
+        "GEMINI_PROXY_URL",
+        "https://gut-feeling-api-242245666842.us-central1.run.app/generate",
+    )
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     threed_provider: str = os.getenv("THREED_PROVIDER", "meshy")
     meshy_api_key: str = os.getenv("MESHY_API_KEY", "")

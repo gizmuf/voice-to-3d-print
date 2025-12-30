@@ -4,7 +4,7 @@ A voice-driven pipeline that captures speech, extracts 3D design intent, generat
 
 ## Stack
 - **Frontend:** Next.js + React + Pipecat JS client + `<model-viewer>`
-- **Voice Orchestration:** Pipecat (WebRTC, Deepgram STT, OpenAI GPT-4o-mini intent extraction)
+- **Voice Orchestration:** Pipecat (WebRTC, Deepgram STT, Gemini intent extraction via proxy)
 - **3D Generation:** Meshy (default) with Tripo as an optional provider
 - **Manufacturing:** MeshLib repair + PrusaSlicer CLI
 
@@ -52,9 +52,10 @@ npm run dev
 Open http://localhost:3000
 
 ## Notes
-- **Cheapest defaults:** `THREED_PROVIDER=meshy` and `OPENAI_MODEL=gpt-4o-mini`.
+- **Cheapest defaults:** `THREED_PROVIDER=meshy` and Gemini via the existing proxy (`GEMINI_PROXY_URL`).
 - **PrusaSlicer:** Set `PRUSASLICER_PATH` and `PRUSASLICER_CONFIG` in `.env`.
 - **Provider switching:** Set `THREED_PROVIDER=tripo` and `TRIPO_API_KEY` to swap generators.
+- **Gemini proxy:** The default proxy is the Gut Feeling Cloud Run endpoint already wired with a Gemini key.
 - **Pipecat JS SDK:** The frontend assumes `@pipecat-ai/client`. Adjust `frontend/types/pipecat.d.ts` and the client usage if your SDK package name differs.
 
 ## Endpoints
