@@ -4,3 +4,4 @@ python-multipart
 meshlib
 httpx
 pydantic
+python-dotenv
