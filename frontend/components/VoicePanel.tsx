@@ -32,6 +32,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const [interim, setInterim] = useState<string | null>(null);
   const [provider, setProvider] = useState("meshy");
   const [sttProvider, setSttProvider] = useState("browser");
+  const [librarySource, setLibrarySource] = useState("local");
   const [libraryResults, setLibraryResults] = useState<LibraryItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -119,7 +120,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
       if (provider === "library") {
         setStatus("library-search");
-        const results = await searchLibrary(prompt);
+        const results = await searchLibrary(prompt, librarySource);
         setLibraryResults(results);
         setIsProcessing(false);
         return;
@@ -173,9 +174,9 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     return response.json();
   };
 
-  const searchLibrary = async (query: string) => {
+  const searchLibrary = async (query: string, source: string) => {
     const response = await fetch(
-      `${backendUrl}/library/search?query=${encodeURIComponent(query)}`
+      `${backendUrl}/library/search?query=${encodeURIComponent(query)}&provider=${source}`
     );
     if (!response.ok) throw new Error("Library search failed");
     const data = await response.json();
@@ -318,9 +319,23 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
           >
             <option value="meshy">Meshy (paid)</option>
             <option value="tripo">Tripo (paid)</option>
-            <option value="library">Model library (free)</option>
+            <option value="library">Model library</option>
           </select>
         </div>
+
+        {provider === "library" ? (
+          <div className="field-row">
+            <label htmlFor="library">Library source</label>
+            <select
+              id="library"
+              value={librarySource}
+              onChange={(event) => setLibrarySource(event.target.value)}
+            >
+              <option value="local">Local catalog</option>
+              <option value="sketchfab">Sketchfab (token)</option>
+            </select>
+          </div>
+        ) : null}
 
         <button
           className={`talk-button ${isListening ? "active" : ""}`}

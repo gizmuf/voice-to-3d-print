@@ -52,7 +52,8 @@ Open http://localhost:3000
 - **Provider switching:** Set `THREED_PROVIDER=tripo` and `TRIPO_API_KEY` to swap generators.
 - **Gemini proxy:** The default proxy is the Gut Feeling Cloud Run endpoint already wired with a Gemini key.
 - **Deepgram STT (optional):** Set `DEEPGRAM_API_KEY` to enable server transcription from recorded audio.
-- **Model library option:** Add GLB links to `backend/data/model_library.json` to enable a free library search provider.
+- **Model library option:** Add GLB links to `backend/data/model_library.json` for local catalog search.
+- **Sketchfab search (optional):** Set `SKETCHFAB_API_TOKEN` to search downloadable models and retrieve GLB links.
 
 ## Endpoints
 - `POST /generate` → calls Meshy/Tripo and returns `glb_url`

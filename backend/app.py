@@ -118,5 +118,5 @@ async def stt(audio: UploadFile = File(...)) -> STTResponse:
 
 
 @app.get("/library/search")
-def library_search(query: str = "") -> dict:
-    return {"items": search_library(query)}
+async def library_search(query: str = "", provider: str = "local") -> dict:
+    return {"items": await search_library(query, provider)}

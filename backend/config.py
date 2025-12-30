@@ -32,6 +32,8 @@ class Settings:
     model_library_path: Path = Path(
         os.getenv("MODEL_LIBRARY_PATH", str(Path(__file__).parent / "data" / "model_library.json"))
     ).resolve()
+    sketchfab_api_token: str = os.getenv("SKETCHFAB_API_TOKEN", "")
+    sketchfab_base_url: str = os.getenv("SKETCHFAB_BASE_URL", "https://api.sketchfab.com/v3")
 
     mesh_merge_tolerance: float = float(os.getenv("MESH_MERGE_TOLERANCE", "0.0005"))
 
