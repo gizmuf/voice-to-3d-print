@@ -1,0 +1,10 @@
+[
+  {
+    "id": "sample-cube",
+    "title": "Sample Calibration Cube",
+    "tags": ["calibration", "cube", "sample"],
+    "glb_url": "https://example.com/models/calibration-cube.glb",
+    "source": "example.com",
+    "license": "Replace with a real model URL"
+  }
+]

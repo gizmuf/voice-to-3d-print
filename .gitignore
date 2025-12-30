@@ -13,5 +13,8 @@ node_modules/
 # Output artifacts
 backend/data/output/
 
+# Local secrets
+Keys/
+
 # OS
 .DS_Store

@@ -122,6 +122,21 @@ body {
   gap: 18px;
 }
 
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.field-row select {
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  background: #fffdf9;
+}
+
 .talk-button {
   border: none;
   border-radius: 999px;
@@ -142,7 +157,8 @@ body {
 }
 
 .status-card,
-.transcript-card {
+.transcript-card,
+.library-card {
   background: rgba(255, 255, 255, 0.75);
   border-radius: 16px;
   padding: 16px;
@@ -177,6 +193,38 @@ body {
   gap: 8px;
   margin-top: 12px;
   font-size: 0.95rem;
+}
+
+.library-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.library-item {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #fffdf8;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+}
+
+.library-item strong {
+  display: block;
+  font-weight: 600;
+}
+
+.chip {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  background: rgba(43, 140, 122, 0.15);
+  color: #1f5c50;
+  padding: 6px 10px;
+  border-radius: 999px;
 }
 
 .model-panel {

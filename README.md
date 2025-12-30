@@ -3,15 +3,15 @@
 A voice-driven pipeline that captures speech, extracts 3D design intent, generates a GLB model from a cloud API, repairs geometry with MeshLib, and slices to G-code with PrusaSlicer. The default providers favor lower-cost options for prototyping.
 
 ## Stack
-- **Frontend:** Next.js + React + Pipecat JS client + `<model-viewer>`
-- **Voice Orchestration:** Pipecat (WebRTC, Deepgram STT, Gemini intent extraction via proxy)
+- **Frontend:** Next.js + React + browser SpeechRecognition + `<model-viewer>`
+- **Voice Orchestration:** Browser STT + Gemini intent extraction via proxy
 - **3D Generation:** Meshy (default) with Tripo as an optional provider
 - **Manufacturing:** MeshLib repair + PrusaSlicer CLI
 
 ## Architecture Flow
-1. User speaks in browser (Pipecat WebRTC).
-2. Deepgram transcribes speech in real time.
-3. GPT-4o-mini extracts a clean text prompt.
+1. User speaks in browser (Web Speech API).
+2. Browser transcribes speech locally.
+3. Gemini extracts a clean text prompt.
 4. Meshy generates a GLB model from the prompt.
 5. MeshLib repairs mesh and exports STL.
 6. PrusaSlicer produces G-code for download.
@@ -37,11 +37,6 @@ Run FastAPI:
 uvicorn app:app --reload --port 8000
 ```
 
-Run Pipecat bot (WebRTC transport):
-```bash
-python bot.py -t webrtc --port 7860
-```
-
 ### 2) Frontend
 ```bash
 cd ../frontend
@@ -56,7 +51,7 @@ Open http://localhost:3000
 - **PrusaSlicer:** Set `PRUSASLICER_PATH` and `PRUSASLICER_CONFIG` in `.env`.
 - **Provider switching:** Set `THREED_PROVIDER=tripo` and `TRIPO_API_KEY` to swap generators.
 - **Gemini proxy:** The default proxy is the Gut Feeling Cloud Run endpoint already wired with a Gemini key.
-- **Pipecat JS SDK:** The frontend assumes `@pipecat-ai/client`. Adjust `frontend/types/pipecat.d.ts` and the client usage if your SDK package name differs.
+- **Model library option:** Add GLB links to `backend/data/model_library.json` to enable a free library search provider.
 
 ## Endpoints
 - `POST /generate` → calls Meshy/Tripo and returns `glb_url`
@@ -67,11 +62,12 @@ Open http://localhost:3000
 ```
 backend/
   app.py
-  bot.py
   config.py
   requirements.txt
   services/
     generation.py
+    gemini_intent.py
+    library.py
   slicer_service.py
 frontend/
   app/

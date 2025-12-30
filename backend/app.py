@@ -8,7 +8,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config import settings
+from services.gemini_intent import extract_prompt
 from services.generation import GenerationResult, generate_model
+from services.library import search_library
 from slicer_service import ProcessResult, process_model
 
 app = FastAPI(title="Voice-to-3D-Print Backend")
@@ -48,6 +50,14 @@ class ProcessResponse(BaseModel):
     gcode_url: str
 
 
+class IntentRequest(BaseModel):
+    transcript: str
+
+
+class IntentResponse(BaseModel):
+    prompt: str
+
+
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -81,3 +91,16 @@ def process(request: ProcessRequest) -> ProcessResponse:
         stl_url=f"{job_prefix}/{result.stl_path.name}",
         gcode_url=f"{job_prefix}/{result.gcode_path.name}",
     )
+
+
+@app.post("/intent", response_model=IntentResponse)
+async def intent(request: IntentRequest) -> IntentResponse:
+    prompt = await extract_prompt(request.transcript)
+    if not prompt:
+        raise HTTPException(status_code=500, detail="Failed to extract prompt.")
+    return IntentResponse(prompt=prompt)
+
+
+@app.get("/library/search")
+def library_search(query: str = "") -> dict:
+    return {"items": search_library(query)}

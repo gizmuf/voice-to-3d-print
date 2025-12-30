@@ -27,6 +27,9 @@ class Settings:
     prusaslicer_path: str = os.getenv("PRUSASLICER_PATH", "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer")
     prusaslicer_config: str = os.getenv("PRUSASLICER_CONFIG", "config.ini")
     output_dir: Path = Path(os.getenv("OUTPUT_DIR", str(Path(__file__).parent / "data" / "output"))).resolve()
+    model_library_path: Path = Path(
+        os.getenv("MODEL_LIBRARY_PATH", str(Path(__file__).parent / "data" / "model_library.json"))
+    ).resolve()
 
     mesh_merge_tolerance: float = float(os.getenv("MESH_MERGE_TOLERANCE", "0.0005"))
 
