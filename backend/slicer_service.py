@@ -103,8 +103,8 @@ def _resolve_local_artifact(glb_url: str) -> Path | None:
     return None
 
 
-def process_model(glb_url: str) -> ProcessResult:
-    job_id = uuid.uuid4().hex
+def process_model(glb_url: str, job_id: str | None = None) -> ProcessResult:
+    job_id = job_id or uuid.uuid4().hex
     job_dir = settings.output_dir / job_id
     _ensure_output_dir(job_dir)
 

@@ -1,0 +1,7 @@
+# Ignore virtualenv and local artifacts
+.venv/
+__pycache__/
+data/output/
+logs/
+.env
+.env.*

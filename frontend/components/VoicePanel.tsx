@@ -48,6 +48,13 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || defaultBackendUrl;
 
+  const createJobId = () => {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+      return crypto.randomUUID();
+    }
+    return `job-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  };
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const supportsSpeech =
@@ -90,7 +97,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
       if (finalTranscript.trim()) {
         setInterim(null);
-        handleFinalTranscript(finalTranscript.trim());
+        handleFinalTranscript(finalTranscript.trim(), "voice");
       }
     };
 
@@ -118,9 +125,9 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     setImageLabel(imageFile.name);
   }, [imageFile]);
 
-  const handleFinalTranscript = async (text: string) => {
+  const handleFinalTranscript = async (text: string, source: "voice" | "text") => {
     setTranscripts((prev) => [...prev.slice(-5), text]);
-    await runPipeline(text);
+    await runPipeline(text, source);
   };
 
   const handleManualSubmit = async (
@@ -130,7 +137,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     const trimmed = manualText.trim();
     if (!trimmed || isProcessing) return;
     setManualText("");
-    await handleFinalTranscript(trimmed);
+    await handleFinalTranscript(trimmed, "text");
   };
 
   const handleImageSelect = (event: ChangeEvent<HTMLInputElement>) => {
@@ -138,9 +145,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     setImageFile(file);
   };
 
-  const runPipeline = async (text: string) => {
+  const runPipeline = async (text: string, source: "voice" | "text") => {
     if (isProcessing) return;
     setIsProcessing(true);
+    const jobId = createJobId();
     setStatus("extracting");
     setIntent(null);
     setLibraryResults([]);
@@ -151,7 +159,8 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
         setIntent("Llama-Mesh local setup not installed.");
         return;
       }
-      const prompt = provider === "parametric" ? text : await fetchIntent(text);
+      const prompt =
+        provider === "parametric" ? text : await fetchIntent(text, jobId, source);
       if (!prompt) throw new Error("No prompt extracted");
 
       setIntent(prompt);
@@ -165,10 +174,14 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       }
 
       setStatus("generating");
-      const generation = await generateModel(prompt, provider);
+      const generation = await generateModel(prompt, provider, jobId, source, text);
 
       setStatus("slicing");
-      const processed = await processModel(generation.glb_url);
+      const processed = await processModel(generation.glb_url, jobId, {
+        provider,
+        input_type: source,
+        prompt
+      });
 
       onModelUrl(resolveUrl(backendUrl, processed.glb_url));
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
@@ -181,32 +194,63 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     }
   };
 
-  const fetchIntent = async (transcript: string): Promise<string | null> => {
+  const fetchIntent = async (
+    transcript: string,
+    jobId: string,
+    inputType: "voice" | "text"
+  ): Promise<string | null> => {
     const response = await fetch(`${backendUrl}/intent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript })
+      body: JSON.stringify({ transcript, job_id: jobId, input_type: inputType })
     });
     if (!response.ok) throw new Error("Intent extraction failed");
     const data = await response.json();
     return data.prompt ?? null;
   };
 
-  const generateModel = async (prompt: string, providerName: string) => {
+  const generateModel = async (
+    prompt: string,
+    providerName: string,
+    jobId: string,
+    inputType: "voice" | "text",
+    promptRaw: string
+  ) => {
     const response = await fetch(`${backendUrl}/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, provider: providerName })
+      body: JSON.stringify({
+        prompt,
+        provider: providerName,
+        job_id: jobId,
+        input_type: inputType,
+        prompt_raw: promptRaw
+      })
     });
     if (!response.ok) throw new Error("Generation failed");
     return response.json();
   };
 
-  const processModel = async (glbUrl: string) => {
+  const processModel = async (
+    glbUrl: string,
+    jobId?: string | null,
+    metadata?: {
+      provider?: string;
+      input_type?: string;
+      prompt?: string;
+      library_id?: string;
+      library_source?: string;
+      library_title?: string;
+    }
+  ) => {
     const response = await fetch(`${backendUrl}/process-model`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ glb_url: glbUrl })
+      body: JSON.stringify({
+        glb_url: glbUrl,
+        job_id: jobId,
+        ...metadata
+      })
     });
     if (!response.ok) throw new Error("Processing failed");
     return response.json();
@@ -215,12 +259,15 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const generateFromImage = async () => {
     if (!imageFile || isProcessing) return;
     setIsProcessing(true);
+    const jobId = createJobId();
     setStatus("uploading-image");
     setIntent(`Image to model (${provider})`);
     setLibraryResults([]);
     try {
       const formData = new FormData();
       formData.append("image", imageFile);
+      formData.append("job_id", jobId);
+      formData.append("input_type", "image");
       const response = await fetch(
         `${backendUrl}/generate-image?provider=${encodeURIComponent(provider)}`,
         {
@@ -231,7 +278,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       if (!response.ok) throw new Error("Image generation failed");
       const generation = await response.json();
       setStatus("slicing");
-      const processed = await processModel(generation.glb_url);
+      const processed = await processModel(generation.glb_url, jobId, {
+        provider,
+        input_type: "image"
+      });
       onModelUrl(resolveUrl(backendUrl, processed.glb_url));
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
       setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
@@ -264,6 +314,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
   const useLibraryItem = async (item: LibraryItem) => {
     try {
+      const jobId = createJobId();
       setStatus("fetching-model");
       const resolvedUrl = await resolveLibraryItem(item);
       if (!resolvedUrl) {
@@ -272,7 +323,14 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       onModelUrl(resolvedUrl);
       onGcodeUrl(null);
       setStatus("preview-ready");
-      const processed = await processModel(resolvedUrl);
+      const processed = await processModel(resolvedUrl, jobId, {
+        provider: "library",
+        input_type: "library",
+        prompt: intent || undefined,
+        library_id: item.id,
+        library_source: librarySource,
+        library_title: item.title
+      });
       onModelUrl(resolveUrl(backendUrl, processed.glb_url) || resolvedUrl);
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
       setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
@@ -353,7 +411,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       if (!response.ok) throw new Error("STT failed");
       const data = await response.json();
       if (data.transcript) {
-        await handleFinalTranscript(data.transcript);
+        await handleFinalTranscript(data.transcript, "voice");
       } else {
         setStatus("error");
       }

@@ -2,6 +2,8 @@
 
 import { useEffect } from "react";
 
+const ModelViewerElement = "model-viewer" as any;
+
 export default function ModelViewer({
   src,
   label
@@ -26,7 +28,7 @@ export default function ModelViewer({
 
   return (
     <div className="model-viewer-wrap">
-      <model-viewer
+      <ModelViewerElement
         src={src}
         alt={label || "Generated 3D model"}
         ar

@@ -1,0 +1,6 @@
+# Ignore build and dependency artifacts
+node_modules/
+.next/
+logs/
+.env
+.env.*

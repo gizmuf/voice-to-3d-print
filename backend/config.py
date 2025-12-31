@@ -26,6 +26,9 @@ class Settings:
         "https://gut-feeling-api-242245666842.us-central1.run.app/generate",
     )
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "")
+    firebase_storage_bucket: str = os.getenv("FIREBASE_STORAGE_BUCKET", "")
+    storage_public_base_url: str = os.getenv("STORAGE_PUBLIC_BASE_URL", "")
 
     threed_provider: str = os.getenv("THREED_PROVIDER", "meshy")
     meshy_api_key: str = os.getenv("MESHY_API_KEY", "")
