@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import ModelViewer from "../components/ModelViewer";
 import VoicePanel from "../components/VoicePanel";
 
@@ -10,6 +11,12 @@ export default function Home() {
 
   return (
     <main className="page">
+      <nav className="topbar">
+        <div className="brand">PulsAI 3D</div>
+        <div className="topbar-links">
+          <Link className="topbar-link" href="/projects">Projects</Link>
+        </div>
+      </nav>
       <header className="hero">
         <div>
           <p className="eyebrow">Voice → Model → Print</p>

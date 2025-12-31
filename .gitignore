@@ -1,5 +1,7 @@
 # Env
 .env
+backend/cloudrun.env.yaml
+frontend/cloudrun.env.yaml
 
 # Python
 __pycache__/

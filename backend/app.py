@@ -109,6 +109,11 @@ class ProjectResponse(BaseModel):
     project: dict
 
 
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = None
+    current_job_id: str | None = None
+
+
 class ProjectsResponse(BaseModel):
     items: list[dict]
 
@@ -386,6 +391,23 @@ def project_detail(project_id: str) -> ProjectDetailResponse:
     project = get_project(project_id) or {"project_id": project_id}
     jobs = list_jobs_for_project(project_id)
     return ProjectDetailResponse(project=project, jobs=jobs)
+
+
+@app.patch("/projects/{project_id}", response_model=ProjectResponse)
+def update_project_endpoint(
+    project_id: str,
+    request: ProjectUpdateRequest,
+) -> ProjectResponse:
+    payload = _compact_payload(
+        {
+            "name": request.name,
+            "current_job_id": request.current_job_id,
+        }
+    )
+    if payload:
+        ensure_project(project_id, payload)
+    project = get_project(project_id) or {"project_id": project_id}
+    return ProjectResponse(project=project)
 
 
 @app.post("/stt", response_model=STTResponse)

@@ -32,6 +32,36 @@ body {
   gap: 48px;
 }
 
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  font-family: var(--font-display), serif;
+  font-size: 1.3rem;
+  letter-spacing: 0.02em;
+}
+
+.topbar-links {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar-link {
+  text-decoration: none;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  box-shadow: 0 12px 24px rgba(20, 16, 13, 0.1);
+}
+
 .hero {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -84,6 +114,14 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 32px;
+}
+
+.hero-compact {
+  padding-top: 12px;
+}
+
+.projects-grid {
+  grid-template-columns: minmax(280px, 1.1fr) minmax(320px, 1.3fr);
 }
 
 .panel {
@@ -162,6 +200,12 @@ body {
 .text-input-actions {
   display: flex;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.project-actions {
+  display: flex;
   gap: 12px;
   flex-wrap: wrap;
 }
@@ -274,6 +318,70 @@ body {
   font-weight: 600;
 }
 
+.project-list {
+  display: grid;
+  gap: 12px;
+}
+
+.project-item {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: #fffdf8;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.project-item.active {
+  border-color: rgba(43, 140, 122, 0.4);
+  box-shadow: 0 12px 20px rgba(43, 140, 122, 0.18);
+}
+
+.project-summary {
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 16px;
+  padding: 16px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  display: grid;
+  gap: 8px;
+}
+
+.job-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.job-item {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: #fffdf8;
+  display: grid;
+  gap: 10px;
+}
+
+.job-main {
+  display: grid;
+  gap: 6px;
+}
+
+.job-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .chip {
   font-size: 0.75rem;
   text-transform: uppercase;
@@ -355,6 +463,10 @@ body {
 
   .hero {
     gap: 24px;
+  }
+
+  .projects-grid {
+    grid-template-columns: 1fr;
   }
 
   .actions {
