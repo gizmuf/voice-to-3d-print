@@ -39,6 +39,8 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const [manualText, setManualText] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageLabel, setImageLabel] = useState<string | null>(null);
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null);
+  const [pendingSource, setPendingSource] = useState<"image" | "text" | null>(null);
   const [speechSupport, setSpeechSupport] = useState(false);
   const [recordingSupport, setRecordingSupport] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -136,8 +138,12 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     event?.preventDefault();
     const trimmed = manualText.trim();
     if (!trimmed || isProcessing) return;
+    const source = pendingSource ?? "text";
+    const jobId = pendingJobId ?? undefined;
+    setPendingJobId(null);
+    setPendingSource(null);
     setManualText("");
-    await handleFinalTranscript(trimmed, "text");
+    await runPipeline(trimmed, source, jobId);
   };
 
   const handleImageSelect = (event: ChangeEvent<HTMLInputElement>) => {
@@ -145,10 +151,14 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     setImageFile(file);
   };
 
-  const runPipeline = async (text: string, source: "voice" | "text") => {
+  const runPipeline = async (
+    text: string,
+    source: "voice" | "text" | "image",
+    jobIdOverride?: string
+  ) => {
     if (isProcessing) return;
     setIsProcessing(true);
-    const jobId = createJobId();
+    const jobId = jobIdOverride ?? createJobId();
     setStatus("extracting");
     setIntent(null);
     setLibraryResults([]);
@@ -159,8 +169,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
         setIntent("Llama-Mesh local setup not installed.");
         return;
       }
-      const prompt =
-        provider === "parametric" ? text : await fetchIntent(text, jobId, source);
+      const shouldExtract = provider !== "parametric" && source !== "image";
+      const prompt = shouldExtract
+        ? await fetchIntent(text, jobId, source as "voice" | "text")
+        : text;
       if (!prompt) throw new Error("No prompt extracted");
 
       setIntent(prompt);
@@ -213,7 +225,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     prompt: string,
     providerName: string,
     jobId: string,
-    inputType: "voice" | "text",
+    inputType: "voice" | "text" | "image",
     promptRaw: string
   ) => {
     const response = await fetch(`${backendUrl}/generate`, {
@@ -287,6 +299,39 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
     } catch (error) {
       console.error(error);
+      setStatus("error");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const generatePromptFromImage = async () => {
+    if (!imageFile || isProcessing) return;
+    setIsProcessing(true);
+    const jobId = createJobId();
+    setPendingJobId(jobId);
+    setPendingSource("image");
+    setStatus("extracting-image");
+    setIntent(null);
+    try {
+      const formData = new FormData();
+      formData.append("image", imageFile);
+      formData.append("job_id", jobId);
+      formData.append("input_type", "image");
+      const response = await fetch(`${backendUrl}/image-intent`, {
+        method: "POST",
+        body: formData
+      });
+      if (!response.ok) throw new Error("Image prompt failed");
+      const data = await response.json();
+      const prompt = data.prompt || "";
+      setManualText(prompt);
+      setIntent(prompt || null);
+      setStatus("image-prompt-ready");
+    } catch (error) {
+      console.error(error);
+      setPendingJobId(null);
+      setPendingSource(null);
       setStatus("error");
     } finally {
       setIsProcessing(false);
@@ -518,8 +563,16 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
               >
                 Generate from image
               </button>
+              <button
+                type="button"
+                className="text-submit"
+                onClick={generatePromptFromImage}
+                disabled={!imageFile || isProcessing}
+              >
+                Generate prompt from image
+              </button>
               <span className="muted">
-                Uses {provider === "meshy" ? "Meshy" : "Tripo"} image-to-3D.
+                Use image-to-3D directly or extract a prompt first.
               </span>
             </div>
           </div>

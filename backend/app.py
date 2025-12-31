@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from config import settings
 from services.deepgram_stt import transcribe_audio
-from services.gemini_intent import extract_prompt
+from services.gemini_intent import extract_prompt, extract_prompt_from_image
 from services.generation import GenerationResult, generate_model, generate_model_from_image
 from services.library import resolve_library_item, search_library
 from slicer_service import ProcessResult, process_model
@@ -75,6 +75,11 @@ class IntentRequest(BaseModel):
 
 
 class IntentResponse(BaseModel):
+    job_id: str
+    prompt: str
+
+
+class ImageIntentResponse(BaseModel):
     job_id: str
     prompt: str
 
@@ -252,6 +257,55 @@ async def intent(request: IntentRequest) -> IntentResponse:
         }),
     )
     return IntentResponse(job_id=job_id, prompt=prompt)
+
+
+@app.post("/image-intent", response_model=ImageIntentResponse)
+async def image_intent(
+    image: UploadFile = File(...),
+    job_id: str | None = Form(None),
+    input_type: str | None = Form(None),
+) -> ImageIntentResponse:
+    job_id = job_id or uuid.uuid4().hex
+    ensure_job(
+        job_id,
+        _compact_payload(
+            {
+                "status": "extracting",
+                "input.type": input_type or "image",
+                "input.image_name": image.filename,
+                "input.image_content_type": image.content_type,
+            }
+        ),
+    )
+    try:
+        content = await image.read()
+        update_job(
+            job_id,
+            {
+                "input.image_size": len(content),
+            },
+        )
+        prompt = await extract_prompt_from_image(
+            content,
+            image.content_type or "image/jpeg",
+        )
+    except Exception as exc:
+        record_error(job_id, "image-intent", str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not prompt:
+        record_error(job_id, "image-intent", "Failed to extract prompt.")
+        raise HTTPException(status_code=500, detail="Failed to extract prompt.")
+
+    update_job(
+        job_id,
+        {
+            "status": "intent_ready",
+            "input.prompt_final": prompt,
+        },
+    )
+
+    return ImageIntentResponse(job_id=job_id, prompt=prompt)
 
 
 @app.post("/stt", response_model=STTResponse)
