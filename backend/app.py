@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from config import settings
 from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt
-from services.generation import GenerationResult, generate_model
+from services.generation import GenerationResult, generate_model, generate_model_from_image
 from services.library import resolve_library_item, search_library
 from slicer_service import ProcessResult, process_model
 
@@ -75,6 +75,29 @@ def health() -> dict:
 async def generate(request: GenerateRequest) -> GenerateResponse:
     try:
         result: GenerationResult = await generate_model(request.prompt, provider=request.provider)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return GenerateResponse(
+        provider=result.provider,
+        task_id=result.task_id,
+        glb_url=result.glb_url,
+    )
+
+
+@app.post("/generate-image", response_model=GenerateResponse)
+async def generate_image(
+    provider: str | None = None,
+    image: UploadFile = File(...),
+) -> GenerateResponse:
+    try:
+        content = await image.read()
+        result: GenerationResult = await generate_model_from_image(
+            content,
+            image.filename or "upload.jpg",
+            image.content_type or "image/jpeg",
+            provider=provider,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

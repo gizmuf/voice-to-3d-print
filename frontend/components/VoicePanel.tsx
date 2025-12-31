@@ -1,6 +1,6 @@
 "use client";
 
-import type { FormEvent, MouseEvent } from "react";
+import type { ChangeEvent, FormEvent, MouseEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 const defaultBackendUrl = "http://localhost:8000";
@@ -37,6 +37,8 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const [libraryResults, setLibraryResults] = useState<LibraryItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [manualText, setManualText] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageLabel, setImageLabel] = useState<string | null>(null);
   const [speechSupport, setSpeechSupport] = useState(false);
   const [recordingSupport, setRecordingSupport] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -108,6 +110,14 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     };
   }, [speechSupport]);
 
+  useEffect(() => {
+    if (!imageFile) {
+      setImageLabel(null);
+      return;
+    }
+    setImageLabel(imageFile.name);
+  }, [imageFile]);
+
   const handleFinalTranscript = async (text: string) => {
     setTranscripts((prev) => [...prev.slice(-5), text]);
     await runPipeline(text);
@@ -123,6 +133,11 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     await handleFinalTranscript(trimmed);
   };
 
+  const handleImageSelect = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] || null;
+    setImageFile(file);
+  };
+
   const runPipeline = async (text: string) => {
     if (isProcessing) return;
     setIsProcessing(true);
@@ -131,6 +146,11 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     setLibraryResults([]);
 
     try {
+      if (provider === "llama-mesh") {
+        setStatus("not-configured");
+        setIntent("Llama-Mesh local setup not installed.");
+        return;
+      }
       const prompt = provider === "parametric" ? text : await fetchIntent(text);
       if (!prompt) throw new Error("No prompt extracted");
 
@@ -190,6 +210,37 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     });
     if (!response.ok) throw new Error("Processing failed");
     return response.json();
+  };
+
+  const generateFromImage = async () => {
+    if (!imageFile || isProcessing) return;
+    setIsProcessing(true);
+    setStatus("uploading-image");
+    setIntent(`Image to model (${provider})`);
+    setLibraryResults([]);
+    try {
+      const formData = new FormData();
+      formData.append("image", imageFile);
+      const response = await fetch(
+        `${backendUrl}/generate-image?provider=${encodeURIComponent(provider)}`,
+        {
+        method: "POST",
+        body: formData
+        }
+      );
+      if (!response.ok) throw new Error("Image generation failed");
+      const generation = await response.json();
+      setStatus("slicing");
+      const processed = await processModel(generation.glb_url);
+      onModelUrl(resolveUrl(backendUrl, processed.glb_url));
+      onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
+      setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
+    } catch (error) {
+      console.error(error);
+      setStatus("error");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const searchLibrary = async (query: string, source: string) => {
@@ -356,8 +407,18 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
             <option value="meshy">Meshy (paid)</option>
             <option value="tripo">Tripo (paid)</option>
             <option value="library">Model library</option>
+            <option value="llama-mesh">Llama-Mesh (local, not installed)</option>
           </select>
         </div>
+
+        {provider === "llama-mesh" ? (
+          <div className="field-row">
+            <span className="muted">
+              Llama-Mesh requires a local install and a dedicated GPU. This
+              prototype does not install it automatically.
+            </span>
+          </div>
+        ) : null}
 
         {provider === "library" ? (
           <div className="field-row">
@@ -370,6 +431,39 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
               <option value="local">Local catalog</option>
               <option value="sketchfab">Sketchfab (token)</option>
             </select>
+          </div>
+        ) : null}
+
+        {provider === "tripo" || provider === "meshy" ? (
+          <div className="field-row">
+            <label htmlFor="image-upload">
+              Image to model ({provider === "meshy" ? "Meshy" : "Tripo"})
+            </label>
+            <input
+              id="image-upload"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={handleImageSelect}
+              disabled={isProcessing}
+            />
+            {imageLabel ? (
+              <span className="muted">Selected: {imageLabel}</span>
+            ) : (
+              <span className="muted">JPEG/PNG/WebP, max 20MB.</span>
+            )}
+            <div className="text-input-actions">
+              <button
+                type="button"
+                className="text-submit"
+                onClick={generateFromImage}
+                disabled={!imageFile || isProcessing}
+              >
+                Generate from image
+              </button>
+              <span className="muted">
+                Uses {provider === "meshy" ? "Meshy" : "Tripo"} image-to-3D.
+              </span>
+            </div>
           </div>
         ) : null}
 

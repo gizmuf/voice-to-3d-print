@@ -34,6 +34,14 @@ class Settings:
     tripo_base_url: str = os.getenv("TRIPO_BASE_URL", "https://api.tripo3d.ai")
     meshy_create_endpoint: str = os.getenv("MESHY_CREATE_ENDPOINT", "/openapi/v2/text-to-3d")
     meshy_status_endpoint: str = os.getenv("MESHY_STATUS_ENDPOINT", "/openapi/v2/text-to-3d/{task_id}")
+    meshy_image_create_endpoint: str = os.getenv(
+        "MESHY_IMAGE_CREATE_ENDPOINT",
+        "/openapi/v1/image-to-3d",
+    )
+    meshy_image_status_endpoint: str = os.getenv(
+        "MESHY_IMAGE_STATUS_ENDPOINT",
+        "/openapi/v1/image-to-3d/{task_id}",
+    )
     tripo_create_endpoint: str = os.getenv("TRIPO_CREATE_ENDPOINT", "/v2/openapi/task")
     tripo_status_endpoint: str = os.getenv("TRIPO_STATUS_ENDPOINT", "/v2/openapi/task/{task_id}")
     tripo_upload_endpoint: str = os.getenv("TRIPO_UPLOAD_ENDPOINT", "/v2/openapi/upload/sts")

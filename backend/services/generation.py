@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -48,6 +49,8 @@ async def generate_model(prompt: str, *, provider: Optional[str] = None) -> Gene
         return await _generate_tripo(prompt)
     if provider == "parametric":
         return _generate_parametric(prompt)
+    if provider == "llama-mesh":
+        raise ValueError("Llama-Mesh is not installed on this host.")
     raise ValueError(f"Unsupported provider: {provider}")
 
 
@@ -124,6 +127,143 @@ async def _generate_tripo(prompt: str) -> GenerationResult:
         headers=headers,
     )
 
+
+def _file_type_from_content_type(content_type: str) -> str:
+    content_type = (content_type or "").lower()
+    if "png" in content_type:
+        return "png"
+    if "webp" in content_type:
+        return "webp"
+    return "jpeg"
+
+
+async def _upload_tripo_image(
+    content: bytes,
+    filename: str,
+    content_type: str,
+) -> Tuple[str, str]:
+    url = f"{settings.tripo_base_url}{settings.tripo_upload_endpoint}"
+    headers = {"Authorization": f"Bearer {settings.tripo_api_key}"}
+    file_type = _file_type_from_content_type(content_type)
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            url,
+            headers=headers,
+            files={
+                "file": (
+                    filename or f"upload.{file_type}",
+                    content,
+                    content_type or f"image/{file_type}",
+                )
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    token = (
+        payload.get("data", {}).get("image_token")
+        or payload.get("image_token")
+        or payload.get("data", {}).get("file_token")
+        or payload.get("file_token")
+    )
+    if not token:
+        raise RuntimeError(f"Tripo upload missing image_token: {payload}")
+    return token, file_type
+
+
+def _image_data_uri(content: bytes, content_type: str) -> str:
+    encoded = base64.b64encode(content).decode("ascii")
+    mime_type = content_type or "image/jpeg"
+    return f"data:{mime_type};base64,{encoded}"
+
+
+async def _generate_tripo_from_image(
+    content: bytes,
+    filename: str,
+    content_type: str,
+) -> GenerationResult:
+    if not settings.tripo_api_key:
+        raise ValueError("TRIPO_API_KEY is required for Tripo generation")
+
+    token, file_type = await _upload_tripo_image(content, filename, content_type)
+    url = f"{settings.tripo_base_url}{settings.tripo_create_endpoint}"
+    headers = {"Authorization": f"Bearer {settings.tripo_api_key}"}
+    payload = {
+        "type": "image_to_model",
+        "file": {
+            "type": file_type,
+            "file_token": token,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    task_id = data.get("task_id") or data.get("id") or data.get("result")
+    if not task_id:
+        raise RuntimeError(f"Tripo response missing task id: {data}")
+
+    status_url = f"{settings.tripo_base_url}{settings.tripo_status_endpoint}".format(task_id=task_id)
+    return await _poll_generation(
+        provider="tripo",
+        task_id=str(task_id),
+        status_url=status_url,
+        headers=headers,
+    )
+
+
+async def _generate_meshy_from_image(
+    content: bytes,
+    content_type: str,
+) -> GenerationResult:
+    if not settings.meshy_api_key:
+        raise ValueError("MESHY_API_KEY is required for Meshy generation")
+
+    url = f"{settings.meshy_base_url}{settings.meshy_image_create_endpoint}"
+    headers = {"Authorization": f"Bearer {settings.meshy_api_key}"}
+    payload = {
+        "image_url": _image_data_uri(content, content_type),
+        "should_texture": False,
+        "should_remesh": True,
+        "topology": "triangle",
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    task_id = data.get("result") or data.get("id") or data.get("task_id")
+    if not task_id:
+        raise RuntimeError(f"Meshy response missing task id: {data}")
+
+    status_url = f"{settings.meshy_base_url}{settings.meshy_image_status_endpoint}".format(
+        task_id=task_id
+    )
+    return await _poll_generation(
+        provider="meshy",
+        task_id=str(task_id),
+        status_url=status_url,
+        headers=headers,
+    )
+
+
+async def generate_model_from_image(
+    content: bytes,
+    filename: str,
+    content_type: str,
+    *,
+    provider: Optional[str] = None,
+) -> GenerationResult:
+    provider = (provider or settings.threed_provider).lower()
+    if provider == "tripo":
+        return await _generate_tripo_from_image(content, filename, content_type)
+    if provider == "meshy":
+        return await _generate_meshy_from_image(content, content_type)
+    if provider == "llama-mesh":
+        raise ValueError("Llama-Mesh is not installed on this host.")
+    raise ValueError(f"Unsupported image provider: {provider}")
 
 async def _poll_generation(
     *,

@@ -137,6 +137,14 @@ body {
   background: #fffdf9;
 }
 
+.field-row input[type="file"] {
+  border-radius: 12px;
+  border: 1px dashed rgba(0, 0, 0, 0.12);
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  background: #fffdf9;
+}
+
 .field-row textarea {
   border-radius: 14px;
   border: 1px solid rgba(0, 0, 0, 0.1);

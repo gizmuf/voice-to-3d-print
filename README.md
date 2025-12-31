@@ -5,7 +5,7 @@ A voice-driven pipeline that captures speech, extracts 3D design intent, generat
 ## Stack
 - **Frontend:** Next.js + React + browser SpeechRecognition + `<model-viewer>`
 - **Voice Orchestration:** Browser STT (default) or Deepgram STT + Gemini intent extraction via proxy
-- **3D Generation:** Meshy (default) with Tripo as an optional provider
+- **3D Generation:** Meshy (default) with Tripo + parametric (free) as optional providers
 - **Manufacturing:** MeshLib repair + PrusaSlicer CLI
 
 ## Architecture Flow
@@ -27,9 +27,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Set env vars (copy from `.env.example`):
+Set env vars (copy from `backend/.env.example`):
 ```bash
-cp ../.env.example .env
+cp .env.example .env
 ```
 
 Run FastAPI:
@@ -47,17 +47,19 @@ npm run dev
 Open http://localhost:3000
 
 ## Notes
-- **Cheapest defaults:** `THREED_PROVIDER=meshy` and Gemini via the existing proxy (`GEMINI_PROXY_URL`).
+- **Cheapest defaults:** `THREED_PROVIDER=parametric` and Gemini via the existing proxy (`GEMINI_PROXY_URL`).
 - **PrusaSlicer:** Set `PRUSASLICER_PATH` and `PRUSASLICER_CONFIG` in `.env`.
-- **Provider switching:** Set `THREED_PROVIDER=tripo` and `TRIPO_API_KEY` to swap generators.
+- **Provider switching:** Set `THREED_PROVIDER=meshy` or `THREED_PROVIDER=tripo` with the matching API key.
 - **Gemini proxy:** The default proxy is the Gut Feeling Cloud Run endpoint already wired with a Gemini key.
 - **Deepgram STT (optional):** Set `DEEPGRAM_API_KEY` to enable server transcription from recorded audio.
 - **Model library option:** Add GLB links to `backend/data/model_library.json` for local catalog search.
 - **Sketchfab search (optional):** Set `SKETCHFAB_API_TOKEN` to search downloadable models and retrieve GLB links.
+- **Image to model:** `/generate-image` supports Meshy and Tripo (set `provider` query param).
 
 ## Endpoints
 - `POST /generate` → calls Meshy/Tripo and returns `glb_url`
 - `POST /process-model` → downloads GLB, repairs, slices, returns artifact URLs
+- `POST /generate-image?provider=meshy|tripo` → image-to-3D task
 - `GET /artifacts/{job_id}/output.gcode` → G-code download
 
 ## Repo Structure
