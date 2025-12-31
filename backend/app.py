@@ -14,7 +14,17 @@ from services.gemini_intent import extract_prompt, extract_prompt_from_image
 from services.generation import GenerationResult, generate_model, generate_model_from_image
 from services.library import resolve_library_item, search_library
 from slicer_service import ProcessResult, process_model
-from services.job_store import ensure_job, record_error, update_job, upload_artifact
+from services.job_store import (
+    create_project,
+    ensure_job,
+    get_project,
+    list_jobs_for_project,
+    list_projects,
+    record_error,
+    update_job,
+    update_project,
+    upload_artifact,
+)
 
 app = FastAPI(title="Voice-to-3D-Print Backend")
 
@@ -41,6 +51,9 @@ class GenerateRequest(BaseModel):
     job_id: str | None = None
     input_type: str | None = None
     prompt_raw: str | None = None
+    project_id: str | None = None
+    parent_job_id: str | None = None
+    edit_mode: str | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -59,6 +72,9 @@ class ProcessRequest(BaseModel):
     library_id: str | None = None
     library_source: str | None = None
     library_title: str | None = None
+    project_id: str | None = None
+    parent_job_id: str | None = None
+    edit_mode: str | None = None
 
 
 class ProcessResponse(BaseModel):
@@ -72,6 +88,7 @@ class IntentRequest(BaseModel):
     transcript: str
     job_id: str | None = None
     input_type: str | None = None
+    project_id: str | None = None
 
 
 class IntentResponse(BaseModel):
@@ -82,6 +99,23 @@ class IntentResponse(BaseModel):
 class ImageIntentResponse(BaseModel):
     job_id: str
     prompt: str
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str | None = None
+
+
+class ProjectResponse(BaseModel):
+    project: dict
+
+
+class ProjectsResponse(BaseModel):
+    items: list[dict]
+
+
+class ProjectDetailResponse(BaseModel):
+    project: dict
+    jobs: list[dict]
 
 
 class STTResponse(BaseModel):
@@ -107,6 +141,9 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             "input.type": request.input_type,
             "input.prompt_raw": request.prompt_raw,
             "input.prompt_final": request.prompt,
+            "project_id": request.project_id,
+            "parent_job_id": request.parent_job_id,
+            "edit_mode": request.edit_mode,
         }),
     )
     try:
@@ -137,6 +174,9 @@ async def generate_image(
     provider: str | None = None,
     job_id: str | None = Form(None),
     input_type: str | None = Form(None),
+    project_id: str | None = Form(None),
+    parent_job_id: str | None = Form(None),
+    edit_mode: str | None = Form(None),
     image: UploadFile = File(...),
 ) -> GenerateResponse:
     job_id = job_id or uuid.uuid4().hex
@@ -148,6 +188,9 @@ async def generate_image(
             "input.type": input_type or "image",
             "input.image_name": image.filename,
             "input.image_content_type": image.content_type,
+            "project_id": project_id,
+            "parent_job_id": parent_job_id,
+            "edit_mode": edit_mode,
         }),
     )
     try:
@@ -198,6 +241,9 @@ def process(request: ProcessRequest) -> ProcessResponse:
             "input.library_id": request.library_id,
             "input.library_source": request.library_source,
             "input.library_title": request.library_title,
+            "project_id": request.project_id,
+            "parent_job_id": request.parent_job_id,
+            "edit_mode": request.edit_mode,
         }),
     )
     try:
@@ -232,6 +278,13 @@ def process(request: ProcessRequest) -> ProcessResponse:
             ),
         },
     )
+    if request.project_id:
+        update_project(
+            request.project_id,
+            {
+                "current_job_id": job_id,
+            },
+        )
     return ProcessResponse(
         job_id=result.job_id,
         glb_url=glb_url,
@@ -254,6 +307,7 @@ async def intent(request: IntentRequest) -> IntentResponse:
             "input.type": request.input_type,
             "input.transcript": request.transcript,
             "input.prompt_final": prompt,
+            "project_id": request.project_id,
         }),
     )
     return IntentResponse(job_id=job_id, prompt=prompt)
@@ -264,6 +318,9 @@ async def image_intent(
     image: UploadFile = File(...),
     job_id: str | None = Form(None),
     input_type: str | None = Form(None),
+    project_id: str | None = Form(None),
+    parent_job_id: str | None = Form(None),
+    edit_mode: str | None = Form(None),
 ) -> ImageIntentResponse:
     job_id = job_id or uuid.uuid4().hex
     ensure_job(
@@ -274,6 +331,9 @@ async def image_intent(
                 "input.type": input_type or "image",
                 "input.image_name": image.filename,
                 "input.image_content_type": image.content_type,
+                "project_id": project_id,
+                "parent_job_id": parent_job_id,
+                "edit_mode": edit_mode,
             }
         ),
     )
@@ -306,6 +366,26 @@ async def image_intent(
     )
 
     return ImageIntentResponse(job_id=job_id, prompt=prompt)
+
+
+@app.post("/projects", response_model=ProjectResponse)
+def create_project_endpoint(request: ProjectCreateRequest) -> ProjectResponse:
+    project = create_project(request.name)
+    if not project:
+        raise HTTPException(status_code=500, detail="Failed to create project.")
+    return ProjectResponse(project=project)
+
+
+@app.get("/projects", response_model=ProjectsResponse)
+def list_projects_endpoint() -> ProjectsResponse:
+    return ProjectsResponse(items=list_projects())
+
+
+@app.get("/projects/{project_id}", response_model=ProjectDetailResponse)
+def project_detail(project_id: str) -> ProjectDetailResponse:
+    project = get_project(project_id) or {"project_id": project_id}
+    jobs = list_jobs_for_project(project_id)
+    return ProjectDetailResponse(project=project, jobs=jobs)
 
 
 @app.post("/stt", response_model=STTResponse)

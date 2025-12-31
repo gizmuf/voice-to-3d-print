@@ -25,6 +25,12 @@ type LibraryItem = {
   license?: string;
 };
 
+type ProjectSummary = {
+  project_id: string;
+  name?: string;
+  current_job_id?: string;
+};
+
 export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) {
   const [isListening, setIsListening] = useState(false);
   const [status, setStatus] = useState("idle");
@@ -41,6 +47,9 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const [imageLabel, setImageLabel] = useState<string | null>(null);
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
   const [pendingSource, setPendingSource] = useState<"image" | "text" | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
   const [speechSupport, setSpeechSupport] = useState(false);
   const [recordingSupport, setRecordingSupport] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -65,6 +74,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
     setSpeechSupport(supportsSpeech);
     setRecordingSupport(supportsRecording);
+  }, []);
+
+  useEffect(() => {
+    void refreshProjects();
   }, []);
 
   useEffect(() => {
@@ -127,6 +140,48 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     setImageLabel(imageFile.name);
   }, [imageFile]);
 
+  const refreshProjects = async () => {
+    setIsLoadingProjects(true);
+    try {
+      const response = await fetch(`${backendUrl}/projects`);
+      if (!response.ok) throw new Error("Projects fetch failed");
+      const data = await response.json();
+      setProjects((data.items || []) as ProjectSummary[]);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsLoadingProjects(false);
+    }
+  };
+
+  const createProject = async (name?: string) => {
+    try {
+      const response = await fetch(`${backendUrl}/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      if (!response.ok) throw new Error("Project create failed");
+      const data = await response.json();
+      return data.project as ProjectSummary;
+    } catch (error) {
+      console.error(error);
+      return null;
+    }
+  };
+
+  const ensureProjectContext = async (label?: string) => {
+    const activeProject = projects.find((item) => item.project_id === activeProjectId);
+    if (activeProject) return activeProject;
+    const name = label?.trim() ? label.trim().slice(0, 60) : "New 3D Project";
+    const created = await createProject(name);
+    if (created) {
+      setProjects((prev) => [created, ...prev]);
+      setActiveProjectId(created.project_id);
+    }
+    return created;
+  };
+
   const handleFinalTranscript = async (text: string, source: "voice" | "text") => {
     setTranscripts((prev) => [...prev.slice(-5), text]);
     await runPipeline(text, source);
@@ -158,7 +213,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   ) => {
     if (isProcessing) return;
     setIsProcessing(true);
+    const project = await ensureProjectContext(text);
     const jobId = jobIdOverride ?? createJobId();
+    const parentJobId = project?.current_job_id;
+    const editMode = parentJobId ? "prompt_only" : undefined;
     setStatus("extracting");
     setIntent(null);
     setLibraryResults([]);
@@ -171,7 +229,7 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       }
       const shouldExtract = provider !== "parametric" && source !== "image";
       const prompt = shouldExtract
-        ? await fetchIntent(text, jobId, source as "voice" | "text")
+        ? await fetchIntent(text, jobId, source as "voice" | "text", project?.project_id)
         : text;
       if (!prompt) throw new Error("No prompt extracted");
 
@@ -186,18 +244,31 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       }
 
       setStatus("generating");
-      const generation = await generateModel(prompt, provider, jobId, source, text);
+      const generation = await generateModel(
+        prompt,
+        provider,
+        jobId,
+        source,
+        text,
+        project?.project_id,
+        parentJobId,
+        editMode
+      );
 
       setStatus("slicing");
       const processed = await processModel(generation.glb_url, jobId, {
         provider,
         input_type: source,
-        prompt
+        prompt,
+        project_id: project?.project_id,
+        parent_job_id: parentJobId,
+        edit_mode: editMode
       });
 
       onModelUrl(resolveUrl(backendUrl, processed.glb_url));
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
       setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
+      void refreshProjects();
     } catch (error) {
       console.error(error);
       setStatus("error");
@@ -209,12 +280,18 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const fetchIntent = async (
     transcript: string,
     jobId: string,
-    inputType: "voice" | "text"
+    inputType: "voice" | "text",
+    projectId?: string | null
   ): Promise<string | null> => {
     const response = await fetch(`${backendUrl}/intent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript, job_id: jobId, input_type: inputType })
+      body: JSON.stringify({
+        transcript,
+        job_id: jobId,
+        input_type: inputType,
+        project_id: projectId
+      })
     });
     if (!response.ok) throw new Error("Intent extraction failed");
     const data = await response.json();
@@ -226,7 +303,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
     providerName: string,
     jobId: string,
     inputType: "voice" | "text" | "image",
-    promptRaw: string
+    promptRaw: string,
+    projectId?: string | null,
+    parentJobId?: string | null,
+    editMode?: string
   ) => {
     const response = await fetch(`${backendUrl}/generate`, {
       method: "POST",
@@ -236,7 +316,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
         provider: providerName,
         job_id: jobId,
         input_type: inputType,
-        prompt_raw: promptRaw
+        prompt_raw: promptRaw,
+        project_id: projectId,
+        parent_job_id: parentJobId,
+        edit_mode: editMode
       })
     });
     if (!response.ok) throw new Error("Generation failed");
@@ -253,6 +336,9 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       library_id?: string;
       library_source?: string;
       library_title?: string;
+      project_id?: string;
+      parent_job_id?: string;
+      edit_mode?: string;
     }
   ) => {
     const response = await fetch(`${backendUrl}/process-model`, {
@@ -271,7 +357,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const generateFromImage = async () => {
     if (!imageFile || isProcessing) return;
     setIsProcessing(true);
+    const project = await ensureProjectContext(imageLabel ?? "Image reference");
     const jobId = createJobId();
+    const parentJobId = project?.current_job_id;
+    const editMode = parentJobId ? "image" : undefined;
     setStatus("uploading-image");
     setIntent(`Image to model (${provider})`);
     setLibraryResults([]);
@@ -280,6 +369,15 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       formData.append("image", imageFile);
       formData.append("job_id", jobId);
       formData.append("input_type", "image");
+      if (project?.project_id) {
+        formData.append("project_id", project.project_id);
+      }
+      if (parentJobId) {
+        formData.append("parent_job_id", parentJobId);
+      }
+      if (editMode) {
+        formData.append("edit_mode", editMode);
+      }
       const response = await fetch(
         `${backendUrl}/generate-image?provider=${encodeURIComponent(provider)}`,
         {
@@ -292,11 +390,15 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       setStatus("slicing");
       const processed = await processModel(generation.glb_url, jobId, {
         provider,
-        input_type: "image"
+        input_type: "image",
+        project_id: project?.project_id,
+        parent_job_id: parentJobId,
+        edit_mode: editMode
       });
       onModelUrl(resolveUrl(backendUrl, processed.glb_url));
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
       setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
+      void refreshProjects();
     } catch (error) {
       console.error(error);
       setStatus("error");
@@ -308,7 +410,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
   const generatePromptFromImage = async () => {
     if (!imageFile || isProcessing) return;
     setIsProcessing(true);
+    const project = await ensureProjectContext(imageLabel ?? "Image reference");
     const jobId = createJobId();
+    const parentJobId = project?.current_job_id;
+    const editMode = parentJobId ? "image" : undefined;
     setPendingJobId(jobId);
     setPendingSource("image");
     setStatus("extracting-image");
@@ -318,6 +423,15 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       formData.append("image", imageFile);
       formData.append("job_id", jobId);
       formData.append("input_type", "image");
+      if (project?.project_id) {
+        formData.append("project_id", project.project_id);
+      }
+      if (parentJobId) {
+        formData.append("parent_job_id", parentJobId);
+      }
+      if (editMode) {
+        formData.append("edit_mode", editMode);
+      }
       const response = await fetch(`${backendUrl}/image-intent`, {
         method: "POST",
         body: formData
@@ -359,7 +473,10 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
 
   const useLibraryItem = async (item: LibraryItem) => {
     try {
+      const project = await ensureProjectContext(item.title);
       const jobId = createJobId();
+      const parentJobId = project?.current_job_id;
+      const editMode = parentJobId ? "library" : undefined;
       setStatus("fetching-model");
       const resolvedUrl = await resolveLibraryItem(item);
       if (!resolvedUrl) {
@@ -374,11 +491,15 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
         prompt: intent || undefined,
         library_id: item.id,
         library_source: librarySource,
-        library_title: item.title
+        library_title: item.title,
+        project_id: project?.project_id,
+        parent_job_id: parentJobId,
+        edit_mode: editMode
       });
       onModelUrl(resolveUrl(backendUrl, processed.glb_url) || resolvedUrl);
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
       setStatus(processed.gcode_url ? "gcode-ready" : "preview-ready");
+      void refreshProjects();
     } catch (error) {
       console.error(error);
       setStatus("preview-ready");
@@ -479,6 +600,52 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
       </div>
 
       <div className="panel-body">
+        <div className="field-row">
+          <label htmlFor="project">Project</label>
+          <select
+            id="project"
+            value={activeProjectId || ""}
+            onChange={(event) =>
+              setActiveProjectId(event.target.value ? event.target.value : null)
+            }
+          >
+            <option value="">New project (auto)</option>
+            {projects.map((project) => (
+              <option key={project.project_id} value={project.project_id}>
+                {project.name || project.project_id}
+              </option>
+            ))}
+          </select>
+          <div className="text-input-actions">
+            <button
+              type="button"
+              className="text-submit"
+              onClick={() => {
+                setActiveProjectId(null);
+                setPendingJobId(null);
+                setPendingSource(null);
+                setManualText("");
+              }}
+              disabled={isProcessing}
+            >
+              New project
+            </button>
+            <button
+              type="button"
+              className="text-submit"
+              onClick={refreshProjects}
+              disabled={isLoadingProjects || isProcessing}
+            >
+              {isLoadingProjects ? "Refreshing..." : "Refresh list"}
+            </button>
+          </div>
+          {activeProjectId ? (
+            <span className="muted">Edits will be saved to the selected project.</span>
+          ) : (
+            <span className="muted">A new project is created on first run.</span>
+          )}
+        </div>
+
         <div className="field-row">
           <label htmlFor="stt">Speech input</label>
           <select
