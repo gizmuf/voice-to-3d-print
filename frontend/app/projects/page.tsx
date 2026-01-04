@@ -167,7 +167,7 @@ export default function ProjectsPage() {
   return (
     <main className="page projects-page">
       <nav className="topbar">
-        <div className="brand">PulsAI 3D</div>
+        <div className="brand">3dprint</div>
         <div className="topbar-links">
           <Link className="topbar-link" href="/">Generator</Link>
         </div>

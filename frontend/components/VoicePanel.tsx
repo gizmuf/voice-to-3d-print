@@ -227,6 +227,11 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
         setIntent("Llama-Mesh local setup not installed.");
         return;
       }
+      if (provider === "triposr" && source !== "image") {
+        setStatus("image-only");
+        setIntent("TripoSR requires an image input. Upload an image to run.");
+        return;
+      }
       const shouldExtract = provider !== "parametric" && source !== "image";
       const prompt = shouldExtract
         ? await fetchIntent(text, jobId, source as "voice" | "text", project?.project_id)
@@ -676,6 +681,8 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
             <option value="parametric">Parametric (free)</option>
             <option value="meshy">Meshy (paid)</option>
             <option value="tripo">Tripo (paid)</option>
+            <option value="trellis2">Trellis2 (image-to-3D)</option>
+            <option value="triposr">TripoSR (local, image-to-3D)</option>
             <option value="library">Model library</option>
             <option value="llama-mesh">Llama-Mesh (local, not installed)</option>
           </select>
@@ -704,10 +711,36 @@ export default function VoicePanel({ onModelUrl, onGcodeUrl }: VoicePanelProps) 
           </div>
         ) : null}
 
-        {provider === "tripo" || provider === "meshy" ? (
+        {provider === "trellis2" ? (
+          <div className="field-row">
+            <span className="muted">
+              Trellis2 runs image-to-3D on a GPU service. Prompt-only runs require a
+              custom text endpoint.
+            </span>
+          </div>
+        ) : null}
+
+        {provider === "triposr" ? (
+          <div className="field-row">
+            <span className="muted">
+              TripoSR is image-to-3D only and runs locally. Use the image upload
+              flow to test quality.
+            </span>
+          </div>
+        ) : null}
+
+        {provider === "tripo" || provider === "meshy" || provider === "trellis2" || provider === "triposr" ? (
           <div className="field-row">
             <label htmlFor="image-upload">
-              Image to model ({provider === "meshy" ? "Meshy" : "Tripo"})
+              Image to model (
+              {provider === "meshy"
+                ? "Meshy"
+                : provider === "tripo"
+                  ? "Tripo"
+                  : provider === "trellis2"
+                    ? "Trellis2"
+                    : "TripoSR"}
+              )
             </label>
             <input
               id="image-upload"

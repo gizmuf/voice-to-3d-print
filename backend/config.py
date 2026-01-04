@@ -48,6 +48,31 @@ class Settings:
     tripo_create_endpoint: str = os.getenv("TRIPO_CREATE_ENDPOINT", "/v2/openapi/task")
     tripo_status_endpoint: str = os.getenv("TRIPO_STATUS_ENDPOINT", "/v2/openapi/task/{task_id}")
     tripo_upload_endpoint: str = os.getenv("TRIPO_UPLOAD_ENDPOINT", "/v2/openapi/upload/sts")
+    trellis2_api_url: str = os.getenv("TRELLIS2_API_URL", "")
+    trellis2_image_endpoint: str = os.getenv("TRELLIS2_IMAGE_ENDPOINT", "/image-to-3d")
+    trellis2_text_endpoint: str = os.getenv("TRELLIS2_TEXT_ENDPOINT", "")
+    trellis2_status_endpoint: str = os.getenv("TRELLIS2_STATUS_ENDPOINT", "")
+    trellis2_pipeline_type: str = os.getenv("TRELLIS2_PIPELINE_TYPE", "")
+    trellis2_seed: str = os.getenv("TRELLIS2_SEED", "")
+    triposr_root: str = os.getenv("TRIPOSR_ROOT", "")
+    triposr_python: str = os.getenv("TRIPOSR_PYTHON", "python3")
+    triposr_device: str = os.getenv("TRIPOSR_DEVICE", "cpu")
+    triposr_model: str = os.getenv("TRIPOSR_MODEL", "stabilityai/TripoSR")
+    triposr_cache_dir: str = os.getenv("TRIPOSR_CACHE_DIR", "")
+    triposr_timeout_s: int = int(os.getenv("TRIPOSR_TIMEOUT_S", "3600"))
+    triposr_chunk_size: str = os.getenv("TRIPOSR_CHUNK_SIZE", "")
+    triposr_mc_resolution: str = os.getenv("TRIPOSR_MC_RESOLUTION", "")
+    triposr_no_remove_bg: bool = os.getenv("TRIPOSR_NO_REMOVE_BG", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    triposr_bake_texture: bool = os.getenv("TRIPOSR_BAKE_TEXTURE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    triposr_texture_resolution: str = os.getenv("TRIPOSR_TEXTURE_RESOLUTION", "")
 
     prusaslicer_path: str = os.getenv(
         "PRUSASLICER_PATH",

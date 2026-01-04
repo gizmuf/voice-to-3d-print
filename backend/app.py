@@ -26,7 +26,7 @@ from services.job_store import (
     upload_artifact,
 )
 
-app = FastAPI(title="Voice-to-3D-Print Backend")
+app = FastAPI(title="3dprint Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -210,6 +210,7 @@ async def generate_image(
             content,
             image.filename or "upload.jpg",
             image.content_type or "image/jpeg",
+            job_id=job_id,
             provider=provider,
         )
     except Exception as exc:

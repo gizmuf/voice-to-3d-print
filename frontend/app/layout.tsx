@@ -13,8 +13,8 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "Voice to 3D Print",
-  description: "Serverless voice-to-3D-print prototype"
+  title: "3dprint",
+  description: "Serverless 3dprint prototype"
 };
 
 export default function RootLayout({

@@ -12,7 +12,7 @@ export default function Home() {
   return (
     <main className="page">
       <nav className="topbar">
-        <div className="brand">PulsAI 3D</div>
+        <div className="brand">3dprint</div>
         <div className="topbar-links">
           <Link className="topbar-link" href="/projects">Projects</Link>
         </div>
