@@ -8,6 +8,7 @@ import VoicePanel from "../components/VoicePanel";
 export default function Home() {
   const [modelUrl, setModelUrl] = useState<string | null>(null);
   const [gcodeUrl, setGcodeUrl] = useState<string | null>(null);
+  const [bundleUrl, setBundleUrl] = useState<string | null>(null);
 
   return (
     <main className="page">
@@ -47,7 +48,11 @@ export default function Home() {
       </header>
 
       <div className="grid">
-        <VoicePanel onModelUrl={setModelUrl} onGcodeUrl={setGcodeUrl} />
+        <VoicePanel
+          onModelUrl={setModelUrl}
+          onGcodeUrl={setGcodeUrl}
+          onBundleUrl={setBundleUrl}
+        />
 
         <section className="panel model-panel">
           <div className="panel-header">
@@ -71,6 +76,14 @@ export default function Home() {
               aria-disabled={!gcodeUrl}
             >
               Download G-code
+            </a>
+            <a
+              className={`download-button ${bundleUrl ? "" : "disabled"}`}
+              href={bundleUrl || "#"}
+              download
+              aria-disabled={!bundleUrl}
+            >
+              Download bundle
             </a>
             <span className="hint">
               {gcodeUrl

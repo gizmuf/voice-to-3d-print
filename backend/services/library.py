@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,11 +11,43 @@ import httpx
 
 from config import settings
 
+logger = logging.getLogger("library")
+
 
 def _load_library(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
-    return json.loads(path.read_text())
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        logger.warning("Model library JSON invalid: %s", exc)
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("items") or payload.get("models") or []
+    if not isinstance(payload, list):
+        return []
+    return payload
+
+
+def _extract_local_title(item: Dict[str, Any]) -> str:
+    return str(item.get("title") or item.get("name") or item.get("label") or "").lower()
+
+
+def _extract_local_tags(item: Dict[str, Any]) -> List[str]:
+    raw_tags = item.get("tags") or item.get("keywords") or []
+    if isinstance(raw_tags, str):
+        return [raw_tags.lower()]
+    if isinstance(raw_tags, list):
+        return [str(tag).lower() for tag in raw_tags if tag is not None]
+    return []
+
+
+def _extract_local_glb_url(item: Dict[str, Any]) -> Optional[str]:
+    for key in ("glb_url", "glbUrl", "glb", "model_url", "url"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _filter_local(query: str) -> List[Dict[str, Any]]:
@@ -26,8 +59,8 @@ def _filter_local(query: str) -> List[Dict[str, Any]]:
     tokens = [token for token in re.split(r"[^a-z0-9]+", query_lower) if len(token) >= 2]
     results = []
     for item in data:
-        title = str(item.get("title", "")).lower()
-        tags = [str(tag).lower() for tag in item.get("tags", [])]
+        title = _extract_local_title(item)
+        tags = _extract_local_tags(item)
         if query_lower in title or any(query_lower in tag for tag in tags):
             results.append(item)
             continue
@@ -115,7 +148,7 @@ async def resolve_library_item(uid: str, provider: str = "local") -> Optional[st
     if provider == "local":
         for item in _load_library(settings.model_library_path):
             if item.get("id") == uid:
-                return item.get("glb_url")
+                return _extract_local_glb_url(item)
         return None
     if provider == "sketchfab":
         if not settings.sketchfab_api_token:

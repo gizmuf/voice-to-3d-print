@@ -204,6 +204,27 @@ body {
   flex-wrap: wrap;
 }
 
+.prompt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.prompt-chip {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: #fff8ef;
+  color: var(--ink);
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.prompt-chip:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .project-actions {
   display: flex;
   gap: 12px;
@@ -277,6 +298,76 @@ body {
   font-size: 1.1rem;
   margin: 8px 0 0;
   font-weight: 600;
+}
+
+.status-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.status-step {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--muted);
+}
+
+.status-step.active {
+  background: rgba(245, 159, 58, 0.25);
+  color: #6c3a09;
+}
+
+.status-step.done {
+  background: rgba(43, 140, 122, 0.18);
+  color: #1f5c50;
+}
+
+.status-error {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.retry-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.health-card {
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.7);
+  display: grid;
+  gap: 8px;
+}
+
+.health-card.warning {
+  border-color: rgba(242, 95, 58, 0.3);
+  background: rgba(255, 231, 221, 0.7);
+}
+
+.health-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.warning-chip {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: rgba(242, 95, 58, 0.2);
+  color: #8c2d1b;
+  padding: 5px 8px;
+  border-radius: 999px;
 }
 
 .intent {

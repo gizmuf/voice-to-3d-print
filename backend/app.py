@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+import json
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -16,6 +18,7 @@ from services.library import resolve_library_item, search_library
 from slicer_service import ProcessResult, process_model
 from services.job_store import (
     create_project,
+    ensure_project,
     ensure_job,
     get_project,
     list_jobs_for_project,
@@ -129,9 +132,34 @@ class STTResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
+    trellis2_text_enabled = bool(settings.trellis2_api_url and settings.trellis2_text_endpoint)
+    trellis2_image_enabled = bool(settings.trellis2_api_url and settings.trellis2_image_endpoint)
+    triposr_enabled = bool(settings.triposr_root and Path(settings.triposr_root).exists())
+    providers = {
+        "parametric": {"enabled": True, "cost": "free", "modes": ["text"]},
+        "meshy": {"enabled": bool(settings.meshy_api_key), "cost": "paid", "modes": ["text", "image"]},
+        "tripo": {"enabled": bool(settings.tripo_api_key), "cost": "paid", "modes": ["text", "image"]},
+        "trellis2": {
+            "enabled": trellis2_text_enabled or trellis2_image_enabled,
+            "cost": "gpu",
+            "modes": [mode for mode, enabled in (("text", trellis2_text_enabled), ("image", trellis2_image_enabled)) if enabled],
+        },
+        "triposr": {"enabled": triposr_enabled, "cost": "local", "modes": ["image"]},
+        "library_local": {"enabled": True, "cost": "free", "modes": ["search"]},
+        "library_sketchfab": {"enabled": bool(settings.sketchfab_api_token), "cost": "token", "modes": ["search"]},
+    }
+    warnings = []
+    if not settings.meshy_api_key:
+        warnings.append("MESHY_API_KEY missing")
+    if not settings.tripo_api_key:
+        warnings.append("TRIPO_API_KEY missing")
+    if not trellis2_text_enabled and not trellis2_image_enabled:
+        warnings.append("TRELLIS2_API_URL/TRELLIS2_*_ENDPOINT missing")
     return {
         "ok": True,
         "sketchfab_enabled": bool(settings.sketchfab_api_token),
+        "providers": providers,
+        "warnings": warnings,
     }
 
 
@@ -270,6 +298,29 @@ def process(request: ProcessRequest) -> ProcessResponse:
         (f"{job_prefix}/{result.gcode_path.name}" if result.gcode_path is not None else None)
     )
 
+    metadata_path = result.glb_path.parent / "metadata.json"
+    metadata = {
+        "job_id": job_id,
+        "provider": request.provider,
+        "input_type": request.input_type,
+        "prompt": request.prompt,
+        "library_id": request.library_id,
+        "library_source": request.library_source,
+        "library_title": request.library_title,
+        "project_id": request.project_id,
+        "parent_job_id": request.parent_job_id,
+        "edit_mode": request.edit_mode,
+        "artifacts": {
+            "glb_url": glb_url,
+            "stl_url": stl_url,
+            "gcode_url": gcode_url,
+        },
+    }
+    try:
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+    except Exception:
+        pass
+
     update_job(
         job_id,
         {
@@ -297,6 +348,33 @@ def process(request: ProcessRequest) -> ProcessResponse:
         stl_url=stl_url,
         gcode_url=gcode_url,
     )
+
+
+@app.get("/bundle/{job_id}")
+def bundle(job_id: str) -> dict:
+    job_dir = settings.output_dir / job_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    bundle_path = job_dir / "bundle.zip"
+    files = [
+        job_dir / "model.glb",
+        job_dir / "model.stl",
+        job_dir / "output.gcode",
+        job_dir / "metadata.json",
+    ]
+
+    added = 0
+    with ZipFile(bundle_path, "w", compression=ZIP_DEFLATED) as archive:
+        for path in files:
+            if path.exists():
+                archive.write(path, arcname=path.name)
+                added += 1
+
+    if added == 0:
+        raise HTTPException(status_code=404, detail="No artifacts available for bundle.")
+
+    return {"url": f"/artifacts/{job_id}/{bundle_path.name}"}
 
 
 @app.post("/intent", response_model=IntentResponse)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -118,7 +119,12 @@ def update_project(project_id: str, data: Dict[str, Any]) -> None:
 def create_project(name: Optional[str] = None) -> Dict[str, Any]:
     client = _get_firestore()
     if client is None:
-        return {}
+        return {
+            "project_id": uuid.uuid4().hex,
+            "name": name or "Untitled Project",
+            "public": True,
+            "owner_id": "anon",
+        }
     project_ref = client.collection(PROJECTS_COLLECTION).document()
     payload = {
         "project_id": project_ref.id,

@@ -4,7 +4,19 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import ModelViewer from "../../components/ModelViewer";
 
-const defaultBackendUrl = "http://localhost:8000";
+const localBackendUrl = "http://localhost:8000";
+const prodBackendUrl = "https://pulsai-3d-backend-37089211614.us-central1.run.app";
+
+const resolveBackendUrl = () => {
+  if (process.env.NEXT_PUBLIC_BACKEND_URL) return process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host && host !== "localhost" && host !== "127.0.0.1") {
+      return prodBackendUrl;
+    }
+  }
+  return localBackendUrl;
+};
 
 const resolveUrl = (base: string, value?: string | null) => {
   if (!value) return null;
@@ -56,7 +68,7 @@ const formatDate = (value?: unknown) => {
 };
 
 export default function ProjectsPage() {
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || defaultBackendUrl;
+  const backendUrl = resolveBackendUrl();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectSummary | null>(null);
