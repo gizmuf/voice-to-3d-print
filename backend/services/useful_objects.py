@@ -124,7 +124,7 @@ USEFUL_KEYWORDS = {
     "cable_organizer": ("cable", "cord", "wire", "organizer"),
     "bracket": ("bracket", "support", "mounting"),
     "cylindrical_holder": ("cup", "holder", "pen", "cylinder"),
-    "wall_mount": ("wall mount", "wall", "mount"),
+    "wall_mount": ("wall mount", "wall-mounted", "mount"),
 }
 
 CREATIVE_KEYWORDS = (
@@ -156,7 +156,16 @@ class UsefulBuild:
     structured_spec: Dict[str, Any]
 
 
-CADQUERY_TEMPLATES = {"phone_stand", "simple_box", "tray"}
+CADQUERY_TEMPLATES = {
+    "phone_stand",
+    "simple_box",
+    "tray",
+    "hook",
+    "cable_organizer",
+    "bracket",
+    "cylindrical_holder",
+    "wall_mount",
+}
 
 
 def _deep_copy(value: Any) -> Any:
@@ -190,6 +199,8 @@ def _detect_template(text: str, existing_template: str | None = None) -> str:
     lowered = text.lower()
     if "phone stand" in lowered or ("stand" in lowered and "phone" in lowered):
         return "phone_stand"
+    if any(word in lowered for word in ("cylindrical holder", "pen holder", "cup holder")):
+        return "cylindrical_holder"
     best_template = existing_template or "phone_stand"
     best_score = 0
     for template_id, keywords in USEFUL_KEYWORDS.items():
@@ -205,9 +216,13 @@ def _detect_template(text: str, existing_template: str | None = None) -> str:
         return "bracket"
     if "hook" in lowered:
         return "hook"
+    if any(word in lowered for word in ("holder", "cylinder", "diameter")) and "mount" not in lowered:
+        return "cylindrical_holder"
     if any(word in lowered for word in ("cable", "cord", "wire")) and "stand" not in lowered:
         return "cable_organizer"
-    if any(word in lowered for word in ("mount", "wall")):
+    if "wall mount" in lowered or "wall-mounted" in lowered:
+        return "wall_mount"
+    if " mount" in lowered or lowered.startswith("mount "):
         return "wall_mount"
     return best_template
 
@@ -470,6 +485,133 @@ def _build_simple_box_cadquery(spec: Dict[str, Any], open_top_default: bool = Tr
     return outer
 
 
+def _build_hook_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    depth = float(dims["depth"])
+    height = float(dims["height"])
+    plate_thickness = float(constraints.get("plate_thickness_mm", 5.0))
+    hook_thickness = float(constraints.get("hook_thickness_mm", 10.0))
+    gap = float(constraints.get("hook_gap_mm", 24.0))
+
+    plate = cq.Workplane("XY").box(width, plate_thickness, height, centered=(True, True, False))
+    spine_length = max(hook_thickness, depth - gap)
+    spine = (
+        cq.Workplane("XY")
+        .box(hook_thickness, spine_length, hook_thickness, centered=(True, True, False))
+        .translate((0, spine_length / 2.0, 0))
+    )
+    tip = (
+        cq.Workplane("YZ")
+        .center(0, hook_thickness / 2.0)
+        .circle(hook_thickness / 2.0)
+        .extrude(width * 0.6, both=True)
+        .translate((0, depth - hook_thickness, 0))
+    )
+    return plate.union(spine).union(tip)
+
+
+def _build_cable_organizer_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    depth = float(dims["depth"])
+    height = float(dims["height"])
+    wall = max(float(constraints.get("wall_thickness_mm", 3.0)), 1.2)
+    slot_count = max(1, int(round(float(constraints.get("slot_count", 3.0)))))
+    slot_width = float(constraints.get("slot_width_mm", 8.0))
+
+    tray = _build_simple_box_cadquery(
+        {
+            "dimensions_mm": {"width": width, "depth": depth, "height": height},
+            "constraints": {
+                "wall_thickness_mm": wall,
+                "open_top": True,
+                "hollow": True,
+                "fillet_mm": 1.0,
+            },
+        },
+        open_top_default=True,
+    )
+    slot_spacing = width / (slot_count + 1)
+    for index in range(slot_count):
+        slot = (
+            cq.Workplane("XY")
+            .box(slot_width, depth * 0.8, height * 0.7, centered=(True, True, False))
+            .translate((-width / 2.0 + slot_spacing * (index + 1), 0, height * 0.35))
+        )
+        tray = tray.cut(slot)
+    return tray
+
+
+def _build_bracket_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    depth = float(dims["depth"])
+    height = float(dims["height"])
+    thickness = float(constraints.get("thickness_mm", 6.0))
+    hole_diameter = float(constraints.get("hole_diameter_mm", 0.0) or 0.0)
+
+    base = cq.Workplane("XY").box(width, depth, thickness, centered=(True, True, False))
+    wall = (
+        cq.Workplane("XY")
+        .box(width, thickness, height, centered=(True, True, False))
+        .translate((0, depth / 2.0 - thickness / 2.0, 0))
+    )
+    bracket = base.union(wall)
+    if hole_diameter > 0:
+        hole = (
+            cq.Workplane("XY")
+            .cylinder(thickness * 4.0, hole_diameter / 2.0)
+            .translate((0, depth / 3.0, height / 2.0))
+        )
+        bracket = bracket.cut(hole)
+    return bracket
+
+
+def _build_cylindrical_holder_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    diameter = float(dims["diameter"])
+    height = float(dims["height"])
+    wall = max(float(constraints.get("wall_thickness_mm", 3.0)), 1.2)
+    base_thickness = max(float(constraints.get("base_thickness_mm", 4.0)), 1.2)
+
+    outer = cq.Workplane("XY").cylinder(height, diameter / 2.0, centered=(True, True, False))
+    inner = (
+        cq.Workplane("XY")
+        .cylinder(max(1.0, height - base_thickness), max(1.0, diameter / 2.0 - wall), centered=(True, True, False))
+        .translate((0, 0, base_thickness))
+    )
+    return outer.cut(inner)
+
+
+def _build_wall_mount_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    depth = float(dims["depth"])
+    height = float(dims["height"])
+    plate_thickness = float(constraints.get("plate_thickness_mm", 6.0))
+    arm_thickness = float(constraints.get("arm_thickness_mm", 12.0))
+    arm_drop = float(constraints.get("arm_drop_mm", 24.0))
+
+    plate = cq.Workplane("XY").box(width, plate_thickness, height, centered=(True, True, False))
+    arm = (
+        cq.Workplane("XY")
+        .box(width * 0.5, depth, arm_thickness, centered=(True, True, False))
+        .translate((0, depth / 2.0, height - arm_drop - arm_thickness))
+    )
+    lip = (
+        cq.Workplane("XY")
+        .box(width * 0.4, plate_thickness * 3.0, arm_thickness, centered=(True, True, False))
+        .translate((0, depth - plate_thickness, height - arm_drop - arm_thickness))
+    )
+    return plate.union(arm).union(lip)
+
+
 def _build_phone_stand(spec: Dict[str, Any]) -> trimesh.Trimesh:
     dims = spec["dimensions_mm"]
     constraints = spec["constraints"]
@@ -538,6 +680,16 @@ def _cadquery_workplane_for_spec(spec: Dict[str, Any]):
         return _build_simple_box_cadquery(spec, open_top_default=False)
     if template_id == "tray":
         return _build_simple_box_cadquery(spec, open_top_default=True)
+    if template_id == "hook":
+        return _build_hook_cadquery(spec)
+    if template_id == "cable_organizer":
+        return _build_cable_organizer_cadquery(spec)
+    if template_id == "bracket":
+        return _build_bracket_cadquery(spec)
+    if template_id == "cylindrical_holder":
+        return _build_cylindrical_holder_cadquery(spec)
+    if template_id == "wall_mount":
+        return _build_wall_mount_cadquery(spec)
     raise ValueError(f"CadQuery template not implemented: {template_id}")
 
 
