@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -27,6 +28,13 @@ from services.job_store import (
     upload_artifact,
 )
 from services.library import resolve_library_item, search_library
+from services.model_editing import (
+    analyze_model,
+    apply_edit,
+    import_model,
+    preview_edit,
+    public_analysis_payload,
+)
 from services.useful_objects import (
     build_useful_object,
     build_useful_structured_spec,
@@ -181,6 +189,70 @@ class UsefulBuildResponse(BaseModel):
     validation: dict
     bundle_url: str | None = None
     structured_spec: dict
+
+
+class ImportModelResponse(BaseModel):
+    job_id: str
+    model_id: str
+    source_stl_url: str
+    source_glb_url: str
+    analysis: dict
+
+
+class AnalyzeModelRequest(BaseModel):
+    model_id: str
+    revision_id: str | None = None
+
+
+class AnalyzeModelResponse(BaseModel):
+    model_id: str
+    analysis: dict
+
+
+class EditPreviewRequest(BaseModel):
+    model_id: str
+    parent_revision_id: str | None = None
+    selection: dict
+    edit_request: dict
+    prompt: str | None = None
+    job_id: str | None = None
+    project_id: str | None = None
+
+
+class EditPreviewResponse(BaseModel):
+    job_id: str
+    preview_id: str
+    model_id: str
+    glb_url: str
+    stl_url: str
+    analysis: dict
+    structured_edit: dict
+    validation: dict
+    warnings: list[str]
+
+
+class ApplyEditRequest(BaseModel):
+    model_id: str
+    preview_revision_id: str | None = None
+    parent_revision_id: str | None = None
+    selection: dict
+    edit_request: dict
+    prompt: str | None = None
+    job_id: str | None = None
+    project_id: str | None = None
+
+
+class ApplyEditResponse(BaseModel):
+    job_id: str
+    model_id: str
+    glb_url: str
+    stl_url: str
+    gcode_url: str | None = None
+    validation: dict
+    bundle_url: str | None = None
+    analysis: dict
+    structured_edit: dict
+    warnings: list[str]
 
 
 class ProjectCreateRequest(BaseModel):
@@ -444,6 +516,300 @@ def build_useful_endpoint(request: UsefulBuildRequest) -> UsefulBuildResponse:
         validation=validation,
         bundle_url=bundle_url,
         structured_spec=request.structured_spec,
+    )
+
+
+@app.post("/import-model", response_model=ImportModelResponse)
+async def import_model_endpoint(
+    model: UploadFile = File(...),
+    job_id: str | None = Form(None),
+    project_id: str | None = Form(None),
+) -> ImportModelResponse:
+    filename = (model.filename or "upload.stl").strip() or "upload.stl"
+    if not filename.lower().endswith(".stl"):
+        raise HTTPException(status_code=400, detail="Only STL files are supported in the precision edit flow.")
+
+    job_id = job_id or uuid.uuid4().hex
+    ensure_job(
+        job_id,
+        _compact_payload(
+            {
+                "status": "importing",
+                "mode": "existing-model-edit",
+                "revision_type": "import",
+                "provider": "uploaded-stl",
+                "project_id": project_id,
+                "input.type": "stl-upload",
+                "input.file_name": filename,
+            }
+        ),
+    )
+
+    try:
+        content = await model.read()
+        imported = import_model(content, filename, job_id)
+    except Exception as exc:
+        record_error(job_id, "import-model", str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    analysis_payload = public_analysis_payload(imported.analysis)
+
+    stl_url = _artifact_url(None, imported.stl_path, job_id)
+    glb_url = _artifact_url(None, imported.glb_path, job_id)
+
+    update_job(
+        job_id,
+        {
+            "status": "imported",
+            "model_id": imported.model_id,
+            "source_model.stl_url": stl_url,
+            "source_model.glb_url": glb_url,
+            "mesh_analysis": analysis_payload,
+            "artifacts.glb_url": glb_url,
+            "artifacts.stl_url": stl_url,
+        },
+    )
+    if project_id:
+        update_project(project_id, {"current_job_id": job_id})
+
+    _write_metadata(
+        job_id,
+        {
+            "job_id": job_id,
+            "model_id": imported.model_id,
+            "mode": "existing-model-edit",
+            "revision_type": "import",
+            "source_model": {"stl_url": stl_url, "glb_url": glb_url},
+            "mesh_analysis": analysis_payload,
+        },
+    )
+
+    return ImportModelResponse(
+        job_id=job_id,
+        model_id=imported.model_id,
+        source_stl_url=stl_url,
+        source_glb_url=glb_url,
+        analysis=analysis_payload,
+    )
+
+
+@app.post("/analyze-model", response_model=AnalyzeModelResponse)
+def analyze_model_endpoint(request: AnalyzeModelRequest) -> AnalyzeModelResponse:
+    try:
+        analysis = analyze_model(request.model_id, request.revision_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return AnalyzeModelResponse(model_id=request.model_id, analysis=public_analysis_payload(analysis))
+
+
+@app.post("/preview-edit", response_model=EditPreviewResponse)
+def preview_edit_endpoint(request: EditPreviewRequest) -> EditPreviewResponse:
+    job_id = request.job_id or uuid.uuid4().hex
+    ensure_job(
+        job_id,
+        _compact_payload(
+            {
+                "status": "drafting",
+                "mode": "existing-model-edit",
+                "revision_type": "preview_edit",
+                "provider": "cadquery-meshlib-edit",
+                "project_id": request.project_id,
+                "parent_job_id": request.parent_revision_id,
+                "model_id": request.model_id,
+                "selection": request.selection,
+                "edit_request": request.edit_request,
+                "input.prompt_final": request.prompt,
+            }
+        ),
+    )
+
+    try:
+        preview = preview_edit(
+            model_id=request.model_id,
+            job_id=job_id,
+            selection=request.selection,
+            edit_request=request.edit_request,
+            prompt=request.prompt,
+            parent_revision_id=request.parent_revision_id,
+        )
+    except Exception as exc:
+        record_error(job_id, "preview-edit", str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    glb_url = _artifact_url(None, preview.glb_path, job_id)
+    stl_url = _artifact_url(None, preview.stl_path, job_id)
+    analysis_payload = public_analysis_payload(preview.analysis)
+
+    update_job(
+        job_id,
+        {
+            "status": "preview_ready",
+            "artifacts.glb_url": glb_url,
+            "artifacts.stl_url": stl_url,
+            "mesh_analysis": analysis_payload,
+            "selection": request.selection,
+            "edit_request": request.edit_request,
+            "structured_edit": preview.structured_edit,
+            "validation": preview.validation,
+            "fallback_strategy_used": preview.fallback_strategy_used,
+        },
+    )
+
+    _write_metadata(
+        job_id,
+        {
+            "job_id": job_id,
+            "model_id": request.model_id,
+            "mode": "existing-model-edit",
+            "revision_type": "preview_edit",
+            "selection": request.selection,
+            "edit_request": request.edit_request,
+            "structured_edit": preview.structured_edit,
+            "mesh_analysis": analysis_payload,
+            "preview_artifacts": {"glb_url": glb_url, "stl_url": stl_url},
+            "validation": preview.validation,
+            "fallback_strategy_used": preview.fallback_strategy_used,
+        },
+    )
+
+    return EditPreviewResponse(
+        job_id=job_id,
+        preview_id=job_id,
+        model_id=request.model_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        analysis=analysis_payload,
+        structured_edit=preview.structured_edit,
+        validation=preview.validation,
+        warnings=preview.warnings,
+    )
+
+
+@app.post("/apply-edit", response_model=ApplyEditResponse)
+def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
+    job_id = request.job_id or uuid.uuid4().hex
+    parent_revision_id = request.preview_revision_id or request.parent_revision_id
+    ensure_job(
+        job_id,
+        _compact_payload(
+            {
+                "status": "building",
+                "mode": "existing-model-edit",
+                "revision_type": "applied_edit",
+                "provider": "cadquery-meshlib-edit",
+                "project_id": request.project_id,
+                "parent_job_id": parent_revision_id,
+                "model_id": request.model_id,
+                "selection": request.selection,
+                "edit_request": request.edit_request,
+                "input.prompt_final": request.prompt,
+            }
+        ),
+    )
+
+    try:
+        if request.preview_revision_id:
+            source_dir = settings.output_dir / request.preview_revision_id
+            source_stl = source_dir / "model.stl"
+            source_glb = source_dir / "preview.glb"
+            if not source_stl.exists():
+                raise FileNotFoundError("Preview STL was not found for apply-edit.")
+            if not source_glb.exists():
+                source_glb = source_dir / "model.glb"
+            if not source_glb.exists():
+                raise FileNotFoundError("Preview GLB was not found for apply-edit.")
+
+            target_dir = settings.output_dir / job_id
+            target_dir.mkdir(parents=True, exist_ok=True)
+            final_stl = target_dir / "model.stl"
+            final_glb = target_dir / "model.glb"
+            shutil.copy(source_stl, final_stl)
+            shutil.copy(source_glb, final_glb)
+            validation = validate_mesh_file(final_stl)
+            analysis = analyze_model(request.model_id, request.preview_revision_id)
+            structured_edit = dict(request.edit_request)
+            fallback_strategy_used = None
+            gcode_generated = _slice_mesh(final_stl, target_dir / "output.gcode")
+            validation["gcode_status"] = "generated" if gcode_generated else "not_generated"
+            gcode_path = target_dir / "output.gcode" if gcode_generated else None
+
+            applied = type("AppliedPreview", (), {})()
+            applied.glb_path = final_glb
+            applied.stl_path = final_stl
+            applied.analysis = analysis
+            applied.structured_edit = structured_edit
+            applied.validation = validation
+            applied.warnings = validation.get("warnings", [])
+            applied.fallback_strategy_used = fallback_strategy_used
+        else:
+            applied = apply_edit(
+                model_id=request.model_id,
+                job_id=job_id,
+                selection=request.selection,
+                edit_request=request.edit_request,
+                prompt=request.prompt,
+                parent_revision_id=parent_revision_id,
+            )
+            gcode_generated = _slice_mesh(applied.stl_path, applied.stl_path.parent / "output.gcode")
+            applied.validation["gcode_status"] = "generated" if gcode_generated else "not_generated"
+            gcode_path = applied.stl_path.parent / "output.gcode" if gcode_generated else None
+    except Exception as exc:
+        record_error(job_id, "apply-edit", str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    glb_url = _artifact_url(None, applied.glb_path, job_id)
+    stl_url = _artifact_url(None, applied.stl_path, job_id)
+    gcode_url = _artifact_url(None, gcode_path, job_id) if gcode_path else None
+    analysis_payload = public_analysis_payload(applied.analysis)
+
+    update_job(
+        job_id,
+        {
+            "status": "ready" if applied.validation.get("validation_status") != "failed" else "needs_review",
+            "artifacts.glb_url": glb_url,
+            "artifacts.stl_url": stl_url,
+            "artifacts.gcode_url": gcode_url,
+            "mesh_analysis": analysis_payload,
+            "selection": request.selection,
+            "edit_request": request.edit_request,
+            "structured_edit": applied.structured_edit,
+            "validation": applied.validation,
+            "fallback_strategy_used": applied.fallback_strategy_used,
+        },
+    )
+    if request.project_id:
+        update_project(request.project_id, {"current_job_id": job_id})
+
+    _write_metadata(
+        job_id,
+        {
+            "job_id": job_id,
+            "model_id": request.model_id,
+            "mode": "existing-model-edit",
+            "revision_type": "applied_edit",
+            "selection": request.selection,
+            "edit_request": request.edit_request,
+            "structured_edit": applied.structured_edit,
+            "mesh_analysis": analysis_payload,
+            "artifacts": {"glb_url": glb_url, "stl_url": stl_url, "gcode_url": gcode_url},
+            "validation": applied.validation,
+            "fallback_strategy_used": applied.fallback_strategy_used,
+        },
+    )
+
+    bundle_response = bundle(job_id)
+    return ApplyEditResponse(
+        job_id=job_id,
+        model_id=request.model_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        gcode_url=gcode_url,
+        validation=applied.validation,
+        bundle_url=bundle_response.get("url"),
+        analysis=analysis_payload,
+        structured_edit=applied.structured_edit,
+        warnings=applied.warnings,
     )
 
 

@@ -1,19 +1,168 @@
 "use client";
 
-import { useEffect } from "react";
+import { Suspense, createElement, useEffect, useMemo, useState } from "react";
+import { Bounds, OrbitControls, useGLTF } from "@react-three/drei";
+import { Canvas, type ThreeEvent } from "@react-three/fiber";
+import type { Material, Mesh } from "three";
+import { Color } from "three";
 
-const ModelViewerElement = "model-viewer" as any;
+type SelectionPayload = {
+  objectName: string;
+  point: { x: number; y: number; z: number };
+  normal: { x: number; y: number; z: number } | null;
+};
+
+type ModelViewerProps = {
+  src?: string | null;
+  ghostModelUrl?: string | null;
+  label?: string;
+  showChanges?: boolean;
+  isUpdating?: boolean;
+  onSelect?: (payload: SelectionPayload) => void;
+};
+
+type LoadedModelProps = {
+  src: string;
+  ghost?: boolean;
+  hoveredObjectId: string | null;
+  selectedObjectId: string | null;
+  onHover?: (objectId: string | null) => void;
+  onSelect?: (payload: SelectionPayload, objectId: string) => void;
+};
+
+const GHOST_OPACITY = 0.25;
+const HOVER_COLOR = new Color("#f59f3a");
+const SELECTED_COLOR = new Color("#2b8c7a");
+const BASE_EMISSIVE = new Color("#000000");
+
+const isMesh = (value: unknown): value is Mesh => {
+  return Boolean(value && typeof value === "object" && "isMesh" in (value as Mesh));
+};
+
+const hasEmissive = (
+  material: Material
+): material is Material & { emissive: Color; emissiveIntensity: number } => {
+  return "emissive" in material && material.emissive instanceof Color;
+};
+
+const cloneMaterial = (material: Material) => {
+  const cloned = material.clone();
+  if ("toneMapped" in cloned) {
+    cloned.toneMapped = true;
+  }
+  return cloned;
+};
+
+function LoadedModel({
+  src,
+  ghost = false,
+  hoveredObjectId,
+  selectedObjectId,
+  onHover,
+  onSelect,
+}: LoadedModelProps) {
+  const gltf = useGLTF(src);
+  const scene = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
+  const meshes = useMemo(() => {
+    const collected: Mesh[] = [];
+    scene.traverse((child) => {
+      if (isMesh(child)) {
+        if (Array.isArray(child.material)) {
+          child.material = child.material.map((material) => cloneMaterial(material));
+        } else if (child.material) {
+          child.material = cloneMaterial(child.material);
+        }
+        collected.push(child);
+      }
+    });
+    return collected;
+  }, [scene]);
+
+  useEffect(() => {
+    for (const mesh of meshes) {
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const isHovered = mesh.uuid === hoveredObjectId;
+      const isSelected = mesh.uuid === selectedObjectId;
+      const tint = isSelected ? SELECTED_COLOR : isHovered ? HOVER_COLOR : BASE_EMISSIVE;
+
+      materials.forEach((material) => {
+        if ("transparent" in material) {
+          material.transparent = ghost;
+        }
+        if ("opacity" in material) {
+          material.opacity = ghost ? GHOST_OPACITY : 1;
+        }
+        if ("depthWrite" in material) {
+          material.depthWrite = !ghost;
+        }
+        if (hasEmissive(material)) {
+          material.emissive.copy(tint);
+          material.emissiveIntensity = ghost ? 0 : isSelected ? 0.5 : isHovered ? 0.35 : 0;
+        }
+      });
+    }
+  }, [ghost, hoveredObjectId, meshes, selectedObjectId]);
+
+  const handlePointerMove = (event: ThreeEvent<PointerEvent>) => {
+    if (ghost) return;
+    event.stopPropagation();
+    onHover?.(event.object.uuid);
+  };
+
+  const handlePointerOut = (event: ThreeEvent<PointerEvent>) => {
+    if (ghost) return;
+    event.stopPropagation();
+    onHover?.(null);
+  };
+
+  const handleClick = (event: ThreeEvent<MouseEvent>) => {
+    if (ghost) return;
+    event.stopPropagation();
+    onSelect?.(
+      {
+        objectName: event.object.name || "mesh",
+        point: {
+          x: Number(event.point.x.toFixed(3)),
+          y: Number(event.point.y.toFixed(3)),
+          z: Number(event.point.z.toFixed(3)),
+        },
+        normal: event.face?.normal
+          ? {
+              x: Number(event.face.normal.x.toFixed(3)),
+              y: Number(event.face.normal.y.toFixed(3)),
+              z: Number(event.face.normal.z.toFixed(3)),
+            }
+          : null,
+      },
+      event.object.uuid
+    );
+  };
+
+  return createElement("primitive", {
+    object: scene,
+    onPointerMove: handlePointerMove,
+    onPointerOut: handlePointerOut,
+    onClick: handleClick,
+  });
+}
 
 export default function ModelViewer({
   src,
-  label
-}: {
-  src?: string | null;
-  label?: string;
-}) {
+  ghostModelUrl,
+  label,
+  showChanges = false,
+  isUpdating = false,
+  onSelect,
+}: ModelViewerProps) {
+  const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+
   useEffect(() => {
-    import("@google/model-viewer");
-  }, []);
+    setHoveredObjectId(null);
+    setSelectedObjectId(null);
+    setSelectedLabel(null);
+  }, [src, ghostModelUrl]);
 
   if (!src) {
     return (
@@ -26,18 +175,61 @@ export default function ModelViewer({
     );
   }
 
+  const hasGhost = Boolean(showChanges && ghostModelUrl);
+
   return (
     <div className="model-viewer-wrap">
-      <ModelViewerElement
-        src={src}
-        alt={label || "Generated 3D model"}
-        ar
-        camera-controls
-        auto-rotate
-        shadow-intensity="1"
-        exposure="0.95"
-        style={{ width: "100%", height: "100%" }}
-      />
+      <Canvas
+        camera={{ position: [2.8, 2.2, 2.8], fov: 40 }}
+        dpr={[1, 2]}
+        onPointerMissed={() => setHoveredObjectId(null)}
+      >
+        {createElement("color", { attach: "background", args: ["#fff8ef"] })}
+        {createElement("ambientLight", { intensity: 0.9 })}
+        {createElement("directionalLight", { position: [5, 8, 4], intensity: 1.25 })}
+        {createElement("directionalLight", { position: [-4, 3, -5], intensity: 0.4 })}
+        <Suspense fallback={null}>
+          <Bounds fit clip observe margin={1.2}>
+            <>
+              {hasGhost && ghostModelUrl ? (
+                <LoadedModel
+                  src={ghostModelUrl}
+                  ghost
+                  hoveredObjectId={hoveredObjectId}
+                  selectedObjectId={selectedObjectId}
+                />
+              ) : null}
+              <LoadedModel
+                src={src}
+                hoveredObjectId={hoveredObjectId}
+                selectedObjectId={selectedObjectId}
+                onHover={setHoveredObjectId}
+                onSelect={(payload, objectId) => {
+                  setSelectedObjectId(objectId);
+                  setSelectedLabel(payload.objectName);
+                  onSelect?.(payload);
+                }}
+              />
+            </>
+          </Bounds>
+        </Suspense>
+        <OrbitControls enableDamping dampingFactor={0.08} />
+      </Canvas>
+
+      <div className="model-overlay">
+        {label ? <div className="model-overlay-chip">{label}</div> : null}
+        {hasGhost ? <div className="model-overlay-chip subtle">Showing changes</div> : null}
+        {selectedLabel ? (
+          <div className="model-overlay-chip accent">Selected {selectedLabel}</div>
+        ) : null}
+      </div>
+
+      {isUpdating ? (
+        <div className="model-loading">
+          <div className="model-loading-spinner" />
+          <span>Updating preview…</span>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,7 +19,17 @@ PROJECTS_COLLECTION = "three_d_projects"
 
 
 def _firebase_enabled() -> bool:
-    return bool(settings.firebase_project_id or settings.firebase_storage_bucket)
+    if not (settings.firebase_project_id or settings.firebase_storage_bucket):
+        return False
+    if os.getenv("FIREBASE_FORCE_REMOTE", "").lower() in {"1", "true", "yes"}:
+        return True
+    if os.getenv("K_SERVICE"):
+        return True
+    if os.getenv("FIRESTORE_EMULATOR_HOST") or os.getenv("FIREBASE_AUTH_EMULATOR_HOST"):
+        return True
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        return True
+    return False
 
 
 def _init_firebase() -> None:

@@ -402,7 +402,14 @@ def build_useful_structured_spec(
         "template_id": template_id,
         "object_label": TEMPLATE_LABELS[template_id],
         "dimensions_mm": {key: round(float(value), 2) for key, value in dimensions.items()},
-        "constraints": {key: round(float(value), 2) if isinstance(value, (int, float)) else value for key, value in constraints.items()},
+        "constraints": {
+            key: value
+            if isinstance(value, bool)
+            else round(float(value), 2)
+            if isinstance(value, (int, float))
+            else value
+            for key, value in constraints.items()
+        },
         "assumptions": assumptions,
         "confidence": round(confidence, 2),
         "source_inputs": {"text": prompt, "source": source},

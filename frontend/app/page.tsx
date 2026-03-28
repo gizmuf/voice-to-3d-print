@@ -1,15 +1,85 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import ExistingModelPanel from "../components/ExistingModelPanel";
 import ModelViewer from "../components/ModelViewer";
 import VoicePanel from "../components/VoicePanel";
 
 export default function Home() {
+  const [workflowMode, setWorkflowMode] = useState<"useful" | "creative" | "edit">("useful");
   const [modelUrl, setModelUrl] = useState<string | null>(null);
+  const [sourceModelUrl, setSourceModelUrl] = useState<string | null>(null);
+  const [ghostModelUrl, setGhostModelUrl] = useState<string | null>(null);
   const [stlUrl, setStlUrl] = useState<string | null>(null);
   const [gcodeUrl, setGcodeUrl] = useState<string | null>(null);
   const [bundleUrl, setBundleUrl] = useState<string | null>(null);
+  const [isPreviewUpdating, setIsPreviewUpdating] = useState(false);
+  const [showChanges, setShowChanges] = useState(true);
+  const workflowModeRef = useRef(workflowMode);
+
+  useEffect(() => {
+    workflowModeRef.current = workflowMode;
+  }, [workflowMode]);
+
+  useEffect(() => {
+    setGhostModelUrl(null);
+    setIsPreviewUpdating(false);
+    setModelUrl(null);
+    setSourceModelUrl(null);
+    setStlUrl(null);
+    setGcodeUrl(null);
+    setBundleUrl(null);
+  }, [workflowMode]);
+
+  const createModeGuard = useMemo(() => {
+    return (
+      allowedModes: Array<"useful" | "creative" | "edit">,
+      setter: (value: string | null) => void
+    ) => {
+      return (value: string | null) => {
+        if (!allowedModes.includes(workflowModeRef.current)) return;
+        setter(value);
+      };
+    };
+  }, []);
+
+  const createPreviewFlagGuard = useMemo(() => {
+    return (allowedModes: Array<"useful" | "creative" | "edit">) => {
+      return (value: boolean) => {
+        if (!allowedModes.includes(workflowModeRef.current)) return;
+        setIsPreviewUpdating(value);
+      };
+    };
+  }, []);
+
+  const heroCopy =
+    workflowMode === "edit"
+      ? {
+          eyebrow: "Upload → Select → Preview → Export",
+          title: "Modify real printable parts with",
+          highlight: " precise STL edits",
+          body: "Edit Existing Model mode imports STL files, detects planar faces and openings, previews exact local modifications, and exports a validated STL revision.",
+          pipeline: "Precision editing",
+          primary: "Existing Model",
+        }
+      : workflowMode === "creative"
+        ? {
+            eyebrow: "Prompt → Generate → Repair → Export",
+            title: "Build imaginative prints from",
+            highlight: " creative prompts",
+            body: "Creative Object mode keeps the mesh-generation path available for figurines, decorative objects, and image-led concepts while preserving STL-first output.",
+            pipeline: "Creative beta",
+            primary: "Creative Object",
+          }
+        : {
+            eyebrow: "Voice → Confirm → Preview → Export",
+            title: "Build practical prints from",
+            highlight: " spoken ideas",
+            body: "Useful Object mode leads with voice, confirms dimensions and assumptions, drafts a preview, and exports a validated STL for real-world prints.",
+            pipeline: "Voice-first",
+            primary: "Useful Object",
+          };
 
   return (
     <main className="page">
@@ -21,25 +91,50 @@ export default function Home() {
       </nav>
       <header className="hero">
         <div>
-          <p className="eyebrow">Voice → Confirm → Preview → Export</p>
+          <p className="eyebrow">{heroCopy.eyebrow}</p>
+          <div className="mode-switch hero-switch" role="tablist" aria-label="Workflow mode">
+            <button
+              type="button"
+              className={`mode-chip ${workflowMode === "useful" ? "active" : ""}`}
+              onClick={() => {
+                setWorkflowMode("useful");
+                setSourceModelUrl(null);
+              }}
+            >
+              Useful Object
+            </button>
+            <button
+              type="button"
+              className={`mode-chip ${workflowMode === "creative" ? "active" : ""}`}
+              onClick={() => {
+                setWorkflowMode("creative");
+                setSourceModelUrl(null);
+              }}
+            >
+              Creative Object (Beta)
+            </button>
+            <button
+              type="button"
+              className={`mode-chip ${workflowMode === "edit" ? "active" : ""}`}
+              onClick={() => setWorkflowMode("edit")}
+            >
+              Edit Existing Model
+            </button>
+          </div>
           <h1>
-            Build practical prints from
-            <span className="highlight"> spoken ideas</span>.
+            {heroCopy.title}
+            <span className="highlight"> {heroCopy.highlight}</span>.
           </h1>
-          <p className="hero-body">
-            Useful Object mode now leads with voice, confirms dimensions and
-            assumptions, drafts a preview, and exports a validated STL. Creative
-            Object mode stays available as a beta path for mesh generation.
-          </p>
+          <p className="hero-body">{heroCopy.body}</p>
         </div>
         <div className="hero-card">
           <div className="hero-stat">
             <span>Pipeline</span>
-            <strong>Voice-first</strong>
+            <strong>{heroCopy.pipeline}</strong>
           </div>
           <div className="hero-stat">
             <span>Primary mode</span>
-            <strong>Useful Object</strong>
+            <strong>{heroCopy.primary}</strong>
           </div>
           <div className="hero-stat">
             <span>Output</span>
@@ -49,26 +144,80 @@ export default function Home() {
       </header>
 
       <div className="grid">
-        <VoicePanel
-          onModelUrl={setModelUrl}
-          onStlUrl={setStlUrl}
-          onGcodeUrl={setGcodeUrl}
-          onBundleUrl={setBundleUrl}
-        />
+        {workflowMode === "edit" ? (
+          <ExistingModelPanel
+            onModelUrl={createModeGuard(["edit"], setModelUrl)}
+            onSourceModelUrl={createModeGuard(["edit"], setSourceModelUrl)}
+            onStlUrl={createModeGuard(["edit"], setStlUrl)}
+            onGcodeUrl={createModeGuard(["edit"], setGcodeUrl)}
+            onBundleUrl={createModeGuard(["edit"], setBundleUrl)}
+          />
+        ) : (
+          <VoicePanel
+            onModelUrl={createModeGuard(["useful", "creative"], setModelUrl)}
+            onGhostModelUrl={createModeGuard(["useful", "creative"], setGhostModelUrl)}
+            onPreviewUpdating={createPreviewFlagGuard(["useful", "creative"])}
+            onStlUrl={createModeGuard(["useful", "creative"], setStlUrl)}
+            onGcodeUrl={createModeGuard(["useful", "creative"], setGcodeUrl)}
+            onBundleUrl={createModeGuard(["useful", "creative"], setBundleUrl)}
+            workflowMode={workflowMode}
+            hideModeSwitch
+          />
+        )}
 
         <section className="panel model-panel">
           <div className="panel-header">
             <p className="eyebrow">3D Preview</p>
-            <h2>Inspect the current revision</h2>
+            <h2>{workflowMode === "edit" ? "Inspect the original and edited revision" : "Inspect the current revision"}</h2>
             <p className="panel-subtitle">
-              Rotate, zoom, and validate the geometry before exporting the
-              STL bundle.
+              {workflowMode === "edit"
+                ? "Use the original model as a stable reference while previewing the current edited revision."
+                : "Rotate, zoom, and validate the geometry before exporting the STL bundle."}
             </p>
           </div>
 
-          <div className="model-shell">
-            <ModelViewer src={modelUrl} label="Generated object" />
-          </div>
+          {workflowMode === "edit" && sourceModelUrl ? (
+            <div className="compare-grid">
+              <div className="model-stack">
+                <div className="status-label">Original import</div>
+                <div className="model-shell">
+                  <ModelViewer src={sourceModelUrl} label="Imported STL" />
+                </div>
+              </div>
+              <div className="model-stack">
+                <div className="status-label">Current revision</div>
+                <div className="model-shell">
+                  <ModelViewer src={modelUrl || sourceModelUrl} label="Edited STL" />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              {workflowMode === "useful" ? (
+                <div className="model-toolbar">
+                  <button
+                    type="button"
+                    className="mode-chip"
+                    onClick={() => setShowChanges((prev) => !prev)}
+                    disabled={!ghostModelUrl}
+                  >
+                    {showChanges ? "Hide changes" : "Show changes"}
+                  </button>
+                  {isPreviewUpdating ? <span className="chip chip-warm">Updating preview</span> : null}
+                </div>
+              ) : null}
+              <div className="model-shell">
+                <ModelViewer
+                  src={modelUrl}
+                  ghostModelUrl={workflowMode === "useful" ? ghostModelUrl : null}
+                  showChanges={workflowMode === "useful" ? showChanges : false}
+                  isUpdating={workflowMode === "useful" ? isPreviewUpdating : false}
+                  label="Generated object"
+                  onSelect={() => undefined}
+                />
+              </div>
+            </>
+          )}
 
           <div className="actions">
             <a

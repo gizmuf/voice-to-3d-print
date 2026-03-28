@@ -1,14 +1,19 @@
 "use client";
 
 import type { ChangeEvent, FormEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
+import { stableStringify } from "../lib/stable-json";
 
 type VoicePanelProps = {
   onModelUrl: (url: string | null) => void;
+  onGhostModelUrl?: (url: string | null) => void;
+  onPreviewUpdating?: (updating: boolean) => void;
   onStlUrl: (url: string | null) => void;
   onGcodeUrl: (url: string | null) => void;
   onBundleUrl: (url: string | null) => void;
+  workflowMode?: "useful" | "creative";
+  hideModeSwitch?: boolean;
 };
 
 type ProjectSummary = {
@@ -100,6 +105,11 @@ type LibraryItem = {
   glb_url?: string;
 };
 
+type PendingPreview = {
+  spec: StructuredSpec;
+  specKey: string;
+};
+
 class TimeoutError extends Error {
   name = "TimeoutError";
 
@@ -132,6 +142,48 @@ const creativePromptExamples = [
   "A toy robot with chunky legs and a friendly face",
   "A decorative moon lantern with star cutouts",
 ];
+
+const DIMENSION_ORDER: Record<string, string[]> = {
+  phone_stand: ["height", "width", "depth"],
+  simple_box: ["width", "depth", "height"],
+  tray: ["width", "depth", "height"],
+  hook: ["height", "depth", "width"],
+  cable_organizer: ["width", "depth", "height"],
+  bracket: ["width", "height", "depth"],
+  cylindrical_holder: ["height", "diameter"],
+  wall_mount: ["height", "width", "depth"],
+};
+
+const CONSTRAINT_ORDER: Record<string, string[]> = {
+  phone_stand: [
+    "angle_deg",
+    "base_thickness_mm",
+    "back_thickness_mm",
+    "lip_height_mm",
+    "cable_hole_diameter_mm",
+    "slot_width_mm",
+    "slot_depth_mm",
+  ],
+  simple_box: ["wall_thickness_mm", "open_top", "hollow", "fillet_mm"],
+  tray: ["wall_thickness_mm", "fillet_mm"],
+  hook: ["hook_thickness_mm", "hook_gap_mm", "plate_thickness_mm"],
+  cable_organizer: ["slot_count", "slot_width_mm", "wall_thickness_mm"],
+  bracket: ["thickness_mm", "hole_diameter_mm"],
+  cylindrical_holder: ["wall_thickness_mm", "base_thickness_mm"],
+  wall_mount: ["plate_thickness_mm", "arm_thickness_mm", "arm_drop_mm"],
+};
+
+const sortKeys = (keys: string[], preferred: string[] | undefined) => {
+  const preferredOrder = preferred || [];
+  return [...keys].sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left);
+    const rightIndex = preferredOrder.indexOf(right);
+    if (leftIndex === -1 && rightIndex === -1) return left.localeCompare(right);
+    if (leftIndex === -1) return 1;
+    if (rightIndex === -1) return -1;
+    return leftIndex - rightIndex;
+  });
+};
 
 const humanStatus = (status: string) => {
   switch (status) {
@@ -180,12 +232,16 @@ const fetchWithTimeout = async (
 
 export default function VoicePanel({
   onModelUrl,
+  onGhostModelUrl,
+  onPreviewUpdating,
   onStlUrl,
   onGcodeUrl,
   onBundleUrl,
+  workflowMode,
+  hideModeSwitch = false,
 }: VoicePanelProps) {
   const backendUrl = resolveBackendUrl();
-  const [mode, setMode] = useState<"useful" | "creative">("useful");
+  const [mode, setMode] = useState<"useful" | "creative">(workflowMode || "useful");
   const [status, setStatus] = useState("idle");
   const [manualText, setManualText] = useState("");
   const [routeResult, setRouteResult] = useState<RouteIntentResponse | null>(null);
@@ -196,7 +252,8 @@ export default function VoicePanel({
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageLabel, setImageLabel] = useState<string | null>(null);
   const [revisionNote, setRevisionNote] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [isPreviewUpdating, setIsPreviewUpdating] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const [speechSupport, setSpeechSupport] = useState(false);
   const [recordingSupport, setRecordingSupport] = useState(false);
@@ -210,10 +267,19 @@ export default function VoicePanel({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [creativeProvider, setCreativeProvider] = useState("meshy");
   const [libraryResults, setLibraryResults] = useState<LibraryItem[]>([]);
+  const [lastSuccessfulSpec, setLastSuccessfulSpec] = useState<StructuredSpec | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const isMountedRef = useRef(true);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewInFlightRef = useRef(false);
+  const queuedPreviewRef = useRef<PendingPreview | null>(null);
+  const latestPreviewTokenRef = useRef(0);
+  const lastRequestedSpecKeyRef = useRef<string | null>(null);
+  const lastPreviewedSpecKeyRef = useRef<string | null>(null);
+  const currentModelUrlRef = useRef<string | null>(null);
 
   const createJobId = () => {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -221,6 +287,63 @@ export default function VoicePanel({
     }
     return `job-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   };
+
+  const syncPreviewUpdating = (updating: boolean) => {
+    if (!isMountedRef.current) return;
+    setIsPreviewUpdating(updating);
+    onPreviewUpdating?.(updating);
+  };
+
+  const invalidatePreviewRequests = () => {
+    latestPreviewTokenRef.current += 1;
+    previewInFlightRef.current = false;
+    queuedPreviewRef.current = null;
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    syncPreviewUpdating(false);
+  };
+
+  const resetOutputs = () => {
+    onStlUrl(null);
+    onGcodeUrl(null);
+    onBundleUrl(null);
+    setValidation(null);
+  };
+
+  const resetViewer = () => {
+    onModelUrl(null);
+    onGhostModelUrl?.(null);
+    currentModelUrlRef.current = null;
+  };
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      invalidatePreviewRequests();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (workflowMode) {
+      setMode(workflowMode);
+    }
+  }, [workflowMode]);
+
+  useEffect(() => {
+    invalidatePreviewRequests();
+    setRouteResult(null);
+    setStructuredSpec(null);
+    setPreviewJobId(null);
+    setBuildJobId(null);
+    setLastSuccessfulSpec(null);
+    setLastError(null);
+    setStatus("idle");
+    resetOutputs();
+    resetViewer();
+  }, [mode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -300,10 +423,13 @@ export default function VoicePanel({
           TIMEOUTS.health
         );
         if (!response.ok) throw new Error("Health check failed");
+        if (!isMountedRef.current) return;
         setHealth((await response.json()) as HealthResponse);
       } catch (error) {
         console.warn("Health check failed", error);
-        setHealth(null);
+        if (isMountedRef.current) {
+          setHealth(null);
+        }
       }
     };
     void loadHealth();
@@ -323,11 +449,14 @@ export default function VoicePanel({
       );
       if (!response.ok) throw new Error("Projects fetch failed");
       const data = await response.json();
+      if (!isMountedRef.current) return;
       setProjects((data.items || []) as ProjectSummary[]);
     } catch (error) {
       console.warn("Project refresh failed", error);
     } finally {
-      setIsLoadingProjects(false);
+      if (isMountedRef.current) {
+        setIsLoadingProjects(false);
+      }
     }
   };
 
@@ -346,26 +475,137 @@ export default function VoicePanel({
     );
     if (!response.ok) throw new Error("Project creation failed");
     const data = await response.json();
+    if (!isMountedRef.current) return null;
     const project = data.project as ProjectSummary;
     setProjects((prev) => [project, ...prev]);
     setActiveProjectId(project.project_id);
     return project;
   };
 
-  const resetOutputs = () => {
-    onStlUrl(null);
-    onGcodeUrl(null);
-    onBundleUrl(null);
-    setValidation(null);
+  const dispatchUsefulPreview = async (spec: StructuredSpec, specKey: string) => {
+    if (!isMountedRef.current || mode !== "useful") return;
+
+    previewInFlightRef.current = true;
+    lastRequestedSpecKeyRef.current = specKey;
+    const previewToken = latestPreviewTokenRef.current + 1;
+    latestPreviewTokenRef.current = previewToken;
+    syncPreviewUpdating(true);
+    setLastError(null);
+    setStatus("drafting");
+
+    try {
+      const project = await ensureProjectContext(spec.object_label);
+      if (!isMountedRef.current || previewToken !== latestPreviewTokenRef.current) {
+        return;
+      }
+
+      const response = await fetchWithTimeout(
+        `${backendUrl}/preview-useful`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            structured_spec: spec,
+            job_id: createJobId(),
+            project_id: project?.project_id,
+            parent_job_id: previewJobId,
+            revision_note: revisionNote || null,
+          }),
+        },
+        TIMEOUTS.preview
+      );
+      if (!response.ok) throw new Error("Could not draft a preview");
+
+      const preview = (await response.json()) as UsefulPreviewResponse;
+      if (!isMountedRef.current || previewToken !== latestPreviewTokenRef.current) {
+        return;
+      }
+
+      const nextUrl = resolveUrl(backendUrl, preview.glb_url);
+      const previousUrl = currentModelUrlRef.current;
+      if (previousUrl && previousUrl !== nextUrl) {
+        onGhostModelUrl?.(previousUrl);
+      }
+      currentModelUrlRef.current = nextUrl;
+      setPreviewJobId(preview.preview_id);
+      setStructuredSpec(preview.structured_spec);
+      setLastSuccessfulSpec(preview.structured_spec);
+      lastPreviewedSpecKeyRef.current = specKey;
+      onModelUrl(nextUrl);
+      setStatus("preview-ready");
+      void refreshProjects();
+    } catch (error) {
+      console.error(error);
+      if (!isMountedRef.current || previewToken !== latestPreviewTokenRef.current) {
+        return;
+      }
+      setLastError((error as Error).message || "Something went wrong.");
+      setStatus("error");
+    } finally {
+      if (!isMountedRef.current || previewToken !== latestPreviewTokenRef.current) {
+        return;
+      }
+      previewInFlightRef.current = false;
+      syncPreviewUpdating(false);
+      const queued = queuedPreviewRef.current;
+      queuedPreviewRef.current = null;
+      if (queued && queued.specKey !== lastPreviewedSpecKeyRef.current) {
+        void dispatchUsefulPreview(queued.spec, queued.specKey);
+      }
+    }
   };
+
+  const scheduleUsefulPreview = (
+    nextSpec: StructuredSpec,
+    options?: { immediate?: boolean; force?: boolean }
+  ) => {
+    const immediate = options?.immediate || false;
+    const force = options?.force || false;
+    const specKey = stableStringify(nextSpec);
+
+    if (!force) {
+      if (specKey === lastPreviewedSpecKeyRef.current || specKey === lastRequestedSpecKeyRef.current) {
+        return;
+      }
+    }
+
+    const enqueue = () => {
+      if (!isMountedRef.current || mode !== "useful") return;
+      if (previewInFlightRef.current) {
+        queuedPreviewRef.current = { spec: nextSpec, specKey };
+        return;
+      }
+      void dispatchUsefulPreview(nextSpec, specKey);
+    };
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
+    if (immediate) {
+      enqueue();
+      return;
+    }
+
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      enqueue();
+    }, 300);
+  };
+
+  useEffect(() => {
+    if (mode !== "useful" || !structuredSpec) return;
+    scheduleUsefulPreview(structuredSpec);
+  }, [mode, structuredSpec]);
 
   const handleIdeaSubmit = async (
     textOverride?: string,
     source: "text" | "voice" = "text"
   ) => {
     const rawText = (textOverride ?? manualText).trim();
-    if (!rawText || isProcessing) return;
-    setIsProcessing(true);
+    if (!rawText || isBusy) return;
+    setIsBusy(true);
     setLastError(null);
     setLibraryResults([]);
     resetOutputs();
@@ -391,6 +631,7 @@ export default function VoicePanel({
       );
       if (!response.ok) throw new Error("Could not understand your idea");
       const routed = (await response.json()) as RouteIntentResponse;
+      if (!isMountedRef.current) return;
       setRouteResult(routed);
 
       if (routed.mode === "useful" && routed.structured_spec) {
@@ -402,10 +643,13 @@ export default function VoicePanel({
       await runCreativePipeline(routed.prompt || rawText, source, project?.project_id ?? null);
     } catch (error) {
       console.error(error);
+      if (!isMountedRef.current) return;
       setStatus("error");
       setLastError((error as Error).message || "Something went wrong.");
     } finally {
-      setIsProcessing(false);
+      if (isMountedRef.current) {
+        setIsBusy(false);
+      }
     }
   };
 
@@ -455,7 +699,11 @@ export default function VoicePanel({
     );
     if (!processedResponse.ok) throw new Error("Could not make the creative object printable");
     const processed = (await processedResponse.json()) as ProcessResponse;
-    onModelUrl(resolveUrl(backendUrl, processed.glb_url));
+    if (!isMountedRef.current) return;
+    const nextUrl = resolveUrl(backendUrl, processed.glb_url);
+    currentModelUrlRef.current = nextUrl;
+    onGhostModelUrl?.(null);
+    onModelUrl(nextUrl);
     onStlUrl(resolveUrl(backendUrl, processed.stl_url));
     onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
     onBundleUrl(resolveUrl(backendUrl, processed.bundle_url));
@@ -465,8 +713,8 @@ export default function VoicePanel({
   };
 
   const handleGenerateFromImage = async () => {
-    if (!imageFile || isProcessing) return;
-    setIsProcessing(true);
+    if (!imageFile || isBusy) return;
+    setIsBusy(true);
     setLastError(null);
     resetOutputs();
     const project = await ensureProjectContext(imageLabel || "Image concept");
@@ -511,7 +759,11 @@ export default function VoicePanel({
       );
       if (!processedResponse.ok) throw new Error("Could not process creative image result");
       const processed = (await processedResponse.json()) as ProcessResponse;
-      onModelUrl(resolveUrl(backendUrl, processed.glb_url));
+      if (!isMountedRef.current) return;
+      const nextUrl = resolveUrl(backendUrl, processed.glb_url);
+      currentModelUrlRef.current = nextUrl;
+      onGhostModelUrl?.(null);
+      onModelUrl(nextUrl);
       onStlUrl(resolveUrl(backendUrl, processed.stl_url));
       onGcodeUrl(resolveUrl(backendUrl, processed.gcode_url));
       onBundleUrl(resolveUrl(backendUrl, processed.bundle_url));
@@ -520,16 +772,19 @@ export default function VoicePanel({
       void refreshProjects();
     } catch (error) {
       console.error(error);
+      if (!isMountedRef.current) return;
       setStatus("error");
       setLastError((error as Error).message || "Something went wrong.");
     } finally {
-      setIsProcessing(false);
+      if (isMountedRef.current) {
+        setIsBusy(false);
+      }
     }
   };
 
   const handleDescribeImage = async () => {
-    if (!imageFile || isProcessing) return;
-    setIsProcessing(true);
+    if (!imageFile || isBusy) return;
+    setIsBusy(true);
     setLastError(null);
     try {
       const formData = new FormData();
@@ -542,21 +797,26 @@ export default function VoicePanel({
       );
       if (!response.ok) throw new Error("Could not describe the image");
       const data = await response.json();
+      if (!isMountedRef.current) return;
       setManualText((prev) =>
         prev.trim() ? `${prev.trim()}. Reference image: ${data.prompt}` : data.prompt
       );
       setStatus("confirming");
     } catch (error) {
       console.error(error);
+      if (!isMountedRef.current) return;
       setStatus("error");
       setLastError((error as Error).message || "Something went wrong.");
     } finally {
-      setIsProcessing(false);
+      if (isMountedRef.current) {
+        setIsBusy(false);
+      }
     }
   };
 
   const updateDimension = (key: string, value: string) => {
     if (!structuredSpec) return;
+    resetOutputs();
     setStructuredSpec({
       ...structuredSpec,
       dimensions_mm: {
@@ -568,6 +828,7 @@ export default function VoicePanel({
 
   const updateConstraint = (key: string, value: string) => {
     if (!structuredSpec) return;
+    resetOutputs();
     const current = structuredSpec.constraints[key];
     let next: string | number | boolean = value;
     if (typeof current === "boolean") {
@@ -585,48 +846,16 @@ export default function VoicePanel({
   };
 
   const handlePreviewUseful = async () => {
-    if (!structuredSpec || isProcessing) return;
-    setIsProcessing(true);
-    setLastError(null);
+    if (!structuredSpec || isBusy) return;
     resetOutputs();
-    try {
-      setStatus("drafting");
-      const project = await ensureProjectContext(structuredSpec.object_label);
-      const response = await fetchWithTimeout(
-        `${backendUrl}/preview-useful`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            structured_spec: structuredSpec,
-            job_id: createJobId(),
-            project_id: project?.project_id,
-            parent_job_id: previewJobId,
-            revision_note: revisionNote || null,
-          }),
-        },
-        TIMEOUTS.preview
-      );
-      if (!response.ok) throw new Error("Could not draft a preview");
-      const preview = (await response.json()) as UsefulPreviewResponse;
-      setPreviewJobId(preview.preview_id);
-      setStructuredSpec(preview.structured_spec);
-      onModelUrl(resolveUrl(backendUrl, preview.glb_url));
-      setStatus("preview-ready");
-      void refreshProjects();
-    } catch (error) {
-      console.error(error);
-      setStatus("error");
-      setLastError((error as Error).message || "Something went wrong.");
-    } finally {
-      setIsProcessing(false);
-    }
+    scheduleUsefulPreview(structuredSpec, { immediate: true, force: true });
   };
 
   const handleBuildUseful = async () => {
-    if (!structuredSpec || isProcessing) return;
-    setIsProcessing(true);
+    if (!structuredSpec || isBusy) return;
+    setIsBusy(true);
     setLastError(null);
+    invalidatePreviewRequests();
     try {
       setStatus("building");
       const project = await ensureProjectContext(structuredSpec.object_label);
@@ -648,25 +877,32 @@ export default function VoicePanel({
       );
       if (!response.ok) throw new Error("Could not export a printable STL");
       const build = (await response.json()) as UsefulBuildResponse;
-      setBuildJobId(build.job_id);
-      onModelUrl(resolveUrl(backendUrl, build.glb_url));
+      if (!isMountedRef.current) return;
+      const nextUrl = resolveUrl(backendUrl, build.glb_url);
+      currentModelUrlRef.current = nextUrl;
+      onGhostModelUrl?.(null);
+      onModelUrl(nextUrl);
       onStlUrl(resolveUrl(backendUrl, build.stl_url));
       onGcodeUrl(resolveUrl(backendUrl, build.gcode_url));
       onBundleUrl(resolveUrl(backendUrl, build.bundle_url));
+      setBuildJobId(build.job_id);
       setValidation(build.validation);
       setStatus("ready");
       void refreshProjects();
     } catch (error) {
       console.error(error);
+      if (!isMountedRef.current) return;
       setStatus("error");
       setLastError((error as Error).message || "Something went wrong.");
     } finally {
-      setIsProcessing(false);
+      if (isMountedRef.current) {
+        setIsBusy(false);
+      }
     }
   };
 
   const startListening = async () => {
-    if (isProcessing) return;
+    if (isBusy) return;
     if (recognitionRef.current) {
       setStatus("listening");
       setIsListening(true);
@@ -725,12 +961,29 @@ export default function VoicePanel({
       }
     } catch (error) {
       console.error(error);
+      if (!isMountedRef.current) return;
       setStatus("error");
       setLastError((error as Error).message || "Something went wrong.");
     }
   };
 
   const promptExamples = mode === "useful" ? usefulPromptExamples : creativePromptExamples;
+  const orderedDimensionEntries = useMemo(() => {
+    if (!structuredSpec) return [];
+    const keys = sortKeys(
+      Object.keys(structuredSpec.dimensions_mm),
+      DIMENSION_ORDER[structuredSpec.template_id]
+    );
+    return keys.map((key) => [key, structuredSpec.dimensions_mm[key]] as const);
+  }, [structuredSpec]);
+  const orderedConstraintEntries = useMemo(() => {
+    if (!structuredSpec) return [];
+    const keys = sortKeys(
+      Object.keys(structuredSpec.constraints),
+      CONSTRAINT_ORDER[structuredSpec.template_id]
+    );
+    return keys.map((key) => [key, structuredSpec.constraints[key]] as const);
+  }, [structuredSpec]);
 
   return (
     <section className="panel">
@@ -738,28 +991,30 @@ export default function VoicePanel({
         <p className="eyebrow">Voice-First Designer</p>
         <h2>Describe the object you want to print</h2>
         <p className="panel-subtitle">
-          Speak first, confirm what the system detected, draft a preview, and then
-          export a printable STL.
+          Speak first, confirm what the system detected, refine the live preview,
+          and then export a printable STL.
         </p>
       </div>
 
       <div className="panel-body">
-        <div className="mode-switch" role="tablist" aria-label="Object type">
-          <button
-            type="button"
-            className={`mode-chip ${mode === "useful" ? "active" : ""}`}
-            onClick={() => setMode("useful")}
-          >
-            Useful Object
-          </button>
-          <button
-            type="button"
-            className={`mode-chip ${mode === "creative" ? "active" : ""}`}
-            onClick={() => setMode("creative")}
-          >
-            Creative Object (Beta)
-          </button>
-        </div>
+        {!hideModeSwitch ? (
+          <div className="mode-switch" role="tablist" aria-label="Object type">
+            <button
+              type="button"
+              className={`mode-chip ${mode === "useful" ? "active" : ""}`}
+              onClick={() => setMode("useful")}
+            >
+              Useful Object
+            </button>
+            <button
+              type="button"
+              className={`mode-chip ${mode === "creative" ? "active" : ""}`}
+              onClick={() => setMode("creative")}
+            >
+              Creative Object (Beta)
+            </button>
+          </div>
+        ) : null}
 
         <div className="status-card">
           <div className="status-label">Current stage</div>
@@ -770,6 +1025,13 @@ export default function VoicePanel({
                 ? "Use voice first for stands, holders, trays, hooks, and other practical prints."
                 : "Creative mode keeps the mesh-generation path available for figurines and decorative objects.")}
           </div>
+          {mode === "useful" && structuredSpec ? (
+            <div className="status-chip-row">
+              <span className="chip">Auto preview on</span>
+              {isPreviewUpdating ? <span className="chip chip-warm">Updating</span> : null}
+              {lastSuccessfulSpec ? <span className="chip">Live preview ready</span> : null}
+            </div>
+          ) : null}
         </div>
 
         <div className="voice-surface">
@@ -782,7 +1044,7 @@ export default function VoicePanel({
               type="button"
               className={`voice-button ${isListening ? "active" : ""}`}
               onClick={isListening ? stopListening : startListening}
-              disabled={isProcessing || (!speechSupport && !recordingSupport)}
+              disabled={isBusy || (!speechSupport && !recordingSupport)}
             >
               {isListening ? "Stop listening" : "Start talking"}
             </button>
@@ -810,7 +1072,7 @@ export default function VoicePanel({
               type="button"
               className="text-submit"
               onClick={() => setActiveProjectId(null)}
-              disabled={isProcessing}
+              disabled={isBusy}
             >
               New project
             </button>
@@ -818,7 +1080,7 @@ export default function VoicePanel({
               type="button"
               className="text-submit"
               onClick={refreshProjects}
-              disabled={isLoadingProjects || isProcessing}
+              disabled={isLoadingProjects || isBusy}
             >
               {isLoadingProjects ? "Refreshing..." : "Refresh projects"}
             </button>
@@ -843,7 +1105,7 @@ export default function VoicePanel({
                 ? "Make me a phone stand, 12 cm tall, angled, with a cable hole"
                 : "Describe the creative object you want to generate"
             }
-            disabled={isProcessing}
+            disabled={isBusy}
           />
           <div className="prompt-chips">
             {promptExamples.map((chip) => (
@@ -852,14 +1114,14 @@ export default function VoicePanel({
                 type="button"
                 className="prompt-chip"
                 onClick={() => setManualText(chip)}
-                disabled={isProcessing}
+                disabled={isBusy}
               >
                 {chip}
               </button>
             ))}
           </div>
           <div className="text-input-actions">
-            <button type="submit" className="text-submit" disabled={!manualText.trim() || isProcessing}>
+            <button type="submit" className="text-submit" disabled={!manualText.trim() || isBusy}>
               {mode === "useful" ? "Understand my idea" : "Generate creative object"}
             </button>
             {transcripts.length ? (
@@ -877,7 +1139,7 @@ export default function VoicePanel({
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
               setImageFile(event.target.files?.[0] || null)
             }
-            disabled={isProcessing}
+            disabled={isBusy}
           />
           <span className="muted">
             {imageLabel
@@ -889,7 +1151,7 @@ export default function VoicePanel({
               type="button"
               className="text-submit"
               onClick={handleDescribeImage}
-              disabled={!imageFile || isProcessing}
+              disabled={!imageFile || isBusy}
             >
               Describe image
             </button>
@@ -898,7 +1160,7 @@ export default function VoicePanel({
                 type="button"
                 className="text-submit"
                 onClick={handleGenerateFromImage}
-                disabled={!imageFile || isProcessing}
+                disabled={!imageFile || isBusy}
               >
                 Generate from image
               </button>
@@ -948,31 +1210,47 @@ export default function VoicePanel({
               <h2>{structuredSpec.object_label}</h2>
               <p className="panel-subtitle">
                 Confidence {Math.round(structuredSpec.confidence * 100)}%. Edit the dimensions
-                and assumptions before drafting a preview.
+                and parameters below. Preview updates automatically.
               </p>
             </div>
 
+            <div className="parametric-hint">
+              Live preview updates after you stop typing. Build stays explicit so slicing only
+              happens when you export the printable STL.
+            </div>
+
             <div className="spec-grid">
-              {Object.entries(structuredSpec.dimensions_mm).map(([key, value]) => (
+              {orderedDimensionEntries.map(([key, value]) => (
                 <label key={key} className="field-row compact-field">
                   <span>{key.replace(/_/g, " ")}</span>
                   <input
                     type="number"
                     value={value}
                     onChange={(event) => updateDimension(key, event.target.value)}
-                    disabled={isProcessing}
+                    disabled={isBusy}
                   />
                 </label>
               ))}
-              {Object.entries(structuredSpec.constraints).map(([key, value]) => (
+              {orderedConstraintEntries.map(([key, value]) => (
                 <label key={key} className="field-row compact-field">
                   <span>{key.replace(/_/g, " ")}</span>
-                  <input
-                    type={typeof value === "boolean" ? "text" : "number"}
-                    value={String(value)}
-                    onChange={(event) => updateConstraint(key, event.target.value)}
-                    disabled={isProcessing}
-                  />
+                  {typeof value === "boolean" ? (
+                    <select
+                      value={value ? "true" : "false"}
+                      onChange={(event) => updateConstraint(key, event.target.value)}
+                      disabled={isBusy}
+                    >
+                      <option value="true">True</option>
+                      <option value="false">False</option>
+                    </select>
+                  ) : (
+                    <input
+                      type="number"
+                      value={String(value)}
+                      onChange={(event) => updateConstraint(key, event.target.value)}
+                      disabled={isBusy}
+                    />
+                  )}
                 </label>
               ))}
             </div>
@@ -1000,7 +1278,7 @@ export default function VoicePanel({
                 value={revisionNote}
                 onChange={(event) => setRevisionNote(event.target.value)}
                 placeholder="Optional note such as make it taller or thicken the base"
-                disabled={isProcessing}
+                disabled={isBusy}
               />
             </div>
 
@@ -1009,7 +1287,7 @@ export default function VoicePanel({
                 type="button"
                 className="text-submit"
                 onClick={handlePreviewUseful}
-                disabled={isProcessing}
+                disabled={isBusy}
               >
                 Draft preview
               </button>
@@ -1017,7 +1295,7 @@ export default function VoicePanel({
                 type="button"
                 className="text-submit"
                 onClick={handleBuildUseful}
-                disabled={isProcessing}
+                disabled={isBusy}
               >
                 Export printable STL
               </button>
