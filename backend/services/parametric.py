@@ -208,7 +208,10 @@ def _apply_fillet(mesh: trimesh.Trimesh, fillet_mm: float) -> trimesh.Trimesh:
         return mesh
     mesh = mesh.subdivide()
     iterations = min(30, max(6, int(fillet_mm * 2)))
-    trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=iterations)
+    try:
+        trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=iterations)
+    except ModuleNotFoundError:
+        return mesh
     return mesh
 
 

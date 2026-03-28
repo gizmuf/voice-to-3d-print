@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
 import trimesh
+try:
+    import cadquery as cq
+    from cadquery import exporters as cq_exporters
+except Exception:  # pragma: no cover - optional dependency
+    cq = None
+    cq_exporters = None
 
 from config import settings
 from services.parametric import (
@@ -150,12 +156,19 @@ class UsefulBuild:
     structured_spec: Dict[str, Any]
 
 
+CADQUERY_TEMPLATES = {"phone_stand", "simple_box", "tray"}
+
+
 def _deep_copy(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _deep_copy(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_deep_copy(item) for item in value]
     return value
+
+
+def cadquery_available() -> bool:
+    return cq is not None and cq_exporters is not None
 
 
 def _merge_dict(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,6 +188,8 @@ def _keyword_score(text: str, keywords: Iterable[str]) -> int:
 
 def _detect_template(text: str, existing_template: str | None = None) -> str:
     lowered = text.lower()
+    if "phone stand" in lowered or ("stand" in lowered and "phone" in lowered):
+        return "phone_stand"
     best_template = existing_template or "phone_stand"
     best_score = 0
     for template_id, keywords in USEFUL_KEYWORDS.items():
@@ -190,7 +205,7 @@ def _detect_template(text: str, existing_template: str | None = None) -> str:
         return "bracket"
     if "hook" in lowered:
         return "hook"
-    if any(word in lowered for word in ("cable", "cord", "wire")):
+    if any(word in lowered for word in ("cable", "cord", "wire")) and "stand" not in lowered:
         return "cable_organizer"
     if any(word in lowered for word in ("mount", "wall")):
         return "wall_mount"
@@ -306,6 +321,8 @@ def build_useful_structured_spec(
             constraints["base_thickness_mm"],
         )
         constraints["cable_hole_diameter_mm"] = _parse_hole(prompt) or constraints["cable_hole_diameter_mm"]
+        if "cable hole" in lowered and float(constraints["cable_hole_diameter_mm"]) <= 0:
+            constraints["cable_hole_diameter_mm"] = 10.0
         slot_pair = _parse_pair(prompt, "slot")
         if slot_pair:
             constraints["slot_width_mm"] = slot_pair[0]
@@ -384,6 +401,75 @@ def _translated(mesh: trimesh.Trimesh, offset: Tuple[float, float, float]) -> tr
     return clone
 
 
+def _build_phone_stand_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    depth = float(dims["depth"])
+    height = float(dims["height"])
+    angle = float(constraints.get("angle_deg", 65.0))
+    base_thickness = float(constraints.get("base_thickness_mm", 6.0))
+    back_thickness = float(constraints.get("back_thickness_mm", 5.0))
+    lip_height = float(constraints.get("lip_height_mm", 12.0))
+    cable_hole = float(constraints.get("cable_hole_diameter_mm", 0.0) or 0.0)
+
+    base = cq.Workplane("XY").box(width, depth, base_thickness, centered=(True, True, False))
+    back = (
+        cq.Workplane("XY")
+        .box(width, back_thickness, height, centered=(True, True, False))
+        .rotate((0, 0, 0), (1, 0, 0), -angle)
+        .translate((0, depth / 2.0 - back_thickness / 2.0, base_thickness))
+    )
+    lip = (
+        cq.Workplane("XY")
+        .box(width * 0.85, back_thickness * 2.4, lip_height, centered=(True, True, False))
+        .translate((0, -depth / 2.0 + back_thickness, base_thickness))
+    )
+    result = base.union(back).union(lip)
+
+    if cable_hole > 0:
+        hole = (
+            cq.Workplane("XY")
+            .cylinder(base_thickness * 2.0, cable_hole / 2.0)
+            .translate((0, -depth / 4.0, base_thickness / 2.0))
+        )
+        result = result.cut(hole)
+    return result
+
+
+def _build_simple_box_cadquery(spec: Dict[str, Any], open_top_default: bool = True):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    depth = float(dims["depth"])
+    height = float(dims["height"])
+    wall = max(float(constraints.get("wall_thickness_mm", 3.0)), 1.2)
+    open_top = bool(constraints.get("open_top", open_top_default))
+    fillet = float(constraints.get("fillet_mm", 0.0) or 0.0)
+
+    outer = cq.Workplane("XY").box(width, depth, height, centered=(True, True, False))
+    if bool(constraints.get("hollow", True)) or open_top:
+        inner_height = max(1.0, height - (wall if open_top else wall * 2.0))
+        inner = (
+            cq.Workplane("XY")
+            .box(
+                max(1.0, width - wall * 2.0),
+                max(1.0, depth - wall * 2.0),
+                inner_height,
+                centered=(True, True, False),
+            )
+            .translate((0, 0, wall if open_top else wall))
+        )
+        outer = outer.cut(inner)
+
+    if fillet > 0:
+        try:
+            outer = outer.edges("|Z").fillet(fillet)
+        except Exception:
+            pass
+    return outer
+
+
 def _build_phone_stand(spec: Dict[str, Any]) -> trimesh.Trimesh:
     dims = spec["dimensions_mm"]
     constraints = spec["constraints"]
@@ -442,6 +528,29 @@ def _build_simple_box(spec: Dict[str, Any], open_top_default: bool = True) -> tr
     if fillet > 0:
         mesh = _apply_fillet(mesh, fillet)
     return mesh
+
+
+def _cadquery_workplane_for_spec(spec: Dict[str, Any]):
+    template_id = spec["template_id"]
+    if template_id == "phone_stand":
+        return _build_phone_stand_cadquery(spec)
+    if template_id == "simple_box":
+        return _build_simple_box_cadquery(spec, open_top_default=False)
+    if template_id == "tray":
+        return _build_simple_box_cadquery(spec, open_top_default=True)
+    raise ValueError(f"CadQuery template not implemented: {template_id}")
+
+
+def _export_cadquery_spec(structured_spec: Dict[str, Any], job_dir: Path, *, preview: bool) -> tuple[Path, Path]:
+    if not cadquery_available():
+        raise RuntimeError("CadQuery is not installed in the backend environment.")
+    workplane = _cadquery_workplane_for_spec(structured_spec)
+    stl_path = job_dir / ("preview.stl" if preview else "model.stl")
+    glb_path = job_dir / ("preview.glb" if preview else "model.glb")
+    cq_exporters.export(workplane, str(stl_path))
+    mesh = trimesh.load_mesh(stl_path, force="mesh")
+    trimesh.Scene(mesh).export(glb_path)
+    return glb_path, stl_path
 
 
 def _build_hook(spec: Dict[str, Any]) -> trimesh.Trimesh:
@@ -586,9 +695,12 @@ def preview_useful_object(structured_spec: Dict[str, Any], job_id: str | None = 
     job_id = job_id or uuid.uuid4().hex
     job_dir = settings.output_dir / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    glb_path = job_dir / "preview.glb"
-    mesh = mesh_from_structured_spec(structured_spec)
-    _write_glb(mesh, glb_path)
+    if structured_spec["template_id"] in CADQUERY_TEMPLATES and cadquery_available():
+        glb_path, _ = _export_cadquery_spec(structured_spec, job_dir, preview=True)
+    else:
+        glb_path = job_dir / "preview.glb"
+        mesh = mesh_from_structured_spec(structured_spec)
+        _write_glb(mesh, glb_path)
     return UsefulPreview(job_id=job_id, glb_path=glb_path, structured_spec=structured_spec)
 
 
@@ -600,11 +712,14 @@ def build_useful_object(
     job_dir = settings.output_dir / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    mesh = mesh_from_structured_spec(structured_spec)
     glb_path = job_dir / "model.glb"
     stl_path = job_dir / "model.stl"
-    _write_glb(mesh, glb_path)
-    mesh.export(stl_path)
+    if structured_spec["template_id"] in CADQUERY_TEMPLATES and cadquery_available():
+        glb_path, stl_path = _export_cadquery_spec(structured_spec, job_dir, preview=False)
+    else:
+        mesh = mesh_from_structured_spec(structured_spec)
+        _write_glb(mesh, glb_path)
+        mesh.export(stl_path)
     return UsefulBuild(
         job_id=job_id,
         glb_path=glb_path,

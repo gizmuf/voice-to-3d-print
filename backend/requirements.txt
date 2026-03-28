@@ -8,3 +8,4 @@ python-dotenv
 trimesh
 numpy
 firebase-admin
+cadquery

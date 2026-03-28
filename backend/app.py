@@ -30,6 +30,7 @@ from services.library import resolve_library_item, search_library
 from services.useful_objects import (
     build_useful_object,
     build_useful_structured_spec,
+    cadquery_available,
     preview_useful_object,
     route_mode,
 )
@@ -240,7 +241,7 @@ def health() -> dict:
         "providers": providers,
         "warnings": warnings,
         "router_ready": True,
-        "cad_ready": True,
+        "cad_ready": cadquery_available(),
         "preview_ready": True,
         "slicer_ready": slicer_ready,
         "sketchfab_enabled": bool(settings.sketchfab_api_token),
