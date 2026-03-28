@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 from meshlib import mrmeshpy as mm
+import trimesh
 
 from config import settings
 
@@ -19,6 +20,7 @@ class ProcessResult:
     glb_path: Path
     stl_path: Path
     gcode_path: Path | None
+    validation: dict
 
 
 def _ensure_output_dir(path: Path) -> None:
@@ -63,6 +65,60 @@ def _repair_mesh(glb_path: Path, stl_path: Path) -> None:
         mm.fillHoles(mesh, holes)
 
     mm.saveMesh(mesh, str(stl_path))
+
+
+def validate_mesh_file(stl_path: Path) -> dict:
+    try:
+        mesh = trimesh.load_mesh(stl_path, force="mesh")
+    except Exception as exc:
+        return {
+            "validation_status": "failed",
+            "warnings": [f"Could not load STL for validation: {exc}"],
+            "dimensions_mm": [],
+            "estimated_print_risk": "high",
+            "preview_vs_final_delta": None,
+            "stl_ready": False,
+            "gcode_status": "unknown",
+        }
+
+    warnings: list[str] = []
+    extents = [round(float(value), 2) for value in mesh.bounding_box.extents.tolist()]
+    volume = float(abs(mesh.volume))
+    watertight = bool(mesh.is_watertight)
+    winding_consistent = bool(mesh.is_winding_consistent)
+
+    if not watertight:
+        warnings.append("Mesh is not watertight after repair.")
+    if not winding_consistent:
+        warnings.append("Mesh normals are inconsistent.")
+    if volume <= 0:
+        warnings.append("Mesh volume is zero or invalid.")
+    if extents and max(extents) < 10:
+        warnings.append("Model appears very small; confirm scale in millimeters.")
+    if extents and min(extents) < 1.2:
+        warnings.append("Thin geometry detected below roughly 1.2 mm.")
+    if extents and max(extents) > 350:
+        warnings.append("Large geometry detected; verify printer bed fit.")
+
+    if not watertight or volume <= 0:
+        status = "failed"
+        risk = "high"
+    elif warnings:
+        status = "needs_attention"
+        risk = "medium"
+    else:
+        status = "ready"
+        risk = "low"
+
+    return {
+        "validation_status": status,
+        "warnings": warnings,
+        "dimensions_mm": extents,
+        "estimated_print_risk": risk,
+        "preview_vs_final_delta": None,
+        "stl_ready": stl_path.exists(),
+        "gcode_status": "not_requested",
+    }
 
 
 def _slice_mesh(stl_path: Path, gcode_path: Path) -> bool:
@@ -118,11 +174,14 @@ def process_model(glb_url: str, job_id: str | None = None) -> ProcessResult:
     else:
         _download_file(glb_url, glb_path)
     _repair_mesh(glb_path, stl_path)
+    validation = validate_mesh_file(stl_path)
     gcode_generated = _slice_mesh(stl_path, gcode_path)
+    validation["gcode_status"] = "generated" if gcode_generated else "not_generated"
 
     return ProcessResult(
         job_id=job_id,
         glb_path=glb_path,
         stl_path=stl_path,
         gcode_path=gcode_path if gcode_generated else None,
+        validation=validation,
     )

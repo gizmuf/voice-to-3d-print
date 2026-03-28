@@ -7,6 +7,7 @@ import VoicePanel from "../components/VoicePanel";
 
 export default function Home() {
   const [modelUrl, setModelUrl] = useState<string | null>(null);
+  const [stlUrl, setStlUrl] = useState<string | null>(null);
   const [gcodeUrl, setGcodeUrl] = useState<string | null>(null);
   const [bundleUrl, setBundleUrl] = useState<string | null>(null);
 
@@ -20,29 +21,29 @@ export default function Home() {
       </nav>
       <header className="hero">
         <div>
-          <p className="eyebrow">Voice → Model → Print</p>
+          <p className="eyebrow">Voice → Confirm → Preview → Export</p>
           <h1>
-            Turn spoken ideas into
-            <span className="highlight"> printable objects</span>.
+            Build practical prints from
+            <span className="highlight"> spoken ideas</span>.
           </h1>
           <p className="hero-body">
-            This prototype orchestrates real-time speech, LLM intent
-            extraction, cloud 3D generation, mesh repair, and slicing — all
-            without local GPU compute.
+            Useful Object mode now leads with voice, confirms dimensions and
+            assumptions, drafts a preview, and exports a validated STL. Creative
+            Object mode stays available as a beta path for mesh generation.
           </p>
         </div>
         <div className="hero-card">
           <div className="hero-stat">
             <span>Pipeline</span>
-            <strong>Serverless</strong>
+            <strong>Voice-first</strong>
           </div>
           <div className="hero-stat">
-            <span>3D Generation</span>
-            <strong>Meshy (default)</strong>
+            <span>Primary mode</span>
+            <strong>Useful Object</strong>
           </div>
           <div className="hero-stat">
             <span>Output</span>
-            <strong>GLB + G-code</strong>
+            <strong>Validated STL</strong>
           </div>
         </div>
       </header>
@@ -50,6 +51,7 @@ export default function Home() {
       <div className="grid">
         <VoicePanel
           onModelUrl={setModelUrl}
+          onStlUrl={setStlUrl}
           onGcodeUrl={setGcodeUrl}
           onBundleUrl={setBundleUrl}
         />
@@ -57,10 +59,10 @@ export default function Home() {
         <section className="panel model-panel">
           <div className="panel-header">
             <p className="eyebrow">3D Preview</p>
-            <h2>Inspect the generated model</h2>
+            <h2>Inspect the current revision</h2>
             <p className="panel-subtitle">
-              Rotate, zoom, and validate the geometry before downloading
-              the print-ready G-code.
+              Rotate, zoom, and validate the geometry before exporting the
+              STL bundle.
             </p>
           </div>
 
@@ -70,12 +72,12 @@ export default function Home() {
 
           <div className="actions">
             <a
-              className={`download-button ${gcodeUrl ? "" : "disabled"}`}
-              href={gcodeUrl || "#"}
+              className={`download-button ${stlUrl ? "" : "disabled"}`}
+              href={stlUrl || "#"}
               download
-              aria-disabled={!gcodeUrl}
+              aria-disabled={!stlUrl}
             >
-              Download G-code
+              Download STL
             </a>
             <a
               className={`download-button ${bundleUrl ? "" : "disabled"}`}
@@ -86,9 +88,9 @@ export default function Home() {
               Download bundle
             </a>
             <span className="hint">
-              {gcodeUrl
-                ? "Ready for your slicer or printer queue."
-                : "G-code link appears after slicing."}
+              {stlUrl
+                ? "Validated STL ready for your slicer."
+                : "Generate a preview or final build to unlock exports."}
             </span>
           </div>
         </section>

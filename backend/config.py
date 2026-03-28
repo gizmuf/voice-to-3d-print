@@ -16,6 +16,17 @@ def _resolve_path(value: str | None, default: Path) -> Path:
     return path
 
 
+def _resolve_output_dir(value: str | None, default: Path) -> Path:
+    primary = _resolve_path(value, default)
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        return primary
+    except Exception:
+        fallback = default.resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 @dataclass(frozen=True)
 class Settings:
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
@@ -81,7 +92,7 @@ class Settings:
     prusaslicer_config: str = str(
         _resolve_path(os.getenv("PRUSASLICER_CONFIG"), Path("config.ini"))
     )
-    output_dir: Path = _resolve_path(
+    output_dir: Path = _resolve_output_dir(
         os.getenv("OUTPUT_DIR"),
         Path(__file__).parent / "data" / "output",
     )

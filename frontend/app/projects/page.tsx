@@ -3,26 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import ModelViewer from "../../components/ModelViewer";
-
-const localBackendUrl = "http://localhost:8000";
-const prodBackendUrl = "https://pulsai-3d-backend-37089211614.us-central1.run.app";
-
-const resolveBackendUrl = () => {
-  if (process.env.NEXT_PUBLIC_BACKEND_URL) return process.env.NEXT_PUBLIC_BACKEND_URL;
-  if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    if (host && host !== "localhost" && host !== "127.0.0.1") {
-      return prodBackendUrl;
-    }
-  }
-  return localBackendUrl;
-};
-
-const resolveUrl = (base: string, value?: string | null) => {
-  if (!value) return null;
-  if (value.startsWith("http")) return value;
-  return `${base.replace(/\/$/, "")}${value.startsWith("/") ? "" : "/"}${value}`;
-};
+import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 
 type ProjectSummary = {
   id?: string;
@@ -37,6 +18,8 @@ type JobSummary = {
   job_id?: string;
   status?: string;
   provider?: string;
+  mode?: string;
+  template_id?: string;
   input?: {
     prompt_final?: string;
     prompt_raw?: string;
@@ -44,10 +27,22 @@ type JobSummary = {
     type?: string;
     image_name?: string;
   };
+  structured_spec?: {
+    object_label?: string;
+  };
   artifacts?: {
     glb_url?: string;
     stl_url?: string;
     gcode_url?: string;
+  };
+  preview_artifacts?: {
+    glb_url?: string;
+  };
+  validation?: {
+    validation_status?: string;
+    warnings?: string[];
+    estimated_print_risk?: string;
+    dimensions_mm?: number[];
   };
   created_at?: unknown;
   updated_at?: unknown;
@@ -75,7 +70,7 @@ export default function ProjectsPage() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
-  const [gcodeUrl, setGcodeUrl] = useState<string | null>(null);
+  const [stlUrl, setStlUrl] = useState<string | null>(null);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
   const [isLoadingJobs, setIsLoadingJobs] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -146,11 +141,16 @@ export default function ProjectsPage() {
   useEffect(() => {
     if (!selectedJob) {
       setModelUrl(null);
-      setGcodeUrl(null);
+      setStlUrl(null);
       return;
     }
-    setModelUrl(resolveUrl(backendUrl, selectedJob.artifacts?.glb_url));
-    setGcodeUrl(resolveUrl(backendUrl, selectedJob.artifacts?.gcode_url));
+    setModelUrl(
+      resolveUrl(
+        backendUrl,
+        selectedJob.artifacts?.glb_url || selectedJob.preview_artifacts?.glb_url
+      )
+    );
+    setStlUrl(resolveUrl(backendUrl, selectedJob.artifacts?.stl_url));
   }, [backendUrl, selectedJob]);
 
   const setProjectCurrent = async (jobId: string) => {
@@ -190,11 +190,11 @@ export default function ProjectsPage() {
           <p className="eyebrow">Project Library</p>
           <h1>
             Review previous
-            <span className="highlight"> 3D experiments</span>.
+            <span className="highlight"> printable revisions</span>.
           </h1>
           <p className="hero-body">
-            Browse your project history, reload a past model, and restore a
-            revision to continue iterating.
+            Browse drafts, confirmed specs, printability reports, and final STL
+            exports across your projects.
           </p>
         </div>
         <div className="hero-card">
@@ -215,8 +215,8 @@ export default function ProjectsPage() {
             <p className="eyebrow">Projects</p>
             <h2>Pick a project</h2>
             <p className="panel-subtitle">
-              Each project tracks a chain of prompts, model generations, and
-              printable outputs.
+              Each project tracks routed ideas, previews, build revisions, and
+              validation outcomes.
             </p>
           </div>
 
@@ -292,19 +292,32 @@ export default function ProjectsPage() {
                     <div key={jobId} className="job-item">
                       <div className="job-main">
                         <div className="job-title">
-                          <strong>{job.input?.prompt_final || job.input?.prompt_raw || job.input?.transcript || "Untitled prompt"}</strong>
+                          <strong>
+                            {job.structured_spec?.object_label ||
+                              job.input?.prompt_final ||
+                              job.input?.prompt_raw ||
+                              job.input?.transcript ||
+                              "Untitled prompt"}
+                          </strong>
                           {isCurrent ? <span className="chip">Current</span> : null}
                         </div>
                         <span className="muted">
-                          {job.status || "unknown"} · {job.provider || "provider"} ·{" "}
+                          {(job.mode || "mode")} · {job.status || "unknown"} ·{" "}
+                          {(job.template_id || job.provider || "route")} ·{" "}
                           {formatDate(job.created_at)}
                         </span>
+                        {job.validation?.validation_status ? (
+                          <span className="muted">
+                            Validation {job.validation.validation_status} · risk{" "}
+                            {job.validation.estimated_print_risk || "unknown"}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="job-actions">
                         <button
                           className="text-submit"
                           onClick={() => setSelectedJobId(jobId)}
-                          disabled={!job.artifacts?.glb_url}
+                          disabled={!job.artifacts?.glb_url && !job.preview_artifacts?.glb_url}
                         >
                           Load model
                         </button>
@@ -329,7 +342,7 @@ export default function ProjectsPage() {
             <p className="eyebrow">3D Preview</p>
             <h2>Inspect the revision</h2>
             <p className="panel-subtitle">
-              Load a past model to verify it before continuing edits.
+              Load a past draft or build to inspect it before continuing edits.
             </p>
           </div>
 
@@ -339,24 +352,25 @@ export default function ProjectsPage() {
 
           <div className="actions">
             <a
-              className={`download-button ${gcodeUrl ? "" : "disabled"}`}
-              href={gcodeUrl || "#"}
+              className={`download-button ${stlUrl ? "" : "disabled"}`}
+              href={stlUrl || "#"}
               download
-              aria-disabled={!gcodeUrl}
+              aria-disabled={!stlUrl}
             >
-              Download G-code
+              Download STL
             </a>
             <span className="hint">
-              {gcodeUrl
-                ? "Ready for your slicer or printer queue."
-                : "Select a revision that has G-code."}
+              {stlUrl
+                ? "Validated build artifact ready to export."
+                : "Select a build revision that has an STL."}
             </span>
           </div>
 
           <div className="project-summary">
             <div className="status-label">Selected revision</div>
             <div className="status-value">
-              {selectedJob?.input?.prompt_final ||
+              {selectedJob?.structured_spec?.object_label ||
+                selectedJob?.input?.prompt_final ||
                 selectedJob?.input?.prompt_raw ||
                 selectedJob?.input?.transcript ||
                 "—"}
@@ -365,6 +379,28 @@ export default function ProjectsPage() {
               {selectedJob?.job_id || selectedJob?.id || "No revision selected."}
             </div>
           </div>
+          {selectedJob?.validation ? (
+            <div className="project-summary">
+              <div className="status-label">Printability</div>
+              <div className="status-value">
+                {selectedJob.validation.validation_status || "unknown"}
+              </div>
+              <div className="intent muted">
+                {selectedJob.validation.dimensions_mm?.length
+                  ? `Size ${selectedJob.validation.dimensions_mm.join(" × ")} mm`
+                  : "No dimension summary available."}
+              </div>
+              {selectedJob.validation.warnings?.length ? (
+                <div className="warning-list">
+                  {selectedJob.validation.warnings.map((warning) => (
+                    <span key={warning} className="warning-chip">
+                      {warning}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </div>
     </main>
