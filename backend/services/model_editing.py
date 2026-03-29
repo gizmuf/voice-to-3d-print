@@ -21,6 +21,7 @@ PLANAR_NORMAL_TOLERANCE_DEG = 2.5
 PLANAR_OFFSET_TOLERANCE_MM = 0.35
 MIN_CLUSTER_AREA_MM2 = 25.0
 DEFAULT_TOLERANCE_MM = 0.15
+MAX_OPENINGS_PER_CLUSTER = 512
 
 
 @dataclass
@@ -273,7 +274,7 @@ def _planar_clusters(mesh: trimesh.Trimesh) -> list[dict]:
                     "min_y": round(float(bounds_min[1]), 2),
                     "max_y": round(float(bounds_max[1]), 2),
                 },
-                "openings": openings[:16],
+                "openings": openings[:MAX_OPENINGS_PER_CLUSTER],
             }
         )
 
@@ -337,6 +338,7 @@ def public_analysis_payload(analysis: dict) -> dict:
                 "area_mm2": cluster.get("area_mm2"),
                 "normal": cluster.get("normal"),
                 "origin_mm": cluster.get("origin_mm"),
+                "local_frame": cluster.get("local_frame"),
                 "local_bounds_mm": cluster.get("local_bounds_mm"),
                 "openings": openings,
             }
@@ -424,6 +426,26 @@ def _resolve_opening(cluster: dict, selection: dict) -> dict | None:
         if opening.get("opening_id") == opening_id:
             return opening
     raise ValueError("Selected opening was not found on the current planar face cluster.")
+
+
+def _resolve_target_openings(cluster: dict, selection: dict) -> list[dict]:
+    opening_ids = selection.get("opening_ids") or []
+    if not opening_ids:
+        opening = _resolve_opening(cluster, selection)
+        return [opening] if opening else []
+
+    indexed_openings = {
+        opening.get("opening_id"): opening
+        for opening in cluster.get("openings", [])
+        if opening.get("opening_id")
+    }
+    resolved: list[dict] = []
+    for opening_id in opening_ids:
+        opening = indexed_openings.get(opening_id)
+        if not opening:
+            raise ValueError("One of the selected openings was not found on the current planar face cluster.")
+        resolved.append(opening)
+    return resolved
 
 
 def _local_transform_matrix(cluster: dict) -> np.ndarray:
@@ -616,6 +638,69 @@ def _build_local_cutter_mesh(structured_edit: dict, cluster: dict, z_min: float,
     return combined
 
 
+def _build_targeted_cutter_meshes(
+    structured_edit: dict,
+    cluster: dict,
+    target_openings: list[dict],
+    z_min: float,
+    z_max: float,
+    temp_path: Path,
+) -> trimesh.Trimesh:
+    if len(target_openings) <= 1:
+        return _build_local_cutter_mesh(structured_edit, cluster, z_min, z_max, temp_path)
+
+    base_request = dict(structured_edit)
+    base_request["pattern"] = "none"
+    base_request["count"] = 1
+
+    meshes: list[trimesh.Trimesh] = []
+    for index, opening in enumerate(target_openings, start=1):
+        per_opening_request = dict(base_request)
+        per_opening_request["center_mm"] = {
+            "x": float(opening["center_mm"]["x"]),
+            "y": float(opening["center_mm"]["y"]),
+        }
+        meshes.append(
+            _build_local_cutter_mesh(
+                per_opening_request,
+                cluster,
+                z_min,
+                z_max,
+                temp_path.with_name(f"{temp_path.stem}-{index}{temp_path.suffix}"),
+            )
+        )
+    return trimesh.util.concatenate(meshes)
+
+
+def _build_targeted_plug_meshes(
+    structured_edit: dict,
+    cluster: dict,
+    target_openings: list[dict],
+    z_min: float,
+    z_max: float,
+    tolerance_mm: float,
+    temp_path: Path,
+) -> trimesh.Trimesh | None:
+    if not target_openings:
+        return None
+    if structured_edit["operation"] == "resize_cutout":
+        return None
+
+    plug_meshes: list[trimesh.Trimesh] = []
+    for index, opening in enumerate(target_openings, start=1):
+        plug_meshes.append(
+            _build_opening_plug_mesh(
+                opening,
+                cluster,
+                z_min,
+                z_max,
+                tolerance_mm,
+                temp_path.with_name(f"{temp_path.stem}-{index}{temp_path.suffix}"),
+            )
+        )
+    return trimesh.util.concatenate(plug_meshes)
+
+
 def _build_opening_plug_mesh(opening: dict, cluster: dict, z_min: float, z_max: float, tolerance_mm: float, temp_path: Path) -> trimesh.Trimesh:
     points = opening.get("vertices_2d") or []
     if len(points) < 3:
@@ -727,6 +812,7 @@ def _perform_edit(
     analysis = analyze_mesh(base_mesh)
     cluster = _resolve_cluster(analysis, selection)
     opening = _resolve_opening(cluster, selection)
+    target_openings = _resolve_target_openings(cluster, selection)
     structured_edit = _normalized_edit_request(selection, cluster, opening, edit_request, prompt)
 
     frame = cluster["local_frame"]
@@ -747,18 +833,23 @@ def _perform_edit(
     temp_cutter_path = job_dir / "temp-cutter.stl"
     temp_plug_path = job_dir / "temp-plug.stl"
 
-    cutter_mesh = _build_local_cutter_mesh(structured_edit, cluster, z_min, z_max, temp_cutter_path)
-    plug_mesh = None
-    if opening and structured_edit["operation"] != "resize_cutout":
-        plug_mesh = _build_opening_plug_mesh(opening, cluster, z_min, z_max, tolerance_mm, temp_plug_path)
-    elif opening and structured_edit["operation"] in {
-        "replace_hole_with_rectangle",
-        "replace_hole_with_slot",
-        "replace_slot_with_rectangle",
-        "replace_rectangle_with_circle",
-        "replace_cutout_shape",
-    }:
-        plug_mesh = _build_opening_plug_mesh(opening, cluster, z_min, z_max, tolerance_mm, temp_plug_path)
+    cutter_mesh = _build_targeted_cutter_meshes(
+        structured_edit,
+        cluster,
+        target_openings,
+        z_min,
+        z_max,
+        temp_cutter_path,
+    )
+    plug_mesh = _build_targeted_plug_meshes(
+        structured_edit,
+        cluster,
+        target_openings,
+        z_min,
+        z_max,
+        tolerance_mm,
+        temp_plug_path,
+    )
 
     edited_stl_path, fallback_strategy_used = _run_edit_boolean_chain(base_stl_path, plug_mesh, cutter_mesh, job_dir)
     edited_mesh = _load_mesh(edited_stl_path)

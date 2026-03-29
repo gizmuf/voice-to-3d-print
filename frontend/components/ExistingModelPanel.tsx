@@ -1,7 +1,8 @@
 "use client";
 
 import type { ChangeEvent, FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { SelectionPayload } from "./ModelViewer";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
 import { parseEditSpec } from "../lib/edit-spec";
 
@@ -11,6 +12,13 @@ type ExistingModelPanelProps = {
   onStlUrl: (url: string | null) => void;
   onGcodeUrl: (url: string | null) => void;
   onBundleUrl: (url: string | null) => void;
+  viewerSelectionHint?: SelectionPayload | null;
+};
+
+type LocalFrame = {
+  x_axis: number[];
+  y_axis: number[];
+  z_axis: number[];
 };
 
 type ProjectSummary = {
@@ -42,6 +50,7 @@ type PlanarFaceCluster = {
   area_mm2: number;
   normal: number[];
   origin_mm: number[];
+  local_frame?: LocalFrame;
   local_bounds_mm: {
     min_x: number;
     max_x: number;
@@ -49,6 +58,18 @@ type PlanarFaceCluster = {
     max_y: number;
   };
   openings: OpeningSummary[];
+};
+
+type OpeningGroup = {
+  id: string;
+  title: string;
+  summary: string;
+  representativeOpeningId: string;
+  openingIds: string[];
+  count: number;
+  avgWidth: number;
+  avgHeight: number;
+  shapeGuess: string;
 };
 
 type ModelAnalysis = {
@@ -170,12 +191,146 @@ const humanStatus = (status: string) => {
   }
 };
 
+const dot = (left: number[], right: number[]) => {
+  return left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
+};
+
+const projectPointToCluster = (point: SelectionPayload["point"], cluster: PlanarFaceCluster) => {
+  if (!cluster.local_frame) {
+    return null;
+  }
+  const origin = cluster.origin_mm;
+  const shifted = [point.x - origin[0], point.y - origin[1], point.z - origin[2]];
+  return {
+    x: dot(shifted, cluster.local_frame.x_axis),
+    y: dot(shifted, cluster.local_frame.y_axis),
+    z: dot(shifted, cluster.local_frame.z_axis),
+  };
+};
+
+const findNearestOpeningSelection = (
+  point: SelectionPayload["point"],
+  clusters: PlanarFaceCluster[]
+) => {
+  let bestMatch: { clusterId: string; openingId: string; score: number } | null = null;
+
+  for (const cluster of clusters) {
+    const localPoint = projectPointToCluster(point, cluster);
+    if (!localPoint) continue;
+    const planeDistance = Math.abs(localPoint.z);
+
+    for (const opening of cluster.openings) {
+      const openingBounds = opening.bounds_mm;
+      const insideOpening =
+        localPoint.x >= openingBounds.min_x - 3 &&
+        localPoint.x <= openingBounds.max_x + 3 &&
+        localPoint.y >= openingBounds.min_y - 3 &&
+        localPoint.y <= openingBounds.max_y + 3;
+      const centerDistance = Math.hypot(
+        localPoint.x - opening.center_mm.x,
+        localPoint.y - opening.center_mm.y
+      );
+      const score = centerDistance + planeDistance * 8 + (insideOpening ? 0 : 16);
+      if (!bestMatch || score < bestMatch.score) {
+        bestMatch = {
+          clusterId: cluster.cluster_id,
+          openingId: opening.opening_id,
+          score,
+        };
+      }
+    }
+  }
+
+  return bestMatch;
+};
+
+const clusterSortScore = (cluster: PlanarFaceCluster) => {
+  return cluster.openings.length * 100000 + cluster.area_mm2;
+};
+
+const describeCluster = (cluster: PlanarFaceCluster) => {
+  if (cluster.openings.length >= 8) {
+    return `${cluster.cluster_id} · perforated face · ${cluster.openings.length} openings`;
+  }
+  if (cluster.openings.length >= 1) {
+    return `${cluster.cluster_id} · face with openings · ${cluster.openings.length} openings`;
+  }
+  return `${cluster.cluster_id} · solid face`;
+};
+
+const buildOpeningGroups = (openings: OpeningSummary[]): OpeningGroup[] => {
+  const groups: Array<{
+    shapeGuess: string;
+    openings: OpeningSummary[];
+    avgWidth: number;
+    avgHeight: number;
+  }> = [];
+
+  for (const opening of openings) {
+    const match = groups.find(
+      (group) =>
+        group.shapeGuess === opening.shape_guess &&
+        Math.abs(group.avgWidth - opening.width_mm) <= 1.5 &&
+        Math.abs(group.avgHeight - opening.height_mm) <= 1.5
+    );
+    if (!match) {
+      groups.push({
+        shapeGuess: opening.shape_guess,
+        openings: [opening],
+        avgWidth: opening.width_mm,
+        avgHeight: opening.height_mm,
+      });
+      continue;
+    }
+    match.openings.push(opening);
+    match.avgWidth = match.openings.reduce((sum, item) => sum + item.width_mm, 0) / match.openings.length;
+    match.avgHeight = match.openings.reduce((sum, item) => sum + item.height_mm, 0) / match.openings.length;
+  }
+
+  return groups
+    .map((group, index) => {
+      const representative = group.openings.reduce((best, candidate) => {
+        const bestDistance = Math.hypot(best.width_mm - group.avgWidth, best.height_mm - group.avgHeight);
+        const candidateDistance = Math.hypot(
+          candidate.width_mm - group.avgWidth,
+          candidate.height_mm - group.avgHeight
+        );
+        return candidateDistance < bestDistance ? candidate : best;
+      }, group.openings[0]);
+      const avgSize = (group.avgWidth + group.avgHeight) / 2;
+      const title =
+        group.openings.length > 1
+          ? avgSize <= 12
+            ? "Small repeated holes"
+            : "Repeated openings"
+          : avgSize > 15
+            ? "Large opening"
+            : "Single opening";
+      return {
+        id: `group-${index + 1}`,
+        title,
+        summary: `${group.shapeGuess} · ${group.openings.length} opening${group.openings.length === 1 ? "" : "s"} · ${group.avgWidth.toFixed(1)} × ${group.avgHeight.toFixed(1)} mm`,
+        representativeOpeningId: representative.opening_id,
+        openingIds: group.openings.map((opening) => opening.opening_id),
+        count: group.openings.length,
+        avgWidth: group.avgWidth,
+        avgHeight: group.avgHeight,
+        shapeGuess: group.shapeGuess,
+      } satisfies OpeningGroup;
+    })
+    .sort((left, right) => {
+      if (right.count !== left.count) return right.count - left.count;
+      return left.avgWidth + left.avgHeight - (right.avgWidth + right.avgHeight);
+    });
+};
+
 export default function ExistingModelPanel({
   onModelUrl,
   onSourceModelUrl,
   onStlUrl,
   onGcodeUrl,
   onBundleUrl,
+  viewerSelectionHint,
 }: ExistingModelPanelProps) {
   const backendUrl = resolveBackendUrl();
   const [status, setStatus] = useState("idle");
@@ -210,6 +365,10 @@ export default function ExistingModelPanel({
   const [specText, setSpecText] = useState("");
   const [parseSummary, setParseSummary] = useState<string[]>([]);
   const [parseWarnings, setParseWarnings] = useState<string[]>([]);
+  const [lastSelectionHintKey, setLastSelectionHintKey] = useState<string | null>(null);
+  const [viewerSelectionMessage, setViewerSelectionMessage] = useState<string | null>(null);
+  const [applyToSimilar, setApplyToSimilar] = useState(true);
+  const lastHydratedSelectionKey = useRef<string | null>(null);
 
   useEffect(() => {
     void refreshProjects();
@@ -258,12 +417,48 @@ export default function ExistingModelPanel({
     return selectedCluster?.openings.find((opening) => opening.opening_id === selectedOpeningId) || null;
   }, [selectedCluster, selectedOpeningId]);
 
-  useEffect(() => {
-    if (!analysis?.planar_face_clusters?.length) return;
-    if (!selectedClusterId) {
-      setSelectedClusterId(analysis.planar_face_clusters[0].cluster_id);
+  const sortedClusters = useMemo(() => {
+    return [...(analysis?.planar_face_clusters || [])].sort((left, right) => clusterSortScore(right) - clusterSortScore(left));
+  }, [analysis]);
+
+  const selectedOpeningGroups = useMemo(() => {
+    return selectedCluster ? buildOpeningGroups(selectedCluster.openings) : [];
+  }, [selectedCluster]);
+
+  const activeOpeningGroup = useMemo(() => {
+    if (!selectedOpeningId) return null;
+    return selectedOpeningGroups.find((group) => group.openingIds.includes(selectedOpeningId)) || null;
+  }, [selectedOpeningGroups, selectedOpeningId]);
+
+  const inferredTargetShape = useMemo(() => {
+    if (operation === "replace_rectangle_with_circle") return "circle";
+    if (operation === "replace_hole_with_slot") return "rounded_slot";
+    if (operation === "replace_hole_with_rectangle" || operation === "replace_slot_with_rectangle") {
+      return "rectangle";
     }
-  }, [analysis, selectedClusterId]);
+    if (operation === "resize_cutout") {
+      if (selectedOpening?.shape_guess === "circle") return "circle";
+      if (selectedOpening?.shape_guess === "slot") return "rounded_slot";
+      return targetShape;
+    }
+    return targetShape;
+  }, [operation, selectedOpening?.shape_guess, targetShape]);
+
+  const isRepeatedGroup = Boolean(activeOpeningGroup && activeOpeningGroup.count > 1);
+  const usesDiameterField = inferredTargetShape === "circle";
+  const usesWidthHeightFields = inferredTargetShape !== "circle";
+  const showCornerRadiusField =
+    inferredTargetShape === "rectangle" &&
+    (operation === "replace_cutout_shape" ||
+      operation === "replace_hole_with_rectangle" ||
+      operation === "replace_slot_with_rectangle");
+
+  useEffect(() => {
+    if (!sortedClusters.length) return;
+    if (!selectedClusterId || !sortedClusters.some((cluster) => cluster.cluster_id === selectedClusterId)) {
+      setSelectedClusterId(sortedClusters[0].cluster_id);
+    }
+  }, [selectedClusterId, sortedClusters]);
 
   useEffect(() => {
     if (!selectedCluster) return;
@@ -272,27 +467,63 @@ export default function ExistingModelPanel({
       return;
     }
     if (!selectedOpeningId || !selectedCluster.openings.some((opening) => opening.opening_id === selectedOpeningId)) {
-      setSelectedOpeningId(selectedCluster.openings[0].opening_id);
+      const preferredGroup = buildOpeningGroups(selectedCluster.openings)[0];
+      setSelectedOpeningId(preferredGroup?.representativeOpeningId || selectedCluster.openings[0].opening_id);
     }
   }, [selectedCluster, selectedOpeningId]);
 
   useEffect(() => {
     if (!selectedOpening) return;
+    const selectionKey = `${selectedClusterId}:${selectedOpening.opening_id}`;
+    if (lastHydratedSelectionKey.current === selectionKey) {
+      return;
+    }
+    lastHydratedSelectionKey.current = selectionKey;
     setCenterX(String(selectedOpening.center_mm.x));
     setCenterY(String(selectedOpening.center_mm.y));
     setWidthMm(String(selectedOpening.width_mm));
     setHeightMm(String(selectedOpening.height_mm));
     setDiameterMm(String(Math.min(selectedOpening.width_mm, selectedOpening.height_mm)));
     if (selectedOpening.shape_guess === "circle") {
-      setOperation("replace_hole_with_rectangle");
-      setTargetShape("rectangle");
+      setOperation("resize_cutout");
+      setTargetShape("circle");
     } else if (selectedOpening.shape_guess === "slot") {
       setOperation("resize_cutout");
       setTargetShape("rounded_slot");
     } else {
+      setOperation("resize_cutout");
       setTargetShape("rectangle");
     }
-  }, [selectedOpening]);
+  }, [selectedClusterId, selectedOpening]);
+
+  useEffect(() => {
+    setApplyToSimilar(Boolean(activeOpeningGroup && activeOpeningGroup.count > 1));
+  }, [activeOpeningGroup?.id]);
+
+  useEffect(() => {
+    if (!viewerSelectionHint || !analysis?.planar_face_clusters?.length) return;
+    const hintKey = [
+      viewerSelectionHint.point.x,
+      viewerSelectionHint.point.y,
+      viewerSelectionHint.point.z,
+    ].join(":");
+    if (hintKey === lastSelectionHintKey) return;
+    setLastSelectionHintKey(hintKey);
+
+    const match = findNearestOpeningSelection(
+      viewerSelectionHint.point,
+      analysis.planar_face_clusters as PlanarFaceCluster[]
+    );
+
+    if (!match) {
+      setViewerSelectionMessage("Clicked area did not map cleanly to a detected opening.");
+      return;
+    }
+
+    setSelectedClusterId(match.clusterId);
+    setSelectedOpeningId(match.openingId);
+    setViewerSelectionMessage(`Picked ${match.openingId} from the 3D view.`);
+  }, [analysis, lastSelectionHintKey, viewerSelectionHint]);
 
   const resetOutputs = () => {
     onStlUrl(null);
@@ -323,6 +554,7 @@ export default function ExistingModelPanel({
       const data = (await response.json()) as ImportModelResponse;
       setImported(data);
       setAnalysis(data.analysis);
+      lastHydratedSelectionKey.current = null;
       setPreviewJobId(null);
       onSourceModelUrl(resolveUrl(backendUrl, data.source_glb_url));
       onModelUrl(resolveUrl(backendUrl, data.source_glb_url));
@@ -365,12 +597,15 @@ export default function ExistingModelPanel({
   };
 
   const buildEditPayload = () => {
+    const scopedOpeningIds =
+      applyToSimilar && activeOpeningGroup?.openingIds?.length ? activeOpeningGroup.openingIds : undefined;
     return {
       model_id: imported?.model_id,
       preview_revision_id: previewJobId,
       selection: {
         planar_face_id: selectedClusterId,
         opening_id: selectedOpeningId || null,
+        opening_ids: scopedOpeningIds,
       },
       edit_request: {
         operation,
@@ -563,14 +798,24 @@ export default function ExistingModelPanel({
           <input
             id="model-upload"
             type="file"
-            className="native-file-input"
+            className="sr-only-file-input"
             accept=".stl,model/stl"
             onChange={(event: ChangeEvent<HTMLInputElement>) => setModelFile(event.target.files?.[0] || null)}
             disabled={isProcessing}
           />
-          <span className="muted">
-            {modelFile ? `Selected: ${modelFile.name}` : "STL only for the precision editor in v1."}
-          </span>
+          <div className="file-picker-row">
+            <label
+              htmlFor="model-upload"
+              className={`text-submit upload-trigger ${isProcessing ? "disabled" : ""}`}
+              aria-disabled={isProcessing}
+            >
+              Choose STL file
+            </label>
+            <span className="muted file-picker-name">
+              {modelFile ? modelFile.name : "No STL selected yet."}
+            </span>
+          </div>
+          <span className="muted">STL only for the precision editor in v1.</span>
           <div className="text-input-actions">
             <button
               type="button"
@@ -615,38 +860,100 @@ export default function ExistingModelPanel({
         ) : null}
 
         {analysis ? (
-          <div className="selection-grid">
-            <label className="field-row">
-              <span>Planar face cluster</span>
-              <select
-                value={selectedClusterId}
-                onChange={(event) => setSelectedClusterId(event.target.value)}
-                disabled={isProcessing}
-              >
-                <option value="">Choose a planar face</option>
-                {analysis.planar_face_clusters.map((cluster) => (
-                  <option key={cluster.cluster_id} value={cluster.cluster_id}>
-                    {cluster.cluster_id} · {cluster.area_mm2.toFixed(0)} mm² · {cluster.openings.length} openings
-                  </option>
-                ))}
-              </select>
-            </label>
+          <div className="project-summary">
+            <div className="status-label">Quick target</div>
+            {selectedCluster ? (
+              <>
+                <div className="muted">
+                  Editing {describeCluster(selectedCluster)}. Choose the kind of opening you want to change.
+                </div>
+                {selectedOpeningGroups.length ? (
+                  <div className="target-group-list">
+                    {selectedOpeningGroups.map((group) => (
+                      <button
+                        key={group.id}
+                        type="button"
+                        className={`target-group-card ${activeOpeningGroup?.id === group.id ? "active" : ""}`}
+                        onClick={() => setSelectedOpeningId(group.representativeOpeningId)}
+                        disabled={isProcessing}
+                      >
+                        <strong>{group.title}</strong>
+                        <span>{group.summary}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="muted">This face has no detected openings to target.</div>
+                )}
+                {activeOpeningGroup ? (
+                  <div className="project-summary">
+                    <div className="status-label">Scope</div>
+                    <div className="text-input-actions">
+                      <button
+                        type="button"
+                        className={`text-submit ${!applyToSimilar ? "secondary-action" : ""}`}
+                        onClick={() => setApplyToSimilar(false)}
+                        disabled={isProcessing}
+                      >
+                        Change one opening
+                      </button>
+                      <button
+                        type="button"
+                        className={`text-submit ${applyToSimilar ? "" : "secondary-action"}`}
+                        onClick={() => setApplyToSimilar(true)}
+                        disabled={isProcessing || !isRepeatedGroup}
+                      >
+                        Change all similar openings
+                      </button>
+                    </div>
+                    <div className="muted">
+                      {applyToSimilar && isRepeatedGroup
+                        ? `Preview will update ${activeOpeningGroup.count} similar openings on this face.`
+                        : "Preview will update only the representative opening."}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="muted">Import an STL to detect editable openings.</div>
+            )}
 
-            <label className="field-row">
-              <span>Detected opening (optional)</span>
-              <select
-                value={selectedOpeningId}
-                onChange={(event) => setSelectedOpeningId(event.target.value)}
-                disabled={isProcessing || !selectedCluster}
-              >
-                <option value="">No specific opening selected</option>
-                {selectedCluster?.openings.map((opening) => (
-                  <option key={opening.opening_id} value={opening.opening_id}>
-                    {opening.shape_guess} · {opening.width_mm.toFixed(2)} × {opening.height_mm.toFixed(2)} mm
-                  </option>
-                ))}
-              </select>
-            </label>
+            <details className="advanced-panel">
+              <summary>Advanced selection</summary>
+              <div className="selection-grid advanced-selection-grid">
+                <label className="field-row">
+                  <span>Planar face</span>
+                  <select
+                    value={selectedClusterId}
+                    onChange={(event) => setSelectedClusterId(event.target.value)}
+                    disabled={isProcessing}
+                  >
+                    <option value="">Choose a planar face</option>
+                    {sortedClusters.map((cluster) => (
+                      <option key={cluster.cluster_id} value={cluster.cluster_id}>
+                        {describeCluster(cluster)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field-row">
+                  <span>Representative opening</span>
+                  <select
+                    value={selectedOpeningId}
+                    onChange={(event) => setSelectedOpeningId(event.target.value)}
+                    disabled={isProcessing || !selectedCluster}
+                  >
+                    <option value="">No specific opening selected</option>
+                    {selectedCluster?.openings.map((opening) => (
+                      <option key={opening.opening_id} value={opening.opening_id}>
+                        {opening.shape_guess} · {opening.width_mm.toFixed(2)} × {opening.height_mm.toFixed(2)} mm
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </details>
           </div>
         ) : null}
 
@@ -663,14 +970,26 @@ export default function ExistingModelPanel({
               <span>Normal: {selectedCluster.normal.join(", ")}</span>
             </div>
             {selectedOpening ? (
-              <div className="muted">
-                Opening center {selectedOpening.center_mm.x}, {selectedOpening.center_mm.y} mm · shape guess {selectedOpening.shape_guess}
+              <div className="selection-detail-stack">
+                <div className="muted">
+                  Editing {selectedOpening.opening_id} at {selectedOpening.center_mm.x}, {selectedOpening.center_mm.y} mm
+                  {" · "}
+                  detected as {selectedOpening.shape_guess} {selectedOpening.width_mm.toFixed(2)} × {selectedOpening.height_mm.toFixed(2)} mm
+                </div>
+                <div className="muted">
+                  {applyToSimilar && isRepeatedGroup
+                    ? `The settings below will update ${activeOpeningGroup?.count} similar openings on this face.`
+                    : "The settings below will change only this opening."}
+                </div>
               </div>
             ) : (
               <div className="muted">
                 No opening selected. The cut will use the current center coordinates on this planar face.
               </div>
             )}
+            {viewerSelectionMessage ? (
+              <div className="chip chip-warm">{viewerSelectionMessage}</div>
+            ) : null}
           </div>
         ) : null}
 
@@ -681,78 +1000,6 @@ export default function ExistingModelPanel({
             void handlePreviewEdit();
           }}
         >
-          <label htmlFor="edit-spec">Structured edit spec</label>
-          <textarea
-            id="edit-spec"
-            rows={6}
-            value={specText}
-            onChange={(event) => setSpecText(event.target.value)}
-            disabled={isProcessing}
-            placeholder={`operation: replace_hole_with_rectangle\nwidth_mm: 8\nheight_mm: 5\nthrough_all: true`}
-          />
-          <div className="text-input-actions">
-            <button
-              type="button"
-              className="text-submit"
-              onClick={handleApplySpec}
-              disabled={!specText.trim() || isProcessing}
-            >
-              Apply spec
-            </button>
-            <span className="muted">
-              Supports JSON or flat <code>key: value</code> lines. Geometry target stays in the selectors above.
-            </span>
-          </div>
-
-          {parseSummary.length ? (
-            <div className="project-summary">
-              <div className="status-label">Applied spec values</div>
-              <div className="warning-list">
-                {parseSummary.map((item) => (
-                  <span key={item} className="chip">
-                    {item}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {parseWarnings.length ? (
-            <div className="project-summary">
-              <div className="status-label">Spec warnings</div>
-              <div className="warning-list">
-                {parseWarnings.map((warning) => (
-                  <span key={warning} className="warning-chip">
-                    {warning}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          <label htmlFor="edit-prompt">Describe the change</label>
-          <textarea
-            id="edit-prompt"
-            rows={3}
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            disabled={isProcessing}
-            placeholder="Replace the selected hole with a rectangular cutout"
-          />
-          <div className="prompt-chips">
-            {editPromptExamples.map((chip) => (
-              <button
-                key={chip}
-                type="button"
-                className="prompt-chip"
-                onClick={() => setPrompt(chip)}
-                disabled={isProcessing}
-              >
-                {chip}
-              </button>
-            ))}
-          </div>
-
           <div className="spec-grid">
             <label className="field-row compact-field">
               <span>Operation</span>
@@ -774,58 +1021,34 @@ export default function ExistingModelPanel({
                 <option value="circle">Circle</option>
               </select>
             </label>
-            <label className="field-row compact-field">
-              <span>Width mm</span>
-              <input type="number" value={widthMm} onChange={(event) => setWidthMm(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Height mm</span>
-              <input type="number" value={heightMm} onChange={(event) => setHeightMm(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Diameter mm</span>
-              <input type="number" value={diameterMm} onChange={(event) => setDiameterMm(event.target.value)} disabled={isProcessing} />
-            </label>
+            {usesWidthHeightFields ? (
+              <>
+                <label className="field-row compact-field">
+                  <span>Width mm</span>
+                  <input type="number" inputMode="decimal" step="any" value={widthMm} onChange={(event) => setWidthMm(event.target.value)} disabled={isProcessing} />
+                </label>
+                <label className="field-row compact-field">
+                  <span>Height mm</span>
+                  <input type="number" inputMode="decimal" step="any" value={heightMm} onChange={(event) => setHeightMm(event.target.value)} disabled={isProcessing} />
+                </label>
+              </>
+            ) : null}
+            {usesDiameterField ? (
+              <label className="field-row compact-field">
+                <span>Diameter mm</span>
+                <input type="number" inputMode="decimal" step="any" value={diameterMm} onChange={(event) => setDiameterMm(event.target.value)} disabled={isProcessing} />
+              </label>
+            ) : null}
             <label className="field-row compact-field">
               <span>Depth mm</span>
-              <input type="number" value={depthMm} onChange={(event) => setDepthMm(event.target.value)} disabled={isProcessing || throughAll} />
+              <input type="number" inputMode="decimal" step="any" value={depthMm} onChange={(event) => setDepthMm(event.target.value)} disabled={isProcessing || throughAll} />
             </label>
-            <label className="field-row compact-field">
-              <span>Corner radius mm</span>
-              <input type="number" value={cornerRadiusMm} onChange={(event) => setCornerRadiusMm(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Center X mm</span>
-              <input type="number" value={centerX} onChange={(event) => setCenterX(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Center Y mm</span>
-              <input type="number" value={centerY} onChange={(event) => setCenterY(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Pattern</span>
-              <select value={pattern} onChange={(event) => setPattern(event.target.value)} disabled={isProcessing}>
-                <option value="none">None</option>
-                <option value="linear">Linear</option>
-                <option value="circular">Circular</option>
-              </select>
-            </label>
-            <label className="field-row compact-field">
-              <span>Count</span>
-              <input type="number" value={count} onChange={(event) => setCount(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Spacing mm</span>
-              <input type="number" value={spacingMm} onChange={(event) => setSpacingMm(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Array radius mm</span>
-              <input type="number" value={arrayRadiusMm} onChange={(event) => setArrayRadiusMm(event.target.value)} disabled={isProcessing} />
-            </label>
-            <label className="field-row compact-field">
-              <span>Tolerance mm</span>
-              <input type="number" value={toleranceMm} onChange={(event) => setToleranceMm(event.target.value)} disabled={isProcessing} />
-            </label>
+            {showCornerRadiusField ? (
+              <label className="field-row compact-field">
+                <span>Corner radius mm</span>
+                <input type="number" inputMode="decimal" step="any" value={cornerRadiusMm} onChange={(event) => setCornerRadiusMm(event.target.value)} disabled={isProcessing} />
+              </label>
+            ) : null}
             <label className="field-row compact-field">
               <span>Through all</span>
               <select value={throughAll ? "true" : "false"} onChange={(event) => setThroughAll(event.target.value === "true")} disabled={isProcessing}>
@@ -834,6 +1057,116 @@ export default function ExistingModelPanel({
               </select>
             </label>
           </div>
+
+          <details className="advanced-panel">
+            <summary>Advanced edit controls</summary>
+            <label htmlFor="edit-prompt">Describe the change</label>
+            <textarea
+              id="edit-prompt"
+              rows={3}
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              disabled={isProcessing}
+              placeholder="Make the selected holes larger"
+            />
+            <div className="prompt-chips">
+              {editPromptExamples.map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  className="prompt-chip"
+                  onClick={() => setPrompt(chip)}
+                  disabled={isProcessing}
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+
+            <div className="spec-grid">
+              <label className="field-row compact-field">
+                <span>Center X mm</span>
+                <input type="number" inputMode="decimal" step="any" value={centerX} onChange={(event) => setCenterX(event.target.value)} disabled={isProcessing || applyToSimilar} />
+              </label>
+              <label className="field-row compact-field">
+                <span>Center Y mm</span>
+                <input type="number" inputMode="decimal" step="any" value={centerY} onChange={(event) => setCenterY(event.target.value)} disabled={isProcessing || applyToSimilar} />
+              </label>
+              <label className="field-row compact-field">
+                <span>Pattern</span>
+                <select value={pattern} onChange={(event) => setPattern(event.target.value)} disabled={isProcessing || applyToSimilar}>
+                  <option value="none">None</option>
+                  <option value="linear">Linear</option>
+                  <option value="circular">Circular</option>
+                </select>
+              </label>
+              <label className="field-row compact-field">
+                <span>Count</span>
+                <input type="number" inputMode="numeric" min="1" step="1" value={count} onChange={(event) => setCount(event.target.value)} disabled={isProcessing || applyToSimilar} />
+              </label>
+              <label className="field-row compact-field">
+                <span>Spacing mm</span>
+                <input type="number" inputMode="decimal" step="any" value={spacingMm} onChange={(event) => setSpacingMm(event.target.value)} disabled={isProcessing || applyToSimilar} />
+              </label>
+              <label className="field-row compact-field">
+                <span>Array radius mm</span>
+                <input type="number" inputMode="decimal" step="any" value={arrayRadiusMm} onChange={(event) => setArrayRadiusMm(event.target.value)} disabled={isProcessing || applyToSimilar} />
+              </label>
+              <label className="field-row compact-field">
+                <span>Tolerance mm</span>
+                <input type="number" inputMode="decimal" step="any" value={toleranceMm} onChange={(event) => setToleranceMm(event.target.value)} disabled={isProcessing} />
+              </label>
+            </div>
+
+            <label htmlFor="edit-spec">Structured edit spec</label>
+            <textarea
+              id="edit-spec"
+              rows={6}
+              value={specText}
+              onChange={(event) => setSpecText(event.target.value)}
+              disabled={isProcessing}
+              placeholder={`operation: resize_cutout\ndiameter_mm: 8\nthrough_all: true`}
+            />
+            <div className="text-input-actions">
+              <button
+                type="button"
+                className="text-submit"
+                onClick={handleApplySpec}
+                disabled={!specText.trim() || isProcessing}
+              >
+                Apply spec
+              </button>
+              <span className="muted">
+                Supports JSON or flat <code>key: value</code> lines.
+              </span>
+            </div>
+
+            {parseSummary.length ? (
+              <div className="project-summary">
+                <div className="status-label">Applied spec values</div>
+                <div className="warning-list">
+                  {parseSummary.map((item) => (
+                    <span key={item} className="chip">
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {parseWarnings.length ? (
+              <div className="project-summary">
+                <div className="status-label">Spec warnings</div>
+                <div className="warning-list">
+                  {parseWarnings.map((warning) => (
+                    <span key={warning} className="warning-chip">
+                      {warning}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </details>
 
           <div className="text-input-actions">
             <button

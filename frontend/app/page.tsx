@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ExistingModelPanel from "../components/ExistingModelPanel";
 import ModelViewer from "../components/ModelViewer";
+import type { SelectionPayload } from "../components/ModelViewer";
 import VoicePanel from "../components/VoicePanel";
 
 export default function Home() {
@@ -16,6 +17,8 @@ export default function Home() {
   const [bundleUrl, setBundleUrl] = useState<string | null>(null);
   const [isPreviewUpdating, setIsPreviewUpdating] = useState(false);
   const [showChanges, setShowChanges] = useState(true);
+  const [showOriginalReference, setShowOriginalReference] = useState(false);
+  const [editViewerSelection, setEditViewerSelection] = useState<SelectionPayload | null>(null);
   const workflowModeRef = useRef(workflowMode);
 
   useEffect(() => {
@@ -30,6 +33,8 @@ export default function Home() {
     setStlUrl(null);
     setGcodeUrl(null);
     setBundleUrl(null);
+    setShowOriginalReference(false);
+    setEditViewerSelection(null);
   }, [workflowMode]);
 
   const createModeGuard = useMemo(() => {
@@ -143,28 +148,32 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="grid">
-        {workflowMode === "edit" ? (
-          <ExistingModelPanel
-            onModelUrl={createModeGuard(["edit"], setModelUrl)}
-            onSourceModelUrl={createModeGuard(["edit"], setSourceModelUrl)}
-            onStlUrl={createModeGuard(["edit"], setStlUrl)}
-            onGcodeUrl={createModeGuard(["edit"], setGcodeUrl)}
-            onBundleUrl={createModeGuard(["edit"], setBundleUrl)}
-          />
-        ) : (
-          <VoicePanel
-            onModelUrl={createModeGuard(["useful", "creative"], setModelUrl)}
-            onGhostModelUrl={createModeGuard(["useful", "creative"], setGhostModelUrl)}
-            onPreviewUpdating={createPreviewFlagGuard(["useful", "creative"])}
-            onStlUrl={createModeGuard(["useful", "creative"], setStlUrl)}
-            onGcodeUrl={createModeGuard(["useful", "creative"], setGcodeUrl)}
-            onBundleUrl={createModeGuard(["useful", "creative"], setBundleUrl)}
-            workflowMode={workflowMode}
-            hideModeSwitch
-          />
-        )}
+      <div className="grid workspace-grid">
+        <div className="workspace-column workspace-column-editor">
+          {workflowMode === "edit" ? (
+            <ExistingModelPanel
+              onModelUrl={createModeGuard(["edit"], setModelUrl)}
+              onSourceModelUrl={createModeGuard(["edit"], setSourceModelUrl)}
+              onStlUrl={createModeGuard(["edit"], setStlUrl)}
+              onGcodeUrl={createModeGuard(["edit"], setGcodeUrl)}
+              onBundleUrl={createModeGuard(["edit"], setBundleUrl)}
+              viewerSelectionHint={editViewerSelection}
+            />
+          ) : (
+            <VoicePanel
+              onModelUrl={createModeGuard(["useful", "creative"], setModelUrl)}
+              onGhostModelUrl={createModeGuard(["useful", "creative"], setGhostModelUrl)}
+              onPreviewUpdating={createPreviewFlagGuard(["useful", "creative"])}
+              onStlUrl={createModeGuard(["useful", "creative"], setStlUrl)}
+              onGcodeUrl={createModeGuard(["useful", "creative"], setGcodeUrl)}
+              onBundleUrl={createModeGuard(["useful", "creative"], setBundleUrl)}
+              workflowMode={workflowMode}
+              hideModeSwitch
+            />
+          )}
+        </div>
 
+        <div className="workspace-column workspace-column-preview">
         <section className="panel model-panel">
           <div className="panel-header">
             <p className="eyebrow">3D Preview</p>
@@ -176,18 +185,40 @@ export default function Home() {
             </p>
           </div>
 
-          {workflowMode === "edit" && sourceModelUrl ? (
+          {workflowMode === "edit" ? (
+            <div className="model-toolbar">
+              <button
+                type="button"
+                className="mode-chip"
+                onClick={() => setShowOriginalReference((prev) => !prev)}
+                disabled={!sourceModelUrl}
+              >
+                {showOriginalReference ? "Hide original reference" : "Show original reference"}
+              </button>
+            </div>
+          ) : null}
+
+          {workflowMode === "edit" && sourceModelUrl && showOriginalReference ? (
             <div className="compare-grid">
               <div className="model-stack">
                 <div className="status-label">Original import</div>
                 <div className="model-shell">
-                  <ModelViewer src={sourceModelUrl} label="Imported STL" />
+                  <ModelViewer
+                    src={sourceModelUrl}
+                    label="Imported STL"
+                    defaultInteractionMode="pan"
+                  />
                 </div>
               </div>
               <div className="model-stack">
                 <div className="status-label">Current revision</div>
                 <div className="model-shell">
-                  <ModelViewer src={modelUrl || sourceModelUrl} label="Edited STL" />
+                  <ModelViewer
+                    src={modelUrl || sourceModelUrl}
+                    label="Edited STL"
+                    defaultInteractionMode="pan"
+                    onSelect={setEditViewerSelection}
+                  />
                 </div>
               </div>
             </div>
@@ -213,6 +244,7 @@ export default function Home() {
                   showChanges={workflowMode === "useful" ? showChanges : false}
                   isUpdating={workflowMode === "useful" ? isPreviewUpdating : false}
                   label="Generated object"
+                  defaultInteractionMode="orbit"
                   onSelect={() => undefined}
                 />
               </div>
@@ -243,6 +275,7 @@ export default function Home() {
             </span>
           </div>
         </section>
+        </div>
       </div>
     </main>
   );

@@ -4,9 +4,9 @@ import { Suspense, createElement, useEffect, useMemo, useState } from "react";
 import { Bounds, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, type ThreeEvent } from "@react-three/fiber";
 import type { Material, Mesh } from "three";
-import { Color } from "three";
+import { Color, MOUSE } from "three";
 
-type SelectionPayload = {
+export type SelectionPayload = {
   objectName: string;
   point: { x: number; y: number; z: number };
   normal: { x: number; y: number; z: number } | null;
@@ -18,6 +18,7 @@ type ModelViewerProps = {
   label?: string;
   showChanges?: boolean;
   isUpdating?: boolean;
+  defaultInteractionMode?: "orbit" | "pan";
   onSelect?: (payload: SelectionPayload) => void;
 };
 
@@ -152,17 +153,23 @@ export default function ModelViewer({
   label,
   showChanges = false,
   isUpdating = false,
+  defaultInteractionMode = "orbit",
   onSelect,
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const [interactionMode, setInteractionMode] = useState<"orbit" | "pan">(defaultInteractionMode);
 
   useEffect(() => {
     setHoveredObjectId(null);
     setSelectedObjectId(null);
     setSelectedLabel(null);
   }, [src, ghostModelUrl]);
+
+  useEffect(() => {
+    setInteractionMode(defaultInteractionMode);
+  }, [defaultInteractionMode, src, ghostModelUrl]);
 
   if (!src) {
     return (
@@ -181,7 +188,8 @@ export default function ModelViewer({
     <div className="model-viewer-wrap">
       <Canvas
         camera={{ position: [2.8, 2.2, 2.8], fov: 40 }}
-        dpr={[1, 2]}
+        dpr={[1, 1.5]}
+        frameloop="demand"
         onPointerMissed={() => setHoveredObjectId(null)}
       >
         {createElement("color", { attach: "background", args: ["#fff8ef"] })}
@@ -189,7 +197,7 @@ export default function ModelViewer({
         {createElement("directionalLight", { position: [5, 8, 4], intensity: 1.25 })}
         {createElement("directionalLight", { position: [-4, 3, -5], intensity: 0.4 })}
         <Suspense fallback={null}>
-          <Bounds fit clip observe margin={1.2}>
+          <Bounds fit clip margin={1.2}>
             <>
               {hasGhost && ghostModelUrl ? (
                 <LoadedModel
@@ -213,12 +221,36 @@ export default function ModelViewer({
             </>
           </Bounds>
         </Suspense>
-        <OrbitControls enableDamping dampingFactor={0.08} />
+        <OrbitControls
+          enableDamping
+          dampingFactor={0.12}
+          enablePan
+          rotateSpeed={0.6}
+          zoomSpeed={0.85}
+          panSpeed={0.85}
+          mouseButtons={{
+            LEFT: interactionMode === "pan" ? MOUSE.PAN : MOUSE.ROTATE,
+            MIDDLE: MOUSE.DOLLY,
+            RIGHT: interactionMode === "pan" ? MOUSE.ROTATE : MOUSE.PAN,
+          }}
+        />
       </Canvas>
 
       <div className="model-overlay">
         {label ? <div className="model-overlay-chip">{label}</div> : null}
         {hasGhost ? <div className="model-overlay-chip subtle">Showing changes</div> : null}
+        <button
+          type="button"
+          className="model-overlay-chip model-overlay-button subtle"
+          onClick={() => setInteractionMode((mode) => (mode === "orbit" ? "pan" : "orbit"))}
+        >
+          {interactionMode === "orbit" ? "Mode: orbit" : "Mode: pan"}
+        </button>
+        <div className="model-overlay-chip subtle">
+          {interactionMode === "orbit"
+            ? "Left drag orbit · right drag pan · scroll zoom"
+            : "Left drag pan · right drag orbit · scroll zoom"}
+        </div>
         {selectedLabel ? (
           <div className="model-overlay-chip accent">Selected {selectedLabel}</div>
         ) : null}
