@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, createElement, useEffect, useMemo, useState } from "react";
-import { Bounds, OrbitControls, useGLTF } from "@react-three/drei";
+import { Bounds, Html, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, type ThreeEvent } from "@react-three/fiber";
 import type { Material, Mesh } from "three";
 import { Color, MOUSE } from "three";
@@ -12,6 +12,11 @@ export type SelectionPayload = {
   normal: { x: number; y: number; z: number } | null;
 };
 
+export type ViewerSelectionMarker = {
+  point: { x: number; y: number; z: number };
+  label: string;
+};
+
 type ModelViewerProps = {
   src?: string | null;
   ghostModelUrl?: string | null;
@@ -20,6 +25,7 @@ type ModelViewerProps = {
   isUpdating?: boolean;
   defaultInteractionMode?: "orbit" | "pan";
   onSelect?: (payload: SelectionPayload) => void;
+  selectionMarker?: ViewerSelectionMarker | null;
 };
 
 type LoadedModelProps = {
@@ -147,6 +153,28 @@ function LoadedModel({
   });
 }
 
+function SelectionMarker({ marker }: { marker: ViewerSelectionMarker }) {
+  return createElement(
+    "group",
+    { position: [marker.point.x, marker.point.y, marker.point.z] },
+    createElement(
+      "mesh",
+      null,
+      createElement("sphereGeometry", { args: [2.2, 18, 18] }),
+      createElement("meshStandardMaterial", {
+        color: "#f59f3a",
+        emissive: "#f59f3a",
+        emissiveIntensity: 0.4,
+      })
+    ),
+    createElement(
+      Html,
+      { center: true, distanceFactor: 14 },
+      createElement("div", { className: "viewer-selection-badge" }, marker.label)
+    )
+  );
+}
+
 export default function ModelViewer({
   src,
   ghostModelUrl,
@@ -155,6 +183,7 @@ export default function ModelViewer({
   isUpdating = false,
   defaultInteractionMode = "orbit",
   onSelect,
+  selectionMarker,
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
@@ -164,12 +193,16 @@ export default function ModelViewer({
   useEffect(() => {
     setHoveredObjectId(null);
     setSelectedObjectId(null);
-    setSelectedLabel(null);
+    setSelectedLabel(selectionMarker?.label || null);
   }, [src, ghostModelUrl]);
 
   useEffect(() => {
     setInteractionMode(defaultInteractionMode);
   }, [defaultInteractionMode, src, ghostModelUrl]);
+
+  useEffect(() => {
+    setSelectedLabel(selectionMarker?.label || null);
+  }, [selectionMarker]);
 
   if (!src) {
     return (
@@ -214,10 +247,11 @@ export default function ModelViewer({
                 onHover={setHoveredObjectId}
                 onSelect={(payload, objectId) => {
                   setSelectedObjectId(objectId);
-                  setSelectedLabel(payload.objectName);
+                  setSelectedLabel(selectionMarker?.label || payload.objectName);
                   onSelect?.(payload);
                 }}
               />
+              {selectionMarker ? <SelectionMarker marker={selectionMarker} /> : null}
             </>
           </Bounds>
         </Suspense>

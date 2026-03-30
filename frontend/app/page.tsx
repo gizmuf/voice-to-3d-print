@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ExistingModelPanel from "../components/ExistingModelPanel";
 import ModelViewer from "../components/ModelViewer";
-import type { SelectionPayload } from "../components/ModelViewer";
+import type { SelectionPayload, ViewerSelectionMarker } from "../components/ModelViewer";
 import VoicePanel from "../components/VoicePanel";
 
 export default function Home() {
@@ -19,6 +19,7 @@ export default function Home() {
   const [showChanges, setShowChanges] = useState(true);
   const [showOriginalReference, setShowOriginalReference] = useState(false);
   const [editViewerSelection, setEditViewerSelection] = useState<SelectionPayload | null>(null);
+  const [editSelectionMarker, setEditSelectionMarker] = useState<ViewerSelectionMarker | null>(null);
   const workflowModeRef = useRef(workflowMode);
 
   useEffect(() => {
@@ -35,6 +36,7 @@ export default function Home() {
     setBundleUrl(null);
     setShowOriginalReference(false);
     setEditViewerSelection(null);
+    setEditSelectionMarker(null);
   }, [workflowMode]);
 
   const createModeGuard = useMemo(() => {
@@ -157,6 +159,7 @@ export default function Home() {
               onStlUrl={createModeGuard(["edit"], setStlUrl)}
               onGcodeUrl={createModeGuard(["edit"], setGcodeUrl)}
               onBundleUrl={createModeGuard(["edit"], setBundleUrl)}
+              onSelectionMarker={setEditSelectionMarker}
               viewerSelectionHint={editViewerSelection}
             />
           ) : (
@@ -218,6 +221,7 @@ export default function Home() {
                     label="Edited STL"
                     defaultInteractionMode="pan"
                     onSelect={setEditViewerSelection}
+                    selectionMarker={editSelectionMarker}
                   />
                 </div>
               </div>
@@ -243,9 +247,10 @@ export default function Home() {
                   ghostModelUrl={workflowMode === "useful" ? ghostModelUrl : null}
                   showChanges={workflowMode === "useful" ? showChanges : false}
                   isUpdating={workflowMode === "useful" ? isPreviewUpdating : false}
-                  label="Generated object"
-                  defaultInteractionMode="orbit"
-                  onSelect={() => undefined}
+                  label={workflowMode === "edit" ? "Edited STL" : "Generated object"}
+                  defaultInteractionMode={workflowMode === "edit" ? "pan" : "orbit"}
+                  onSelect={workflowMode === "edit" ? setEditViewerSelection : () => undefined}
+                  selectionMarker={workflowMode === "edit" ? editSelectionMarker : null}
                 />
               </div>
             </>

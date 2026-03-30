@@ -780,6 +780,22 @@ code {
   background: rgba(255, 241, 222, 0.94);
 }
 
+.viewer-selection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 247, 235, 0.96);
+  border: 1px solid rgba(245, 159, 58, 0.45);
+  box-shadow: 0 10px 24px rgba(30, 22, 15, 0.16);
+  color: #7b4208;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .model-loading {
   position: absolute;
   right: 12px;

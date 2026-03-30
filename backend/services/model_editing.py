@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ PLANAR_OFFSET_TOLERANCE_MM = 0.35
 MIN_CLUSTER_AREA_MM2 = 25.0
 DEFAULT_TOLERANCE_MM = 0.15
 MAX_OPENINGS_PER_CLUSTER = 512
+FEATURE_ID_QUANTIZATION_MM = 0.05
+CIRCLE_GROUP_TOLERANCE_MM = 0.35
+RECT_GROUP_TOLERANCE_MM = 0.5
 
 
 @dataclass
@@ -315,9 +319,186 @@ def analyze_mesh(mesh: trimesh.Trimesh) -> dict:
     }
 
 
-def public_analysis_payload(analysis: dict) -> dict:
-    clusters: list[dict] = []
+def _quantize_mm(value: float, step: float = FEATURE_ID_QUANTIZATION_MM) -> float:
+    if step <= 0:
+        return round(value, 4)
+    return round(round(value / step) * step, 4)
+
+
+def _hash_id(prefix: str, *parts: object) -> str:
+    payload = "::".join(str(part) for part in parts)
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}_{digest}"
+
+
+def _stable_face_id(cluster: dict) -> str:
+    normal = cluster.get("normal") or [0.0, 0.0, 1.0]
+    origin = cluster.get("origin_mm") or [0.0, 0.0, 0.0]
+    bounds = cluster.get("local_bounds_mm") or {}
+    plane_offset = sum(float(normal[index]) * float(origin[index]) for index in range(3))
+    return _hash_id(
+        "face",
+        *(round(float(value), 4) for value in normal),
+        _quantize_mm(float(plane_offset)),
+        _quantize_mm(float(bounds.get("min_x", 0.0))),
+        _quantize_mm(float(bounds.get("max_x", 0.0))),
+        _quantize_mm(float(bounds.get("min_y", 0.0))),
+        _quantize_mm(float(bounds.get("max_y", 0.0))),
+    )
+
+
+def _stable_feature_id(face_id: str, opening: dict) -> str:
+    center = opening.get("center_mm") or {}
+    return _hash_id(
+        "feature",
+        face_id,
+        _quantize_mm(float(center.get("x", 0.0))),
+        _quantize_mm(float(center.get("y", 0.0))),
+    )
+
+
+def _openings_match_for_group(group: dict, opening: dict) -> bool:
+    opening_shape = opening.get("shape_guess") or opening.get("type")
+    if group["shape_guess"] != opening_shape:
+        return False
+    width_delta = abs(group["avg_width"] - float(opening.get("width_mm", 0.0)))
+    height_delta = abs(group["avg_height"] - float(opening.get("height_mm", 0.0)))
+    if opening_shape == "circle":
+        return max(width_delta, height_delta) <= CIRCLE_GROUP_TOLERANCE_MM
+    return width_delta <= RECT_GROUP_TOLERANCE_MM and height_delta <= RECT_GROUP_TOLERANCE_MM
+
+
+def _group_title(shape_guess: str, count: int, avg_width: float, avg_height: float) -> str:
+    avg_size = (avg_width + avg_height) / 2.0
+    if count > 1:
+        return "Small repeated holes" if avg_size <= 12.0 else "Repeated openings"
+    return "Large opening" if avg_size > 15.0 else "Single opening"
+
+
+def _build_feature_projection(analysis: dict) -> dict:
+    projected_clusters: list[dict] = []
+    features: list[dict] = []
+    groups: list[dict] = []
+
     for cluster in analysis.get("planar_face_clusters", []):
+        face_id = _stable_face_id(cluster)
+        cluster_openings = cluster.get("openings", [])
+        cluster_features: list[dict] = []
+
+        for opening in cluster_openings:
+            center = opening.get("center_mm") or {}
+            width_mm = float(opening.get("width_mm", 0.0) or 0.0)
+            height_mm = float(opening.get("height_mm", 0.0) or 0.0)
+            if min(width_mm, height_mm) < 1.0:
+                continue
+            feature = {
+                "id": _stable_feature_id(face_id, opening),
+                "type": opening.get("shape_guess", "unknown"),
+                "face_id": face_id,
+                "cluster_id": cluster.get("cluster_id"),
+                "opening_id": opening.get("opening_id"),
+                "center_mm": {
+                    "x": round(float(center.get("x", 0.0)), 3),
+                    "y": round(float(center.get("y", 0.0)), 3),
+                },
+                "width_mm": width_mm,
+                "height_mm": height_mm,
+                "diameter_mm": round(
+                    min(width_mm, height_mm),
+                    3,
+                ),
+                "bounds_mm": opening.get("bounds_mm"),
+                "group_id": None,
+                "summary": f"{opening.get('shape_guess', 'opening')} · {float(opening.get('width_mm', 0.0)):.2f} × {float(opening.get('height_mm', 0.0)):.2f} mm",
+            }
+            cluster_features.append(feature)
+            features.append(feature)
+
+        grouped_buckets: list[dict] = []
+        for feature in cluster_features:
+            match = next((bucket for bucket in grouped_buckets if _openings_match_for_group(bucket, feature)), None)
+            if not match:
+                grouped_buckets.append(
+                    {
+                        "shape_guess": feature["type"],
+                        "avg_width": float(feature.get("width_mm", 0.0) or 0.0),
+                        "avg_height": float(feature.get("height_mm", 0.0) or 0.0),
+                        "features": [feature],
+                    }
+                )
+                continue
+            match["features"].append(feature)
+            match["avg_width"] = sum(float(item.get("width_mm", 0.0) or 0.0) for item in match["features"]) / len(match["features"])
+            match["avg_height"] = sum(float(item.get("height_mm", 0.0) or 0.0) for item in match["features"]) / len(match["features"])
+
+        grouped_buckets.sort(
+            key=lambda bucket: (
+                -len(bucket["features"]),
+                bucket["avg_width"] + bucket["avg_height"],
+            )
+        )
+
+        projected_groups: list[dict] = []
+        for bucket in grouped_buckets:
+            representative = min(
+                bucket["features"],
+                key=lambda item: math.hypot(
+                    float(item.get("width_mm", 0.0) or 0.0) - bucket["avg_width"],
+                    float(item.get("height_mm", 0.0) or 0.0) - bucket["avg_height"],
+                ),
+            )
+            group_id = _hash_id(
+                "group",
+                face_id,
+                bucket["shape_guess"],
+                _quantize_mm(bucket["avg_width"]),
+                _quantize_mm(bucket["avg_height"]),
+            )
+            for feature in bucket["features"]:
+                feature["group_id"] = group_id
+            projected_group = {
+                "id": group_id,
+                "type": bucket["shape_guess"],
+                "face_id": face_id,
+                "cluster_id": cluster.get("cluster_id"),
+                "count": len(bucket["features"]),
+                "representative_feature_id": representative["id"],
+                "feature_ids": [feature["id"] for feature in bucket["features"]],
+                "opening_ids": [feature["opening_id"] for feature in bucket["features"]],
+                "title": _group_title(bucket["shape_guess"], len(bucket["features"]), bucket["avg_width"], bucket["avg_height"]),
+                "summary": f"{bucket['shape_guess']} · {len(bucket['features'])} opening{'s' if len(bucket['features']) != 1 else ''} · {bucket['avg_width']:.1f} × {bucket['avg_height']:.1f} mm",
+                "avg_width_mm": round(bucket["avg_width"], 3),
+                "avg_height_mm": round(bucket["avg_height"], 3),
+            }
+            projected_groups.append(projected_group)
+            groups.append(projected_group)
+
+        projected_clusters.append(
+            {
+                "cluster_id": cluster.get("cluster_id"),
+                "face_id": face_id,
+                "face_count": cluster.get("face_count"),
+                "area_mm2": cluster.get("area_mm2"),
+                "normal": cluster.get("normal"),
+                "origin_mm": cluster.get("origin_mm"),
+                "local_frame": cluster.get("local_frame"),
+                "local_bounds_mm": cluster.get("local_bounds_mm"),
+                "openings": cluster_openings,
+                "groups": projected_groups,
+            }
+        )
+
+    return {
+        "clusters": projected_clusters,
+        "features": features,
+        "groups": groups,
+    }
+
+
+def public_analysis_payload(analysis: dict) -> dict:
+    projection = _build_feature_projection(analysis)
+    clusters: list[dict] = []
+    for cluster in projection["clusters"]:
         openings = []
         for opening in cluster.get("openings", []):
             openings.append(
@@ -334,6 +515,7 @@ def public_analysis_payload(analysis: dict) -> dict:
         clusters.append(
             {
                 "cluster_id": cluster.get("cluster_id"),
+                "face_id": cluster.get("face_id"),
                 "face_count": cluster.get("face_count"),
                 "area_mm2": cluster.get("area_mm2"),
                 "normal": cluster.get("normal"),
@@ -341,6 +523,7 @@ def public_analysis_payload(analysis: dict) -> dict:
                 "local_frame": cluster.get("local_frame"),
                 "local_bounds_mm": cluster.get("local_bounds_mm"),
                 "openings": openings,
+                "groups": cluster.get("groups", []),
             }
         )
 
@@ -353,6 +536,8 @@ def public_analysis_payload(analysis: dict) -> dict:
         "vertex_count": analysis.get("vertex_count"),
         "warnings": analysis.get("warnings", []),
         "planar_face_clusters": clusters,
+        "features": projection["features"],
+        "groups": projection["groups"],
     }
 
 
@@ -410,6 +595,26 @@ def _resolve_base_stl(model_id: str, revision_id: str | None = None) -> Path:
 
 def _resolve_cluster(analysis: dict, selection: dict) -> dict:
     cluster_id = selection.get("planar_face_id")
+    face_id = selection.get("face_id")
+    feature_id = selection.get("feature_id")
+    group_id = selection.get("group_id")
+    feature_projection = _build_feature_projection(analysis)
+    if feature_id:
+        feature = next((item for item in feature_projection["features"] if item["id"] == feature_id), None)
+        if not feature:
+            raise ValueError("Selected feature was not found on the current model.")
+        cluster_id = feature.get("cluster_id")
+    elif group_id:
+        group = next((item for item in feature_projection["groups"] if item["id"] == group_id), None)
+        if not group:
+            raise ValueError("Selected feature group was not found on the current model.")
+        cluster_id = group.get("cluster_id")
+
+    if face_id and not cluster_id:
+        for cluster in feature_projection["clusters"]:
+            if cluster.get("face_id") == face_id:
+                cluster_id = cluster.get("cluster_id")
+                break
     if not cluster_id:
         raise ValueError("Selection requires planar_face_id.")
     for cluster in analysis.get("planar_face_clusters", []):
@@ -420,6 +625,19 @@ def _resolve_cluster(analysis: dict, selection: dict) -> dict:
 
 def _resolve_opening(cluster: dict, selection: dict) -> dict | None:
     opening_id = selection.get("opening_id")
+    feature_id = selection.get("feature_id")
+    if feature_id and not opening_id:
+        face_id = _stable_face_id(cluster)
+        opening = next(
+            (
+                candidate
+                for candidate in cluster.get("openings", [])
+                if _stable_feature_id(face_id, candidate) == feature_id
+            ),
+            None,
+        )
+        if opening:
+            return opening
     if not opening_id:
         return None
     for opening in cluster.get("openings", []):
@@ -429,8 +647,27 @@ def _resolve_opening(cluster: dict, selection: dict) -> dict | None:
 
 
 def _resolve_target_openings(cluster: dict, selection: dict) -> list[dict]:
+    face_id = _stable_face_id(cluster)
+    indexed_openings = {
+        opening.get("opening_id"): opening
+        for opening in cluster.get("openings", [])
+        if opening.get("opening_id")
+    }
+    indexed_features = {
+        _stable_feature_id(face_id, opening): opening
+        for opening in cluster.get("openings", [])
+        if opening.get("opening_id")
+    }
+    if selection.get("scope") == "group" and selection.get("group_id"):
+        projection = _build_feature_projection({"planar_face_clusters": [cluster]})
+        group = next((item for item in projection["groups"] if item["id"] == selection.get("group_id")), None)
+        if not group:
+            raise ValueError("Selected feature group was not found on the current face.")
+        return [indexed_openings[opening_id] for opening_id in group["opening_ids"] if opening_id in indexed_openings]
+
     opening_ids = selection.get("opening_ids") or []
-    if not opening_ids:
+    feature_ids = selection.get("feature_ids") or []
+    if not opening_ids and not feature_ids:
         opening = _resolve_opening(cluster, selection)
         return [opening] if opening else []
 
@@ -445,6 +682,12 @@ def _resolve_target_openings(cluster: dict, selection: dict) -> list[dict]:
         if not opening:
             raise ValueError("One of the selected openings was not found on the current planar face cluster.")
         resolved.append(opening)
+    for feature_id in feature_ids:
+        opening = indexed_features.get(feature_id)
+        if not opening:
+            raise ValueError("One of the selected features was not found on the current planar face cluster.")
+        if opening not in resolved:
+            resolved.append(opening)
     return resolved
 
 
@@ -522,7 +765,11 @@ def _normalized_edit_request(selection: dict, cluster: dict, opening: dict | Non
         "prompt": prompt or "",
         "selection": {
             "planar_face_id": selection.get("planar_face_id"),
+            "face_id": selection.get("face_id"),
             "opening_id": selection.get("opening_id"),
+            "feature_id": selection.get("feature_id"),
+            "group_id": selection.get("group_id"),
+            "scope": selection.get("scope") or "one",
         },
         "center_mm": {"x": round(center_x, 3), "y": round(center_y, 3)},
         "dimensions_mm": {
