@@ -154,7 +154,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="grid workspace-grid">
+      <div className={`grid workspace-grid ${workflowMode === "useful" ? "workspace-grid-design" : ""}`}>
         <div className="workspace-column workspace-column-editor">
           {workflowMode === "edit" ? (
             <ExistingModelPanel

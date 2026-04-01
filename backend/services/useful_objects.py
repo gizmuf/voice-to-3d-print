@@ -31,6 +31,7 @@ from services.parametric import (
 
 
 TEMPLATE_LABELS = {
+    "perforated_disc": "Perforated disc",
     "phone_stand": "Phone stand",
     "simple_box": "Simple box",
     "tray": "Tray",
@@ -42,6 +43,18 @@ TEMPLATE_LABELS = {
 }
 
 DEFAULT_SPECS: Dict[str, Dict[str, Any]] = {
+    "perforated_disc": {
+        "object_label": "Perforated disc",
+        "dimensions_mm": {"outer_diameter": 340.0, "thickness": 15.0},
+        "constraints": {
+            "hole_diameter_mm": 7.08,
+            "center_hole_diameter_mm": 32.93,
+            "ring_count": 12.0,
+            "radial_spacing_mm": 9.387,
+            "tangential_spacing_mm": 7.0,
+            "edge_margin_mm": 12.421,
+        },
+    },
     "phone_stand": {
         "object_label": "Phone stand",
         "dimensions_mm": {"width": 80.0, "depth": 90.0, "height": 120.0},
@@ -117,6 +130,7 @@ DEFAULT_SPECS: Dict[str, Dict[str, Any]] = {
 }
 
 USEFUL_KEYWORDS = {
+    "perforated_disc": ("perforated", "disc", "plate", "panel", "filter", "strainer"),
     "phone_stand": ("stand", "dock", "phone", "tablet"),
     "simple_box": ("box", "container", "case", "enclosure"),
     "tray": ("tray", "dish", "organizer tray"),
@@ -157,6 +171,7 @@ class UsefulBuild:
 
 
 CADQUERY_TEMPLATES = {
+    "perforated_disc",
     "phone_stand",
     "simple_box",
     "tray",
@@ -197,6 +212,10 @@ def _keyword_score(text: str, keywords: Iterable[str]) -> int:
 
 def _detect_template(text: str, existing_template: str | None = None) -> str:
     lowered = text.lower()
+    if "perforated" in lowered and any(word in lowered for word in ("disc", "plate", "panel", "filter", "strainer")):
+        return "perforated_disc"
+    if any(phrase in lowered for phrase in ("disc with holes", "plate with holes", "hole pattern disc", "perforated disk")):
+        return "perforated_disc"
     if "phone stand" in lowered or ("stand" in lowered and "phone" in lowered):
         return "phone_stand"
     if any(word in lowered for word in ("cylindrical holder", "pen holder", "cup holder")):
@@ -301,6 +320,74 @@ def _apply_relative_revisions(
         constraints["cable_hole_diameter_mm"] = max(float(constraints["cable_hole_diameter_mm"]), 10.0)
 
 
+def _parse_count(prompt: str, keywords: Tuple[str, ...], default: float) -> float:
+    lowered = prompt.lower()
+    for keyword in keywords:
+        match = re.search(rf"(\d+)\s*{re.escape(keyword)}", lowered)
+        if match:
+            return float(match.group(1))
+        match = re.search(rf"{re.escape(keyword)}\s*(?:count)?\s*(?:of)?\s*(\d+)", lowered)
+        if match:
+            return float(match.group(1))
+    return default
+
+
+def _perforated_disc_params(spec: Dict[str, Any]) -> Dict[str, float]:
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    return {
+        "outer_diameter": max(float(dims.get("outer_diameter", 0.0) or 0.0), 1.0),
+        "thickness": max(float(dims.get("thickness", 0.0) or 0.0), 0.8),
+        "hole_diameter": max(float(constraints.get("hole_diameter_mm", 0.0) or 0.0), 0.8),
+        "center_hole_diameter": max(float(constraints.get("center_hole_diameter_mm", 0.0) or 0.0), 0.0),
+        "ring_count": max(int(round(float(constraints.get("ring_count", 1.0) or 1.0))), 1),
+        "radial_spacing": max(float(constraints.get("radial_spacing_mm", 0.0) or 0.0), 0.1),
+        "tangential_spacing": max(float(constraints.get("tangential_spacing_mm", 0.0) or 0.0), 0.0),
+        "edge_margin": max(float(constraints.get("edge_margin_mm", 0.0) or 0.0), 0.0),
+    }
+
+
+def _perforated_disc_layout(spec: Dict[str, Any]) -> tuple[list[tuple[float, float]], list[float], list[int]]:
+    params = _perforated_disc_params(spec)
+    outer_radius = params["outer_diameter"] / 2.0
+    hole_radius = params["hole_diameter"] / 2.0
+    center_block_radius = params["center_hole_diameter"] / 2.0
+    min_wall = 0.8
+
+    min_center_radius = center_block_radius + params["edge_margin"] + hole_radius
+    max_center_radius = outer_radius - params["edge_margin"] - hole_radius
+    if max_center_radius <= min_center_radius:
+        raise ValueError("Perforated disc has no usable ring area after center hole and edge margin.")
+
+    ring_count = params["ring_count"]
+    if ring_count == 1:
+        ring_radii = [(min_center_radius + max_center_radius) / 2.0]
+    else:
+        required_span = (ring_count - 1) * params["radial_spacing"]
+        available_span = max_center_radius - min_center_radius
+        if required_span > available_span + 1e-6:
+            raise ValueError("Ring count and radial spacing push the pattern beyond the disc boundary.")
+        ring_radii = [min_center_radius + index * params["radial_spacing"] for index in range(ring_count)]
+
+    if len(ring_radii) > 1 and params["radial_spacing"] < params["hole_diameter"] + min_wall:
+        raise ValueError("Radial spacing is too small for the current hole diameter and wall thickness.")
+
+    pitch = params["hole_diameter"] + params["tangential_spacing"]
+    points: list[tuple[float, float]] = []
+    holes_per_ring: list[int] = []
+    for radius in ring_radii:
+        circumference = 2.0 * math.pi * radius
+        hole_count = max(int(math.floor(circumference / max(pitch, 0.1))), 4)
+        arc_pitch = circumference / hole_count
+        if arc_pitch < params["hole_diameter"] + min_wall:
+            raise ValueError("Tangential spacing is too small for the current hole diameter and wall thickness.")
+        holes_per_ring.append(hole_count)
+        for hole_index in range(hole_count):
+            angle = (2.0 * math.pi * hole_index) / hole_count
+            points.append((math.cos(angle) * radius, math.sin(angle) * radius))
+    return points, ring_radii, holes_per_ring
+
+
 def build_useful_structured_spec(
     prompt: str,
     *,
@@ -383,7 +470,55 @@ def build_useful_structured_spec(
         if prompt_triplet:
             dimensions["width"], dimensions["depth"], dimensions["height"] = prompt_triplet
         constraints["arm_drop_mm"] = _parse_dimension_value(prompt, ("drop",), constraints["arm_drop_mm"])
-        constraints["arm_thickness_mm"] = _parse_dimension_value(prompt, ("thickness",), constraints["arm_thickness_mm"])
+    elif template_id == "perforated_disc":
+        dimensions["outer_diameter"] = _parse_dimension_value(
+            prompt,
+            ("outer diameter", "disc diameter", "plate diameter", "diameter"),
+            dimensions["outer_diameter"],
+        )
+        dimensions["thickness"] = _parse_dimension_value(
+            prompt,
+            ("thickness",),
+            dimensions["thickness"],
+        )
+        constraints["hole_diameter_mm"] = _parse_dimension_value(
+            prompt,
+            ("hole diameter", "hole size", "opening diameter"),
+            constraints["hole_diameter_mm"],
+        )
+        constraints["center_hole_diameter_mm"] = _parse_dimension_value(
+            prompt,
+            ("center hole", "center diameter", "center opening"),
+            constraints["center_hole_diameter_mm"],
+        )
+        constraints["radial_spacing_mm"] = _parse_dimension_value(
+            prompt,
+            ("radial spacing", "ring spacing"),
+            constraints["radial_spacing_mm"],
+        )
+        shared_spacing = _parse_dimension_value(
+            prompt,
+            ("spacing",),
+            0.0,
+        )
+        if shared_spacing > 0:
+            constraints["radial_spacing_mm"] = shared_spacing
+            constraints["tangential_spacing_mm"] = shared_spacing
+        constraints["tangential_spacing_mm"] = _parse_dimension_value(
+            prompt,
+            ("tangential spacing", "arc spacing"),
+            constraints["tangential_spacing_mm"],
+        )
+        constraints["edge_margin_mm"] = _parse_dimension_value(
+            prompt,
+            ("edge margin", "margin"),
+            constraints["edge_margin_mm"],
+        )
+        constraints["ring_count"] = _parse_count(
+            prompt,
+            ("rings", "ring"),
+            constraints["ring_count"],
+        )
 
     _apply_relative_revisions(prompt, dimensions, constraints)
 
@@ -393,6 +528,8 @@ def build_useful_structured_spec(
         assumptions.append("No cable hole requested; preview uses a closed base lip.")
     if template_id in {"simple_box", "tray"} and constraints.get("wall_thickness_mm", 0) <= 0:
         assumptions.append("Wall thickness defaulted to 3 mm.")
+    if template_id == "perforated_disc":
+        assumptions.append("Hole counts per ring are derived automatically from tangential spacing.")
 
     keyword_hits = sum(1 for words in USEFUL_KEYWORDS.values() for word in words if word in lowered)
     confidence = min(0.98, 0.55 + (0.1 if re.search(r"\d", lowered) else 0) + keyword_hits * 0.05)
@@ -619,6 +756,49 @@ def _build_wall_mount_cadquery(spec: Dict[str, Any]):
     return plate.union(arm).union(lip)
 
 
+def _build_perforated_disc_cadquery(spec: Dict[str, Any]):
+    params = _perforated_disc_params(spec)
+    points, _, _ = _perforated_disc_layout(spec)
+    thickness = params["thickness"]
+    outer_radius = params["outer_diameter"] / 2.0
+
+    result = cq.Workplane("XY").circle(outer_radius).extrude(thickness)
+    hole_diameter = params["hole_diameter"]
+    if points:
+        result = result.faces(">Z").workplane().pushPoints(points).hole(hole_diameter, depth=thickness)
+    center_hole_diameter = params["center_hole_diameter"]
+    if center_hole_diameter > 0:
+        result = result.faces(">Z").workplane().hole(center_hole_diameter, depth=thickness)
+    return result
+
+
+def _build_perforated_disc(spec: Dict[str, Any]) -> trimesh.Trimesh:
+    params = _perforated_disc_params(spec)
+    points, _, _ = _perforated_disc_layout(spec)
+    thickness = params["thickness"]
+    outer_radius = params["outer_diameter"] / 2.0
+
+    mesh = trimesh.creation.cylinder(radius=outer_radius, height=thickness, sections=192)
+    center_hole_diameter = params["center_hole_diameter"]
+    if center_hole_diameter > 0:
+        center_cutter = trimesh.creation.cylinder(
+            radius=center_hole_diameter / 2.0,
+            height=thickness * 1.5,
+            sections=96,
+        )
+        mesh = _apply_subtract(mesh, center_cutter, [])
+
+    for x, y in points:
+        cutter = trimesh.creation.cylinder(
+            radius=params["hole_diameter"] / 2.0,
+            height=thickness * 1.5,
+            sections=48,
+        )
+        cutter.apply_translation((x, y, 0))
+        mesh = _apply_subtract(mesh, cutter, [])
+    return mesh
+
+
 def _build_phone_stand(spec: Dict[str, Any]) -> trimesh.Trimesh:
     dims = spec["dimensions_mm"]
     constraints = spec["constraints"]
@@ -681,6 +861,8 @@ def _build_simple_box(spec: Dict[str, Any], open_top_default: bool = True) -> tr
 
 def _cadquery_workplane_for_spec(spec: Dict[str, Any]):
     template_id = spec["template_id"]
+    if template_id == "perforated_disc":
+        return _build_perforated_disc_cadquery(spec)
     if template_id == "phone_stand":
         return _build_phone_stand_cadquery(spec)
     if template_id == "simple_box":
@@ -826,6 +1008,8 @@ def _build_wall_mount(spec: Dict[str, Any]) -> trimesh.Trimesh:
 
 def mesh_from_structured_spec(spec: Dict[str, Any]) -> trimesh.Trimesh:
     template_id = spec["template_id"]
+    if template_id == "perforated_disc":
+        return _build_perforated_disc(spec)
     if template_id == "phone_stand":
         return _build_phone_stand(spec)
     if template_id == "simple_box":

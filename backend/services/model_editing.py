@@ -925,7 +925,7 @@ def _build_single_feature_targets(projection: dict) -> list[dict]:
         )
     )
     seen_ids: set[str] = set()
-    for feature in single_candidates[:8]:
+    for feature in single_candidates:
         if feature["id"] in seen_ids:
             continue
         seen_ids.add(feature["id"])

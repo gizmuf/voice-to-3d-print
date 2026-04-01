@@ -1,5 +1,7 @@
 "use client";
 
+import type { MouseEvent as ReactMouseEvent } from "react";
+
 type Point2D = [number, number];
 
 type PatternTarget = {
@@ -36,6 +38,7 @@ type PatternTarget = {
     y_positions?: number[];
     ring_radii?: number[];
     holes_per_ring?: number[];
+    center_hole_feature_id?: string;
   };
   warnings?: string[];
 };
@@ -48,6 +51,7 @@ type SingleTarget = {
   confidence: number;
   editable: boolean;
   feature_kind: "circular_hole" | "slot" | "rectangular_cutout";
+  feature_id?: string;
   face_polygon_2d: Point2D[];
   feature_outline_2d: Point2D[];
   measured: {
@@ -66,6 +70,7 @@ type PlanarFaceEditorProps = {
   disabled?: boolean;
   onParamChange: (key: string, value: string) => void;
   onParamReset: (key: string) => void;
+  onSelectElement?: (selection: { kind: "pattern" } | { kind: "feature"; featureId: string } | { kind: "center_hole"; featureId?: string }) => void;
 };
 
 type DraftValidation = {
@@ -115,6 +120,16 @@ const polygonBounds = (polygon: Point2D[]) => {
     maxY: Math.max(...ys),
   };
 };
+
+const mergeBounds = (
+  left: ReturnType<typeof polygonBounds>,
+  right: ReturnType<typeof polygonBounds>
+) => ({
+  minX: Math.min(left.minX, right.minX),
+  maxX: Math.max(left.maxX, right.maxX),
+  minY: Math.min(left.minY, right.minY),
+  maxY: Math.max(left.maxY, right.maxY),
+});
 
 const circleOutline = (center: Point2D, radius: number, segments = 24): Point2D[] =>
   Array.from({ length: segments }, (_, index) => {
@@ -170,6 +185,17 @@ const buildRectangularDraft = (target: PatternTarget, params: Record<string, str
     }))
   );
 
+  const centerHoleDiameter = readNumber(
+    params.center_hole_diameter,
+    target.measured.center_hole_diameter ?? null
+  );
+  if (centerHoleDiameter > 0) {
+    shapes.push({
+      center: [centerX, centerY] as Point2D,
+      outline: circleOutline([centerX, centerY], centerHoleDiameter / 2),
+    });
+  }
+
   return { guides, shapes };
 };
 
@@ -204,6 +230,17 @@ const buildRadialDraft = (target: PatternTarget, params: Record<string, string>)
       };
     });
   });
+
+  const centerHoleDiameter = readNumber(
+    params.center_hole_diameter,
+    target.measured.center_hole_diameter ?? null
+  );
+  if (centerHoleDiameter > 0) {
+    shapes.push({
+      center: [centerX, centerY] as Point2D,
+      outline: circleOutline([centerX, centerY], centerHoleDiameter / 2),
+    });
+  }
 
   return { guides, shapes };
 };
@@ -277,6 +314,7 @@ export default function PlanarFaceEditor({
   disabled,
   onParamChange,
   onParamReset,
+  onSelectElement,
 }: PlanarFaceEditorProps) {
   const draft =
     target.type === "planar_pattern_face"
@@ -285,17 +323,100 @@ export default function PlanarFaceEditor({
         : buildRadialDraft(target, params)
       : buildSingleDraft(target, params);
   const validation = validateDraft(target, draft.shapes, params);
-  const bounds = polygonBounds(target.face_polygon_2d);
-  const width = Math.max(bounds.maxX - bounds.minX, 1);
-  const height = Math.max(bounds.maxY - bounds.minY, 1);
-  const viewBox = `${bounds.minX - width * 0.08} ${bounds.minY - height * 0.08} ${width * 1.16} ${height * 1.16}`;
+  const faceBounds = polygonBounds(target.face_polygon_2d);
   const originalShapes =
     target.type === "planar_pattern_face"
-      ? target.feature_geometry_2d.map((feature) => ({ center: feature.center, outline: feature.outline || [] }))
+      ? [
+          ...target.feature_geometry_2d.map((feature) => ({ center: feature.center, outline: feature.outline || [] })),
+          ...(target.measured.center_hole_diameter && target.fit?.center_x != null && target.fit?.center_y != null
+            ? [
+                {
+                  center: [target.fit.center_x, target.fit.center_y] as Point2D,
+                  outline: circleOutline(
+                    [target.fit.center_x, target.fit.center_y],
+                    target.measured.center_hole_diameter / 2
+                  ),
+                },
+              ]
+            : []),
+        ]
       : [{ center: deriveSingleCenter(target.feature_outline_2d), outline: target.feature_outline_2d }];
+
+  const contentBounds = [...originalShapes, ...draft.shapes]
+    .filter((shape) => shape.outline.length >= 3)
+    .map((shape) => polygonBounds(shape.outline))
+    .reduce<ReturnType<typeof polygonBounds> | null>(
+      (current, next) => (current ? mergeBounds(current, next) : next),
+      null
+    );
+
+  const bounds =
+    target.type === "single_planar_feature" && contentBounds
+      ? contentBounds
+      : faceBounds;
+  const width = Math.max(bounds.maxX - bounds.minX, 1);
+  const height = Math.max(bounds.maxY - bounds.minY, 1);
+  const paddingScale = target.type === "single_planar_feature" ? 1.8 : 0.08;
+  const viewBox = `${bounds.minX - width * paddingScale} ${bounds.minY - height * paddingScale} ${width * (1 + paddingScale * 2)} ${height * (1 + paddingScale * 2)}`;
 
   const statusClass =
     validation.status === "invalid" ? "manufacturability-bad" : validation.status === "risk" ? "manufacturability-risk" : "manufacturability-safe";
+
+  const handleCanvasClick = (event: ReactMouseEvent<SVGSVGElement>) => {
+    if (!onSelectElement) return;
+    if (target.type === "single_planar_feature") {
+      if (target.feature_id) {
+        onSelectElement({ kind: "feature", featureId: target.feature_id });
+      }
+      return;
+    }
+
+    const svg = event.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const viewMinX = bounds.minX - width * 0.08;
+    const viewMinY = bounds.minY - height * 0.08;
+    const viewWidth = width * 1.16;
+    const viewHeight = height * 1.16;
+    const localX = ((event.clientX - rect.left) / rect.width) * viewWidth + viewMinX;
+    const localY = ((event.clientY - rect.top) / rect.height) * viewHeight + viewMinY;
+
+    const centerX = target.fit?.center_x ?? (bounds.minX + bounds.maxX) / 2;
+    const centerY = target.fit?.center_y ?? (bounds.minY + bounds.maxY) / 2;
+    const centerHoleDiameter = readNumber(
+      params.center_hole_diameter,
+      target.measured.center_hole_diameter ?? null
+    );
+    if (centerHoleDiameter > 0) {
+      const centerDistance = Math.hypot(localX - centerX, localY - centerY);
+      if (centerDistance <= centerHoleDiameter / 2) {
+        onSelectElement({ kind: "center_hole", featureId: target.fit?.center_hole_feature_id });
+        return;
+      }
+    }
+
+    const measuredFeatureSize =
+      typeof target.measured.feature_size === "number"
+        ? target.measured.feature_size
+        : Math.max(target.measured.feature_size.width, target.measured.feature_size.height);
+    const selectableRadius = Math.max(measuredFeatureSize * 0.75, 5);
+
+    let nearestFeature: { id: string; distance: number } | null = null;
+    for (const feature of target.feature_geometry_2d) {
+      const distance = Math.hypot(localX - feature.center[0], localY - feature.center[1]);
+      if (!nearestFeature || distance < nearestFeature.distance) {
+        nearestFeature = { id: feature.id, distance };
+      }
+    }
+
+    if (nearestFeature && nearestFeature.distance <= selectableRadius) {
+      onSelectElement({ kind: "feature", featureId: nearestFeature.id });
+      return;
+    }
+
+    onSelectElement({ kind: "pattern" });
+  };
 
   return (
     <div className="planar-editor">
@@ -311,7 +432,13 @@ export default function PlanarFaceEditor({
       </div>
 
       <div className="face-editor-stage">
-        <svg className="face-editor-canvas" viewBox={viewBox} role="img" aria-label={`${target.label} 2D editor`}>
+        <svg
+          className="face-editor-canvas"
+          viewBox={viewBox}
+          role="img"
+          aria-label={`${target.label} 2D editor`}
+          onClick={handleCanvasClick}
+        >
           <path d={toPath(target.face_polygon_2d)} className="face-boundary" />
 
           {draft.guides.map((guide, index) =>
@@ -344,6 +471,9 @@ export default function PlanarFaceEditor({
           <span><i className="legend-swatch ghost" /> Previous</span>
           <span><i className={`legend-swatch ${statusClass}`} /> Current draft</span>
         </div>
+        {target.type === "planar_pattern_face" ? (
+          <div className="muted">Click the center hole or any repeated feature in the 2D view to select it.</div>
+        ) : null}
       </div>
 
       <div className="warning-list">

@@ -129,6 +129,10 @@ body {
   width: 100%;
 }
 
+.workspace-grid-design {
+  grid-template-columns: minmax(640px, 1.45fr) minmax(360px, 0.9fr);
+}
+
 .hero-compact {
   padding-top: 12px;
 }
@@ -171,6 +175,14 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.flagship-body {
+  gap: 14px;
+}
+
+.flagship-secondary-tools {
+  opacity: 0.82;
 }
 
 .field-row {
@@ -415,6 +427,12 @@ code {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
+}
+
+.flagship-spec-panel {
+  order: -1;
+  padding: 20px;
+  box-shadow: 0 12px 28px rgba(20, 16, 13, 0.08);
 }
 
 .compact-field {
@@ -894,6 +912,17 @@ code {
   gap: 16px;
 }
 
+.perforated-disc-designer {
+  display: grid;
+  gap: 16px;
+}
+
+.designer-part-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .planar-editor-header {
   display: flex;
   align-items: flex-start;
@@ -939,6 +968,30 @@ code {
   min-height: 340px;
   background: linear-gradient(180deg, #fffdf9, #fbf4e7);
   border-radius: 14px;
+  cursor: crosshair;
+}
+
+.perforated-canvas {
+  min-height: 500px;
+}
+
+.disc-boundary {
+  fill: rgba(43, 140, 122, 0.08);
+  stroke: rgba(43, 140, 122, 0.45);
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+
+.center-hole-shape {
+  fill: rgba(245, 159, 58, 0.12);
+  stroke: #c47a12;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.selected-part {
+  filter: drop-shadow(0 0 10px rgba(245, 159, 58, 0.22));
+  stroke-width: 2;
 }
 
 .face-boundary {

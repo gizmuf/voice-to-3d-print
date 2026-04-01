@@ -184,6 +184,7 @@ type ExistingModelTarget = {
     y_positions?: number[];
     ring_radii?: number[];
     holes_per_ring?: number[];
+    center_hole_feature_id?: string;
   };
 };
 
@@ -303,6 +304,29 @@ const humanStatus = (status: string) => {
 
 const dot = (left: number[], right: number[]) => {
   return left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
+};
+
+const thinAxisAlignedNormal = (
+  normal: [number, number, number],
+  extents?: number[]
+): ViewerCameraNormal => {
+  if (!extents || extents.length < 3) {
+    return { x: normal[0], y: normal[1], z: normal[2] };
+  }
+
+  let minIndex = 0;
+  for (let index = 1; index < 3; index += 1) {
+    if ((extents[index] ?? Number.POSITIVE_INFINITY) < (extents[minIndex] ?? Number.POSITIVE_INFINITY)) {
+      minIndex = index;
+    }
+  }
+
+  const dominantSign = (normal[minIndex] ?? 0) >= 0 ? 1 : -1;
+  return {
+    x: minIndex === 0 ? dominantSign : 0,
+    y: minIndex === 1 ? dominantSign : 0,
+    z: minIndex === 2 ? dominantSign : 0,
+  };
 };
 
 const projectPointToCluster = (point: SelectionPayload["point"], cluster: PlanarFaceCluster) => {
@@ -632,6 +656,44 @@ export default function ExistingModelPanel({
     () => supportedTargets.find((target) => target.id === selectedTargetId) || null,
     [selectedTargetId, supportedTargets]
   );
+
+  const displayTargets = useMemo(() => {
+    const patternTargets = supportedTargets.filter((target) => target.type === "planar_pattern_face");
+    const singleTargets = supportedTargets
+      .filter((target) => target.type === "single_planar_feature")
+      .slice(0, 8);
+    const combined = [...patternTargets, ...singleTargets];
+    if (activeTarget && !combined.some((target) => target.id === activeTarget.id)) {
+      combined.unshift(activeTarget);
+    }
+    return combined;
+  }, [activeTarget, supportedTargets]);
+
+  const centerHoleTarget = useMemo(() => {
+    if (activeTarget?.type !== "planar_pattern_face") return null;
+    const centerHoleFeatureId = activeTarget.fit?.center_hole_feature_id;
+    if (!centerHoleFeatureId) return null;
+    return (
+      supportedTargets.find(
+        (target) =>
+          target.type === "single_planar_feature" &&
+          target.feature_id === centerHoleFeatureId &&
+          target.editable
+      ) || null
+    );
+  }, [activeTarget, supportedTargets]);
+
+  const parentPatternTarget = useMemo(() => {
+    if (activeTarget?.type !== "single_planar_feature" || !activeTarget.feature_id) return null;
+    return (
+      supportedTargets.find(
+        (target) =>
+          target.type === "planar_pattern_face" &&
+          (target.feature_ids?.includes(activeTarget.feature_id || "") ||
+            target.fit?.center_hole_feature_id === activeTarget.feature_id)
+      ) || null
+    );
+  }, [activeTarget, supportedTargets]);
 
   const activeFeatureGroup = useMemo(() => {
     if (!selectedFeature) return null;
@@ -968,9 +1030,10 @@ export default function ExistingModelPanel({
       onViewNormalChange?.(null);
       return;
     }
-    const [x, y, z] = activeTarget.face_frame.normal;
-    onViewNormalChange?.({ x, y, z });
-  }, [activeTarget?.face_frame?.normal, onViewNormalChange]);
+    onViewNormalChange?.(
+      thinAxisAlignedNormal(activeTarget.face_frame.normal, analysis?.extents_mm)
+    );
+  }, [activeTarget?.face_frame?.normal, analysis?.extents_mm, onViewNormalChange]);
 
   useEffect(() => {
     if (activeTarget?.type === "planar_pattern_face" && activeTarget.feature_ids?.length && analysis?.features?.length) {
@@ -1440,9 +1503,9 @@ export default function ExistingModelPanel({
         {analysis ? (
           <div className="project-summary">
             <div className="status-label">Detected targets</div>
-            {supportedTargets.length ? (
+            {displayTargets.length ? (
               <div className="target-group-list">
-                {supportedTargets.map((target) => (
+                {displayTargets.map((target) => (
                   <button
                     key={target.id}
                     type="button"
@@ -1478,7 +1541,7 @@ export default function ExistingModelPanel({
                 ))}
               </div>
             )}
-            {!supportedTargets.length ? (
+            {!displayTargets.length ? (
               <div className="unsupported-guide">
                 <span>Try Design Workspace instead for a fresh parametric version.</span>
                 <span>Simplify the geometry or isolate a flatter region.</span>
@@ -1505,6 +1568,32 @@ export default function ExistingModelPanel({
               <span className="chip">3D selects</span>
               <span className="chip">2D edits</span>
               {!activeTarget.editable ? <span className="warning-chip">Not editable</span> : null}
+              {centerHoleTarget ? (
+                <button
+                  type="button"
+                  className="mode-chip"
+                  onClick={() => {
+                    setSelectedTargetId(centerHoleTarget.id);
+                    setEditorState("target_selected");
+                  }}
+                  disabled={isProcessing}
+                >
+                  Edit center hole directly
+                </button>
+              ) : null}
+              {parentPatternTarget ? (
+                <button
+                  type="button"
+                  className="mode-chip"
+                  onClick={() => {
+                    setSelectedTargetId(parentPatternTarget.id);
+                    setEditorState("target_selected");
+                  }}
+                  disabled={isProcessing}
+                >
+                  Back to full pattern
+                </button>
+              ) : null}
             </div>
             {activeTarget.warnings?.length ? (
               <div className="warning-list">
@@ -1547,6 +1636,42 @@ export default function ExistingModelPanel({
               onParamChange={updateTargetParam}
               onParamReset={resetTargetParam}
               disabled={isProcessing || !activeTarget.editable}
+              onSelectElement={(selection) => {
+                if (!analysis?.targets?.length) return;
+                if (selection.kind === "pattern") {
+                  setSelectedTargetId(activeTarget.id);
+                  setViewerSelectionMessage("Picked the repeated pattern from the 2D editor.");
+                  setEditorState("target_selected");
+                  return;
+                }
+                if (selection.kind === "center_hole" && selection.featureId) {
+                  const centerTarget = analysis.targets.find(
+                    (target) =>
+                      target.type === "single_planar_feature" &&
+                      target.feature_id === selection.featureId &&
+                      target.editable
+                  );
+                  if (centerTarget) {
+                    setSelectedTargetId(centerTarget.id);
+                    setViewerSelectionMessage("Picked the center hole from the 2D editor.");
+                    setEditorState("target_selected");
+                  }
+                  return;
+                }
+                if (selection.kind === "feature") {
+                  const featureTarget = analysis.targets.find(
+                    (target) =>
+                      target.type === "single_planar_feature" &&
+                      target.feature_id === selection.featureId &&
+                      target.editable
+                  );
+                  if (featureTarget) {
+                    setSelectedTargetId(featureTarget.id);
+                    setViewerSelectionMessage("Picked a single feature from the 2D editor.");
+                    setEditorState("target_selected");
+                  }
+                }
+              }}
             />
 
             <div className="text-input-actions">

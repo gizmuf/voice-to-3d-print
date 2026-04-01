@@ -2,6 +2,7 @@
 
 import type { ChangeEvent, FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import PerforatedDiscDesigner from "./PerforatedDiscDesigner";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
 import { stableStringify } from "../lib/stable-json";
 
@@ -131,6 +132,7 @@ const TIMEOUTS = {
 };
 
 const usefulPromptExamples = [
+  "Perforated disc 340 mm diameter, 15 mm thick, 7 mm holes, 33 mm center hole",
   "Phone stand 12 cm tall, 65 degree angle, cable hole",
   "Desk tray 160x90x22 mm with rounded corners",
   "Wall hook 80 mm tall, thick enough for a bag",
@@ -144,6 +146,7 @@ const creativePromptExamples = [
 ];
 
 const DIMENSION_ORDER: Record<string, string[]> = {
+  perforated_disc: ["outer_diameter", "thickness"],
   phone_stand: ["height", "width", "depth"],
   simple_box: ["width", "depth", "height"],
   tray: ["width", "depth", "height"],
@@ -155,6 +158,14 @@ const DIMENSION_ORDER: Record<string, string[]> = {
 };
 
 const CONSTRAINT_ORDER: Record<string, string[]> = {
+  perforated_disc: [
+    "hole_diameter_mm",
+    "center_hole_diameter_mm",
+    "ring_count",
+    "radial_spacing_mm",
+    "tangential_spacing_mm",
+    "edge_margin_mm",
+  ],
   phone_stand: [
     "angle_deg",
     "base_thickness_mm",
@@ -172,6 +183,31 @@ const CONSTRAINT_ORDER: Record<string, string[]> = {
   cylindrical_holder: ["wall_thickness_mm", "base_thickness_mm"],
   wall_mount: ["plate_thickness_mm", "arm_thickness_mm", "arm_drop_mm"],
 };
+
+const createPerforatedDiscSpec = (): StructuredSpec => ({
+  mode: "useful",
+  template_id: "perforated_disc",
+  object_label: "Perforated disc",
+  dimensions_mm: {
+    outer_diameter: 340,
+    thickness: 15,
+  },
+  constraints: {
+    hole_diameter_mm: 7.08,
+    center_hole_diameter_mm: 32.93,
+    ring_count: 12,
+    radial_spacing_mm: 9.387,
+    tangential_spacing_mm: 7,
+    edge_margin_mm: 12.421,
+  },
+  assumptions: ["Hole counts per ring are derived automatically from tangential spacing."],
+  confidence: 0.98,
+  source_inputs: {
+    text: "Perforated disc designer",
+    source: "designer",
+  },
+  revision_notes: [],
+});
 
 const sortKeys = (keys: string[], preferred: string[] | undefined) => {
   const preferredOrder = preferred || [];
@@ -968,6 +1004,7 @@ export default function VoicePanel({
   };
 
   const promptExamples = mode === "useful" ? usefulPromptExamples : creativePromptExamples;
+  const isFlagshipDesigner = mode === "useful" && structuredSpec?.template_id === "perforated_disc";
   const orderedDimensionEntries = useMemo(() => {
     if (!structuredSpec) return [];
     const keys = sortKeys(
@@ -995,7 +1032,7 @@ export default function VoicePanel({
         </p>
       </div>
 
-      <div className="panel-body">
+      <div className={`panel-body ${isFlagshipDesigner ? "flagship-body" : ""}`}>
         {!hideModeSwitch ? (
           <div className="mode-switch" role="tablist" aria-label="Object type">
             <button
@@ -1033,7 +1070,41 @@ export default function VoicePanel({
           ) : null}
         </div>
 
-        <div className="voice-surface">
+        {mode === "useful" && !structuredSpec ? (
+          <div className="project-summary">
+            <div className="status-label">Flagship designer</div>
+            <div className="muted">
+              Start directly with a CAD-like perforated disc workspace instead of typing a prompt first.
+            </div>
+            <div className="text-input-actions">
+              <button
+                type="button"
+                className="text-submit"
+                onClick={() => {
+                  const nextSpec = createPerforatedDiscSpec();
+                  setManualText("Perforated disc designer");
+                  setRouteResult({
+                    job_id: createJobId(),
+                    mode: "useful",
+                    provider: "useful-cad",
+                    route_reason: "Opened the flagship perforated disc designer directly.",
+                    confidence: 0.98,
+                    prompt: nextSpec.source_inputs.text,
+                    confirmation_required: true,
+                    structured_spec: nextSpec,
+                  });
+                  setStructuredSpec(nextSpec);
+                  setStatus("confirming");
+                }}
+                disabled={isBusy}
+              >
+                Open perforated disc designer
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+          <div className={`voice-surface ${isFlagshipDesigner ? "flagship-secondary-tools" : ""}`}>
           <div>
             <div className="voice-title">Push to talk</div>
             <div className="muted">Voice is the fastest path into Design Workspace.</div>
@@ -1052,7 +1123,7 @@ export default function VoicePanel({
 
         {interim ? <div className="interim-card">"{interim}"</div> : null}
 
-        <div className="field-row">
+        <div className={`field-row ${isFlagshipDesigner ? "flagship-secondary-tools" : ""}`}>
           <label htmlFor="project">Project</label>
           <select
             id="project"
@@ -1087,7 +1158,7 @@ export default function VoicePanel({
         </div>
 
         <form
-          className="field-row"
+          className={`field-row ${isFlagshipDesigner ? "flagship-secondary-tools" : ""}`}
           onSubmit={(event: FormEvent<HTMLFormElement>) => {
             event.preventDefault();
             void handleIdeaSubmit();
@@ -1129,7 +1200,7 @@ export default function VoicePanel({
           </div>
         </form>
 
-        <div className="field-row">
+        <div className={`field-row ${isFlagshipDesigner ? "flagship-secondary-tools" : ""}`}>
           <label htmlFor="image-upload">Reference image</label>
           <input
             id="image-upload"
@@ -1167,7 +1238,7 @@ export default function VoicePanel({
           </div>
         </div>
 
-        <details className="advanced-panel" open={showAdvanced}>
+        <details className={`advanced-panel ${isFlagshipDesigner ? "flagship-secondary-tools" : ""}`} open={showAdvanced}>
           <summary onClick={() => setShowAdvanced((prev) => !prev)}>
             Advanced options
           </summary>
@@ -1203,7 +1274,7 @@ export default function VoicePanel({
         </details>
 
         {structuredSpec ? (
-          <div className="spec-panel">
+          <div className={`spec-panel ${isFlagshipDesigner ? "flagship-spec-panel" : ""}`}>
             <div className="panel-header">
               <p className="eyebrow">Confirm Intent</p>
               <h2>{structuredSpec.object_label}</h2>
@@ -1218,41 +1289,50 @@ export default function VoicePanel({
               happens when you export the printable STL.
             </div>
 
-            <div className="spec-grid">
-              {orderedDimensionEntries.map(([key, value]) => (
-                <label key={key} className="field-row compact-field">
-                  <span>{key.replace(/_/g, " ")}</span>
-                  <input
-                    type="number"
-                    value={value}
-                    onChange={(event) => updateDimension(key, event.target.value)}
-                    disabled={isBusy}
-                  />
-                </label>
-              ))}
-              {orderedConstraintEntries.map(([key, value]) => (
-                <label key={key} className="field-row compact-field">
-                  <span>{key.replace(/_/g, " ")}</span>
-                  {typeof value === "boolean" ? (
-                    <select
-                      value={value ? "true" : "false"}
-                      onChange={(event) => updateConstraint(key, event.target.value)}
-                      disabled={isBusy}
-                    >
-                      <option value="true">True</option>
-                      <option value="false">False</option>
-                    </select>
-                  ) : (
+            {structuredSpec.template_id === "perforated_disc" ? (
+              <PerforatedDiscDesigner
+                spec={structuredSpec}
+                disabled={isBusy}
+                onDimensionChange={updateDimension}
+                onConstraintChange={updateConstraint}
+              />
+            ) : (
+              <div className="spec-grid">
+                {orderedDimensionEntries.map(([key, value]) => (
+                  <label key={key} className="field-row compact-field">
+                    <span>{key.replace(/_/g, " ")}</span>
                     <input
                       type="number"
-                      value={String(value)}
-                      onChange={(event) => updateConstraint(key, event.target.value)}
+                      value={value}
+                      onChange={(event) => updateDimension(key, event.target.value)}
                       disabled={isBusy}
                     />
-                  )}
-                </label>
-              ))}
-            </div>
+                  </label>
+                ))}
+                {orderedConstraintEntries.map(([key, value]) => (
+                  <label key={key} className="field-row compact-field">
+                    <span>{key.replace(/_/g, " ")}</span>
+                    {typeof value === "boolean" ? (
+                      <select
+                        value={value ? "true" : "false"}
+                        onChange={(event) => updateConstraint(key, event.target.value)}
+                        disabled={isBusy}
+                      >
+                        <option value="true">True</option>
+                        <option value="false">False</option>
+                      </select>
+                    ) : (
+                      <input
+                        type="number"
+                        value={String(value)}
+                        onChange={(event) => updateConstraint(key, event.target.value)}
+                        disabled={isBusy}
+                      />
+                    )}
+                  </label>
+                ))}
+              </div>
+            )}
 
             <div className="project-summary">
               <div className="status-label">Assumptions</div>
