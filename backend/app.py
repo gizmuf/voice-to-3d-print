@@ -35,12 +35,23 @@ from services.model_editing import (
     preview_edit,
     public_analysis_payload,
 )
+from services.editable_model import EditableModel, WorkspaceCreateRequest, WorkspaceMutation
+from services.editable_rebuild import export_editable_build, export_editable_preview
+from services.native_converter import structured_spec_to_editable
+from services.step_import import import_step_reference
+from services.stl_reconstruction import reconstruct_from_analysis
 from services.useful_objects import (
-    build_useful_object,
     build_useful_structured_spec,
     cadquery_available,
-    preview_useful_object,
     route_mode,
+)
+from services.workspace import (
+    create_workspace,
+    ensure_current_revision,
+    get_workspace,
+    record_build,
+    record_preview,
+    update_workspace,
 )
 from slicer_service import ProcessResult, _slice_mesh, process_model, validate_mesh_file
 
@@ -67,6 +78,12 @@ def _artifact_url(upload: dict | None, path: Path, job_id: str) -> str:
     if upload and upload.get("url"):
         return upload["url"]
     return f"/artifacts/{job_id}/{path.name}"
+
+
+def _workspace_artifact_url(upload: dict | None, workspace_id: str, path: Path) -> str:
+    if upload and upload.get("url"):
+        return upload["url"]
+    return f"/artifacts/workspaces/{workspace_id}/{path.name}"
 
 
 def _write_metadata(job_id: str, metadata: dict) -> None:
@@ -191,12 +208,53 @@ class UsefulBuildResponse(BaseModel):
     structured_spec: dict
 
 
+class WorkspaceResponse(BaseModel):
+    workspace_id: str
+    editable_model: dict
+    latest_preview: dict | None = None
+    latest_build: dict | None = None
+
+
+class WorkspacePreviewRequest(BaseModel):
+    expected_revision_id: str
+
+
+class WorkspacePreviewResponse(BaseModel):
+    workspace_id: str
+    revision_id: str
+    glb_url: str
+    validation: dict
+
+
+class WorkspaceBuildRequest(BaseModel):
+    expected_revision_id: str
+
+
+class WorkspaceBuildResponse(BaseModel):
+    workspace_id: str
+    revision_id: str
+    glb_url: str
+    stl_url: str
+    gcode_url: str | None = None
+    bundle_url: str | None = None
+    validation: dict
+
+
 class ImportModelResponse(BaseModel):
     job_id: str
     model_id: str
     source_stl_url: str
     source_glb_url: str
     analysis: dict
+    reconstruction_mode: str | None = None
+    editable_model: dict | None = None
+
+
+class ImportStepResponse(BaseModel):
+    workspace_id: str
+    editable_model: dict
+    glb_url: str
+    import_mode: str
 
 
 class AnalyzeModelRequest(BaseModel):
@@ -384,6 +442,123 @@ async def route_intent_endpoint(request: RouteIntentRequest) -> RouteIntentRespo
     )
 
 
+@app.post("/workspace/create", response_model=WorkspaceResponse)
+def create_workspace_endpoint(request: WorkspaceCreateRequest) -> WorkspaceResponse:
+    if request.editable_model is not None:
+        editable_model = request.editable_model
+    elif request.structured_spec is not None:
+        editable_model = structured_spec_to_editable(request.structured_spec)
+    elif request.prompt:
+        structured_spec = build_useful_structured_spec(request.prompt, source="text")
+        editable_model = structured_spec_to_editable(structured_spec)
+    else:
+        raise HTTPException(status_code=400, detail="Workspace create requires editable_model, structured_spec, or prompt.")
+
+    record = create_workspace(request.source, editable_model, project_id=request.project_id)
+    return WorkspaceResponse(
+        workspace_id=record.workspace_id,
+        editable_model=record.editable_model.model_dump(mode="json"),
+        latest_preview=record.latest_preview.model_dump(mode="json") if record.latest_preview else None,
+        latest_build=record.latest_build.model_dump(mode="json") if record.latest_build else None,
+    )
+
+
+@app.get("/workspace/{workspace_id}", response_model=WorkspaceResponse)
+def get_workspace_endpoint(workspace_id: str) -> WorkspaceResponse:
+    record = get_workspace(workspace_id)
+    return WorkspaceResponse(
+        workspace_id=record.workspace_id,
+        editable_model=record.editable_model.model_dump(mode="json"),
+        latest_preview=record.latest_preview.model_dump(mode="json") if record.latest_preview else None,
+        latest_build=record.latest_build.model_dump(mode="json") if record.latest_build else None,
+    )
+
+
+@app.post("/workspace/{workspace_id}/mutate", response_model=WorkspaceResponse)
+def mutate_workspace_endpoint(workspace_id: str, request: WorkspaceMutation) -> WorkspaceResponse:
+    record = update_workspace(workspace_id, request)
+    return WorkspaceResponse(
+        workspace_id=record.workspace_id,
+        editable_model=record.editable_model.model_dump(mode="json"),
+        latest_preview=record.latest_preview.model_dump(mode="json") if record.latest_preview else None,
+        latest_build=record.latest_build.model_dump(mode="json") if record.latest_build else None,
+    )
+
+
+@app.post("/workspace/{workspace_id}/preview", response_model=WorkspacePreviewResponse)
+def preview_workspace_endpoint(workspace_id: str, request: WorkspacePreviewRequest) -> WorkspacePreviewResponse:
+    record = ensure_current_revision(workspace_id, request.expected_revision_id)
+    workspace_dir = settings.output_dir / "workspaces" / workspace_id
+    try:
+        glb_path, stl_path, validation = export_editable_preview(record.editable_model, workspace_dir)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    glb_upload = upload_artifact(workspace_id, glb_path)
+    stl_upload = upload_artifact(workspace_id, stl_path)
+    glb_url = _workspace_artifact_url(glb_upload, workspace_id, glb_path)
+    stl_url = _workspace_artifact_url(stl_upload, workspace_id, stl_path)
+    record_preview(
+        workspace_id,
+        revision_id=record.editable_model.revision_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        validation=validation,
+    )
+    return WorkspacePreviewResponse(
+        workspace_id=workspace_id,
+        revision_id=record.editable_model.revision_id,
+        glb_url=glb_url,
+        validation=validation,
+    )
+
+
+@app.post("/workspace/{workspace_id}/build", response_model=WorkspaceBuildResponse)
+def build_workspace_endpoint(workspace_id: str, request: WorkspaceBuildRequest) -> WorkspaceBuildResponse:
+    record = ensure_current_revision(workspace_id, request.expected_revision_id)
+    workspace_dir = settings.output_dir / "workspaces" / workspace_id
+    try:
+        glb_path, stl_path, validation = export_editable_build(record.editable_model, workspace_dir)
+        gcode_generated = _slice_mesh(stl_path, workspace_dir / "output.gcode")
+        validation["gcode_status"] = "generated" if gcode_generated else "not_generated"
+        gcode_path = workspace_dir / "output.gcode" if gcode_generated else None
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    glb_upload = upload_artifact(workspace_id, glb_path)
+    stl_upload = upload_artifact(workspace_id, stl_path)
+    gcode_upload = upload_artifact(workspace_id, gcode_path) if gcode_path else None
+    glb_url = _workspace_artifact_url(glb_upload, workspace_id, glb_path)
+    stl_url = _workspace_artifact_url(stl_upload, workspace_id, stl_path)
+    gcode_url = _workspace_artifact_url(gcode_upload, workspace_id, gcode_path) if gcode_path else None
+
+    bundle_path = workspace_dir / "bundle.zip"
+    with ZipFile(bundle_path, "w", compression=ZIP_DEFLATED) as archive:
+        for path in (glb_path, stl_path, gcode_path):
+            if path and path.exists():
+                archive.write(path, arcname=path.name)
+    bundle_url = f"/artifacts/workspaces/{workspace_id}/{bundle_path.name}" if bundle_path.exists() else None
+
+    record_build(
+        workspace_id,
+        revision_id=record.editable_model.revision_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        gcode_url=gcode_url,
+        bundle_url=bundle_url,
+        validation=validation,
+    )
+    return WorkspaceBuildResponse(
+        workspace_id=workspace_id,
+        revision_id=record.editable_model.revision_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        gcode_url=gcode_url,
+        bundle_url=bundle_url,
+        validation=validation,
+    )
+
+
 @app.post("/preview-useful", response_model=UsefulPreviewResponse)
 def preview_useful_endpoint(request: UsefulPreviewRequest) -> UsefulPreviewResponse:
     job_id = request.job_id or uuid.uuid4().hex
@@ -404,19 +579,33 @@ def preview_useful_endpoint(request: UsefulPreviewRequest) -> UsefulPreviewRespo
     )
 
     try:
-        preview = preview_useful_object(request.structured_spec, job_id=job_id)
+        editable_model = structured_spec_to_editable(request.structured_spec)
+        workspace = create_workspace("native", editable_model, project_id=request.project_id, workspace_id=job_id)
+        preview_glb_path, preview_stl_path, validation = export_editable_preview(
+            workspace.editable_model,
+            settings.output_dir / "workspaces" / workspace.workspace_id,
+        )
     except Exception as exc:
         record_error(job_id, "preview-useful", str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    glb_upload = upload_artifact(job_id, preview.glb_path)
-    glb_url = _artifact_url(glb_upload, preview.glb_path, job_id)
+    glb_upload = upload_artifact(job_id, preview_glb_path)
+    stl_upload = upload_artifact(job_id, preview_stl_path)
+    glb_url = _workspace_artifact_url(glb_upload, workspace.workspace_id, preview_glb_path)
+    stl_url = _workspace_artifact_url(stl_upload, workspace.workspace_id, preview_stl_path)
+    record_preview(
+        workspace.workspace_id,
+        revision_id=workspace.editable_model.revision_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        validation=validation,
+    )
     update_job(
         job_id,
         {
             "status": "preview_ready",
             "preview_artifacts.glb_url": glb_url,
-            "preview_artifacts.glb_size": glb_upload["size"] if glb_upload else preview.glb_path.stat().st_size,
+            "preview_artifacts.glb_size": glb_upload["size"] if glb_upload else preview_glb_path.stat().st_size,
         },
     )
 
@@ -434,7 +623,7 @@ def preview_useful_endpoint(request: UsefulPreviewRequest) -> UsefulPreviewRespo
 
     return UsefulPreviewResponse(
         job_id=job_id,
-        preview_id=job_id,
+        preview_id=workspace.workspace_id,
         glb_url=glb_url,
         structured_spec=request.structured_spec,
     )
@@ -461,21 +650,25 @@ def build_useful_endpoint(request: UsefulBuildRequest) -> UsefulBuildResponse:
     )
 
     try:
-        build = build_useful_object(request.structured_spec, job_id=job_id)
-        validation = validate_mesh_file(build.stl_path)
-        gcode_generated = _slice_mesh(build.stl_path, build.stl_path.parent / "output.gcode")
+        editable_model = structured_spec_to_editable(request.structured_spec)
+        workspace = create_workspace("native", editable_model, project_id=request.project_id, workspace_id=job_id)
+        build_glb_path, build_stl_path, validation = export_editable_build(
+            workspace.editable_model,
+            settings.output_dir / "workspaces" / workspace.workspace_id,
+        )
+        gcode_generated = _slice_mesh(build_stl_path, build_stl_path.parent / "output.gcode")
         validation["gcode_status"] = "generated" if gcode_generated else "not_generated"
-        gcode_path = build.stl_path.parent / "output.gcode" if gcode_generated else None
+        gcode_path = build_stl_path.parent / "output.gcode" if gcode_generated else None
     except Exception as exc:
         record_error(job_id, "build-useful", str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    glb_upload = upload_artifact(job_id, build.glb_path)
-    stl_upload = upload_artifact(job_id, build.stl_path)
+    glb_upload = upload_artifact(job_id, build_glb_path)
+    stl_upload = upload_artifact(job_id, build_stl_path)
     gcode_upload = upload_artifact(job_id, gcode_path) if gcode_path else None
-    glb_url = _artifact_url(glb_upload, build.glb_path, job_id)
-    stl_url = _artifact_url(stl_upload, build.stl_path, job_id)
-    gcode_url = _artifact_url(gcode_upload, gcode_path, job_id) if gcode_path else None
+    glb_url = _workspace_artifact_url(glb_upload, workspace.workspace_id, build_glb_path)
+    stl_url = _workspace_artifact_url(stl_upload, workspace.workspace_id, build_stl_path)
+    gcode_url = _workspace_artifact_url(gcode_upload, workspace.workspace_id, gcode_path) if gcode_path else None
 
     _write_metadata(
         job_id,
@@ -495,6 +688,22 @@ def build_useful_endpoint(request: UsefulBuildRequest) -> UsefulBuildResponse:
         },
     )
 
+    bundle_path = settings.output_dir / "workspaces" / workspace.workspace_id / "bundle.zip"
+    with ZipFile(bundle_path, "w", compression=ZIP_DEFLATED) as archive:
+        for path in (build_glb_path, build_stl_path, gcode_path):
+            if path and path.exists():
+                archive.write(path, arcname=path.name)
+    bundle_url = f"/artifacts/workspaces/{workspace.workspace_id}/{bundle_path.name}" if bundle_path.exists() else None
+    record_build(
+        workspace.workspace_id,
+        revision_id=workspace.editable_model.revision_id,
+        glb_url=glb_url,
+        stl_url=stl_url,
+        gcode_url=gcode_url,
+        bundle_url=bundle_url,
+        validation=validation,
+    )
+
     update_job(
         job_id,
         {
@@ -503,16 +712,14 @@ def build_useful_endpoint(request: UsefulBuildRequest) -> UsefulBuildResponse:
             "artifacts.stl_url": stl_url,
             "artifacts.gcode_url": gcode_url,
             "validation": validation,
-            "preview_artifacts.glb_url": f"/artifacts/{job_id}/preview.glb"
-            if (build.glb_path.parent / "preview.glb").exists()
+            "preview_artifacts.glb_url": f"/artifacts/workspaces/{workspace.workspace_id}/preview.glb"
+            if (build_glb_path.parent / "preview.glb").exists()
             else None,
         },
     )
     if request.project_id:
         update_project(request.project_id, {"current_job_id": job_id})
 
-    bundle_response = bundle(job_id)
-    bundle_url = bundle_response.get("url")
     return UsefulBuildResponse(
         job_id=job_id,
         glb_url=glb_url,
@@ -521,6 +728,40 @@ def build_useful_endpoint(request: UsefulBuildRequest) -> UsefulBuildResponse:
         validation=validation,
         bundle_url=bundle_url,
         structured_spec=request.structured_spec,
+    )
+
+
+@app.post("/import-step", response_model=ImportStepResponse)
+async def import_step_endpoint(
+    model: UploadFile = File(...),
+    project_id: str | None = Form(None),
+) -> ImportStepResponse:
+    filename = (model.filename or "upload.step").strip() or "upload.step"
+    if not filename.lower().endswith((".step", ".stp")):
+        raise HTTPException(status_code=400, detail="Only STEP files are supported at this endpoint.")
+
+    content = await model.read()
+    workspace_id = uuid.uuid4().hex
+    try:
+        imported = import_step_reference(content, filename, settings.output_dir / "workspaces" / workspace_id)
+        record = create_workspace("step_import", imported.workspace_model, project_id=project_id, workspace_id=workspace_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    glb_upload = upload_artifact(workspace_id, imported.glb_path)
+    glb_url = _workspace_artifact_url(glb_upload, workspace_id, imported.glb_path)
+    record_preview(
+        workspace_id,
+        revision_id=record.editable_model.revision_id,
+        glb_url=glb_url,
+        stl_url=_workspace_artifact_url(None, workspace_id, imported.stl_path),
+        validation={"status": "reference"},
+    )
+    return ImportStepResponse(
+        workspace_id=workspace_id,
+        editable_model=record.editable_model.model_dump(mode="json"),
+        glb_url=glb_url,
+        import_mode=imported.import_mode,
     )
 
 
@@ -557,6 +798,7 @@ async def import_model_endpoint(
         record_error(job_id, "import-model", str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     analysis_payload = public_analysis_payload(imported.analysis)
+    reconstructed_model, reconstruction_mode = reconstruct_from_analysis(analysis_payload)
 
     stl_url = _artifact_url(None, imported.stl_path, job_id)
     glb_url = _artifact_url(None, imported.glb_path, job_id)
@@ -594,6 +836,8 @@ async def import_model_endpoint(
         source_stl_url=stl_url,
         source_glb_url=glb_url,
         analysis=analysis_payload,
+        reconstruction_mode=reconstruction_mode,
+        editable_model=reconstructed_model.model_dump(mode="json") if reconstructed_model else None,
     )
 
 
