@@ -2,7 +2,8 @@
 
 import type { ChangeEvent, FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SelectionPayload, ViewerSelectionMarker } from "./ModelViewer";
+import type { SelectionPayload, ViewerCameraNormal, ViewerSelectionMarker } from "./ModelViewer";
+import PlanarFaceEditor from "./PlanarFaceEditor";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
 import { parseEditSpec } from "../lib/edit-spec";
 
@@ -13,6 +14,7 @@ type ExistingModelPanelProps = {
   onGcodeUrl: (url: string | null) => void;
   onBundleUrl: (url: string | null) => void;
   onSelectionMarker?: (marker: ViewerSelectionMarker | null) => void;
+  onViewNormalChange?: (normal: ViewerCameraNormal | null) => void;
   viewerSelectionHint?: SelectionPayload | null;
 };
 
@@ -114,8 +116,9 @@ type ModelAnalysis = {
 
 type ExistingModelTarget = {
   id: string;
-  type: "pattern_face" | "single_feature" | "unsupported";
+  type: "planar_pattern_face" | "single_planar_feature" | "unsupported";
   confidence: number;
+  editable?: boolean;
   label: string;
   summary: string;
   preview_capability: "supported" | "limited" | "unsupported";
@@ -124,9 +127,34 @@ type ExistingModelTarget = {
   unsupported_reason?: string | null;
   topology?: "rectangular" | "radial";
   face_id?: string;
-  face_plane?: {
+  face_frame?: {
     origin: [number, number, number];
+    x_axis: [number, number, number];
+    y_axis: [number, number, number];
     normal: [number, number, number];
+  };
+  face_polygon_2d?: Array<[number, number]>;
+  feature_geometry_2d?: Array<{
+    id: string;
+    center: [number, number];
+    outline?: Array<[number, number]>;
+  }>;
+  feature_outline_2d?: Array<[number, number]>;
+  feature_kind?: "circular_hole" | "slot" | "rectangular_cutout";
+  measured?: {
+    feature_size?: number | { width: number; height: number };
+    spacing_x?: number;
+    spacing_y?: number;
+    count_x?: number;
+    count_y?: number;
+    radial_spacing?: number;
+    ring_count?: number;
+    holes_per_ring?: number[];
+    margin?: number;
+    center_hole_diameter?: number | null;
+    diameter?: number;
+    width?: number;
+    height?: number;
   };
   pattern?: {
     element_type: "circular_hole" | "rectangular_cutout";
@@ -149,6 +177,14 @@ type ExistingModelTarget = {
   feature_type?: "circular_hole" | "slot" | "rectangular_cutout";
   feature_id?: string;
   feature_ids?: string[];
+  fit?: {
+    center_x?: number;
+    center_y?: number;
+    x_positions?: number[];
+    y_positions?: number[];
+    ring_radii?: number[];
+    holes_per_ring?: number[];
+  };
 };
 
 type FeatureSelection = {
@@ -410,7 +446,7 @@ const describeCluster = (cluster: PlanarFaceCluster) => {
 
 const defaultTargetParams = (target: ExistingModelTarget | null) => {
   if (!target) return {} as Record<string, string>;
-  if (target.type === "pattern_face") {
+  if (target.type === "planar_pattern_face") {
     return {
       hole_diameter: target.dimensions?.hole_diameter != null ? String(target.dimensions.hole_diameter) : "",
       width: target.dimensions?.width != null ? String(target.dimensions.width) : "",
@@ -441,7 +477,7 @@ const buildTargetParamsPayload = (target: ExistingModelTarget, params: Record<st
     const parsed = Number(value);
     if (Number.isFinite(parsed)) payload[key] = parsed;
   };
-  if (target.type === "pattern_face") {
+  if (target.type === "planar_pattern_face") {
     if (target.pattern?.element_type === "circular_hole") {
       assignNumber("hole_diameter");
     } else {
@@ -460,7 +496,7 @@ const buildTargetParamsPayload = (target: ExistingModelTarget, params: Record<st
     assignNumber("margin");
     assignNumber("center_hole_diameter");
   } else {
-    if (target.feature_type === "circular_hole") {
+    if ((target.feature_kind || target.feature_type) === "circular_hole") {
       assignNumber("hole_diameter");
     } else {
       assignNumber("width");
@@ -477,6 +513,7 @@ export default function ExistingModelPanel({
   onGcodeUrl,
   onBundleUrl,
   onSelectionMarker,
+  onViewNormalChange,
   viewerSelectionHint,
 }: ExistingModelPanelProps) {
   const backendUrl = resolveBackendUrl();
@@ -587,10 +624,7 @@ export default function ExistingModelPanel({
   }, [analysis?.groups, selectedCluster]);
 
   const supportedTargets = useMemo(
-    () =>
-      (analysis?.targets || []).filter(
-        (target) => target.type !== "unsupported" && target.preview_capability !== "unsupported"
-      ),
+    () => (analysis?.targets || []).filter((target) => target.type !== "unsupported"),
     [analysis?.targets]
   );
 
@@ -679,8 +713,14 @@ export default function ExistingModelPanel({
     Number.isFinite(requestedDiameterValue) &&
     requestedDiameterValue > estimatedMaxDiameter;
   const currentDraftSignature = useMemo(
-    () =>
-      JSON.stringify({
+    () => {
+      if (activeTarget) {
+        return JSON.stringify({
+          targetId: activeTarget.id,
+          params: buildTargetParamsPayload(activeTarget, targetParams),
+        });
+      }
+      return JSON.stringify({
         selection: {
           featureId: selectedFeature?.id || null,
           groupId: applyToSimilar ? activeFeatureGroup?.id || null : null,
@@ -703,8 +743,10 @@ export default function ExistingModelPanel({
           centerX,
           centerY,
         },
-      }),
+      });
+    },
     [
+      activeTarget,
       activeFeatureGroup?.id,
       applyToSimilar,
       arrayRadiusMm,
@@ -722,6 +764,7 @@ export default function ExistingModelPanel({
       targetShape,
       throughAll,
       toleranceMm,
+      targetParams,
       widthMm,
     ]
   );
@@ -738,9 +781,9 @@ export default function ExistingModelPanel({
     ? activeTarget.summary
     : analysis?.unsupported_reasons?.[0] || "Import an STL to detect supported editable targets.";
   const targetCountSummary =
-    activeTarget?.type === "pattern_face" && activeTarget.pattern
+    activeTarget?.type === "planar_pattern_face" && activeTarget.pattern
       ? `${activeTarget.pattern.count} repeated openings detected`
-      : activeTarget?.type === "single_feature"
+      : activeTarget?.type === "single_planar_feature"
         ? "Single editable feature"
         : null;
   const targetDirty =
@@ -757,14 +800,14 @@ export default function ExistingModelPanel({
 
   useEffect(() => {
     if (!analysis) return;
-    const availableIds = new Set(supportedTargets.map((target) => target.id));
+    const availableIds = new Set(supportedTargets.filter((target) => target.editable).map((target) => target.id));
     if (selectedTargetId && availableIds.has(selectedTargetId)) {
       return;
     }
     const nextTargetId =
       (analysis.primary_target_id && availableIds.has(analysis.primary_target_id)
         ? analysis.primary_target_id
-        : supportedTargets[0]?.id) || "";
+        : supportedTargets.find((target) => target.editable)?.id) || "";
     if (nextTargetId) {
       setSelectedTargetId(nextTargetId);
       setEditorState("target_selected");
@@ -898,8 +941,17 @@ export default function ExistingModelPanel({
       analysis.targets?.find((target) => target.feature_id === match.featureId) ||
       analysis.targets?.find((target) => target.feature_ids?.includes(match.featureId));
     if (matchedTarget) {
-      setSelectedTargetId(matchedTarget.id);
-      setEditorState("target_selected");
+      if (matchedTarget.editable) {
+        setSelectedTargetId(matchedTarget.id);
+        setEditorState("target_selected");
+      } else {
+        setViewerSelectionMessage(
+          matchedTarget.confidence < 0.7
+            ? "That detected region is too low-confidence for safe editing."
+            : "That detected region is visible, but not safe enough to edit."
+        );
+        return;
+      }
     }
     const matchedGroup = analysis.groups?.find((group) => group.id === match.groupId);
     setViewerSelectionMessage(
@@ -912,7 +964,16 @@ export default function ExistingModelPanel({
   }, [analysis, lastSelectionHintKey, viewerSelectionHint]);
 
   useEffect(() => {
-    if (activeTarget?.type === "pattern_face" && activeTarget.feature_ids?.length && analysis?.features?.length) {
+    if (!activeTarget?.face_frame?.normal) {
+      onViewNormalChange?.(null);
+      return;
+    }
+    const [x, y, z] = activeTarget.face_frame.normal;
+    onViewNormalChange?.({ x, y, z });
+  }, [activeTarget?.face_frame?.normal, onViewNormalChange]);
+
+  useEffect(() => {
+    if (activeTarget?.type === "planar_pattern_face" && activeTarget.feature_ids?.length && analysis?.features?.length) {
       const cluster = analysis.planar_face_clusters.find((candidate) => candidate.face_id === activeTarget.face_id);
       const targetFeatures = activeTarget.feature_ids
         .map((featureId) => analysis.features?.find((feature) => feature.id === featureId))
@@ -930,7 +991,7 @@ export default function ExistingModelPanel({
       }
     }
 
-    if (activeTarget?.type === "single_feature" && activeTarget.feature_id && analysis?.features?.length) {
+    if (activeTarget?.type === "single_planar_feature" && activeTarget.feature_id && analysis?.features?.length) {
       const feature = analysis.features.find((candidate) => candidate.id === activeTarget.feature_id);
       const cluster = analysis.planar_face_clusters.find((candidate) => candidate.face_id === activeTarget.face_id || candidate.cluster_id === feature?.cluster_id);
       if (feature && cluster) {
@@ -1175,17 +1236,28 @@ export default function ExistingModelPanel({
   };
 
   const handleApplyEdit = async () => {
-    if (!imported || (!selectedClusterId && !activeTarget) || isProcessing) return;
+    if (!imported || (!selectedClusterId && !activeTarget) || isProcessing || !previewJobId) return;
     setIsProcessing(true);
     setLastError(null);
     try {
       setStatus("applying");
+      const payload = activeTarget
+        ? {
+            ...buildTargetPreviewPayload(),
+            preview_id: previewJobId,
+            preview_revision_id: previewJobId,
+          }
+        : {
+            ...buildEditPayload(),
+            preview_id: previewJobId,
+            preview_revision_id: previewJobId,
+          };
       const response = await fetchWithTimeout(
         `${backendUrl}/apply-edit`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(activeTarget ? buildTargetPreviewPayload() : buildEditPayload()),
+          body: JSON.stringify(payload),
         },
         TIMEOUTS.apply
       );
@@ -1219,7 +1291,7 @@ export default function ExistingModelPanel({
 
   const selectionSummary = selectedCluster
     ? `${selectedCluster.area_mm2.toFixed(0)} mm² editable face · ${selectedCluster.openings.length} detected openings`
-    : activeTarget?.type === "pattern_face" && activeTarget.pattern
+    : activeTarget?.type === "planar_pattern_face" && activeTarget.pattern
       ? `${activeTarget.pattern.count} detected openings in the selected pattern`
       : "Import an STL to detect editable features";
 
@@ -1228,13 +1300,27 @@ export default function ExistingModelPanel({
     setEditorState("dirty");
   };
 
+  const resetTargetParam = (key: string) => {
+    if (!activeTarget) return;
+    const defaults = defaultTargetParams(activeTarget);
+    setTargetParams((current) => ({ ...current, [key]: defaults[key] ?? "" }));
+    setEditorState("dirty");
+  };
+
+  const resetTargetDraft = () => {
+    if (!activeTarget) return;
+    setTargetParams(defaultTargetParams(activeTarget));
+    setLastError(null);
+    setEditorState("target_selected");
+  };
+
   return (
     <section className="panel">
       <div className="panel-header">
-        <p className="eyebrow">Precision STL Editor</p>
-        <h2>Select a target and edit it precisely</h2>
+        <p className="eyebrow">Supported STL Face Editing</p>
+        <h2>Select in 3D. Edit precisely in 2D.</h2>
         <p className="panel-subtitle">
-          Upload an STL, pick a detected feature or repeated-hole group, adjust the dimensions, preview the result, and export the revised STL.
+          Import an STL, detect supported planar targets, choose one from the viewer or target list, edit it in a flattened face view, preview it, and export the exact preview revision.
         </p>
       </div>
 
@@ -1346,7 +1432,7 @@ export default function ExistingModelPanel({
                 ))}
               </div>
             ) : (
-              <div className="muted">Detected editable faces and openings are ready.</div>
+              <div className="muted">Detected planar targets are ready for review.</div>
             )}
           </div>
         ) : null}
@@ -1360,16 +1446,24 @@ export default function ExistingModelPanel({
                   <button
                     key={target.id}
                     type="button"
-                    className={`target-group-card ${activeTarget?.id === target.id ? "active" : ""}`}
+                    className={`target-group-card ${activeTarget?.id === target.id ? "active" : ""} ${target.editable ? "" : "disabled-card"}`}
                     onClick={() => {
+                      if (!target.editable) return;
                       setSelectedTargetId(target.id);
                       setEditorState("target_selected");
                     }}
-                    disabled={isProcessing}
+                    disabled={isProcessing || !target.editable}
                   >
                     <strong>{target.label}</strong>
                     <span>{target.summary}</span>
-                    <span className="muted">Confidence {Math.round(target.confidence * 100)}%</span>
+                    <span className="muted">
+                      Confidence {Math.round(target.confidence * 100)}% ·{" "}
+                      {target.confidence < 0.7
+                        ? "view only"
+                        : target.confidence < 0.85
+                          ? "editable with warning"
+                          : "primary candidate"}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -1384,6 +1478,13 @@ export default function ExistingModelPanel({
                 ))}
               </div>
             )}
+            {!supportedTargets.length ? (
+              <div className="unsupported-guide">
+                <span>Try Design Workspace instead for a fresh parametric version.</span>
+                <span>Simplify the geometry or isolate a flatter region.</span>
+                <span>Use Advanced / Legacy only if you need the old low-level flow.</span>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -1392,10 +1493,19 @@ export default function ExistingModelPanel({
             <div className="status-label">Selected target</div>
             <div className="analysis-grid">
               <span>{activeTarget.label}</span>
-              <span>{activeTarget.type === "pattern_face" ? `${activeTarget.topology} pattern` : activeTarget.feature_type}</span>
+              <span>
+                {activeTarget.type === "planar_pattern_face"
+                  ? `${activeTarget.topology} pattern`
+                  : activeTarget.feature_kind || activeTarget.feature_type}
+              </span>
               {targetCountSummary ? <span>{targetCountSummary}</span> : null}
             </div>
             <div className="muted">{selectedTargetDetail}</div>
+            <div className="warning-list">
+              <span className="chip">3D selects</span>
+              <span className="chip">2D edits</span>
+              {!activeTarget.editable ? <span className="warning-chip">Not editable</span> : null}
+            </div>
             {activeTarget.warnings?.length ? (
               <div className="warning-list">
                 {activeTarget.warnings.map((warning) => (
@@ -1427,203 +1537,31 @@ export default function ExistingModelPanel({
                 <span className="chip">{editorState.replace(/_/g, " ")}</span>
                 {targetCountSummary ? <span className="chip">{targetCountSummary}</span> : null}
                 {targetDirty ? <span className="chip chip-warm">Draft changed</span> : null}
+                {previewJobId ? <span className="chip">Preview locked</span> : null}
               </div>
               {lastError ? <div className="warning-chip">{lastError}</div> : null}
             </div>
-
-            <div className="spec-grid">
-              {activeTarget.type === "pattern_face" && activeTarget.pattern?.element_type === "circular_hole" ? (
-                <label className="field-row compact-field">
-                  <span>Hole diameter mm</span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    value={targetParams.hole_diameter || ""}
-                    onChange={(event) => updateTargetParam("hole_diameter", event.target.value)}
-                    disabled={isProcessing}
-                  />
-                </label>
-              ) : null}
-              {activeTarget.type === "pattern_face" && activeTarget.pattern?.element_type === "rectangular_cutout" ? (
-                <>
-                  <label className="field-row compact-field">
-                    <span>Width mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.width || ""}
-                      onChange={(event) => updateTargetParam("width", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  <label className="field-row compact-field">
-                    <span>Height mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.height || ""}
-                      onChange={(event) => updateTargetParam("height", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                </>
-              ) : null}
-              {activeTarget.type === "single_feature" && activeTarget.feature_type === "circular_hole" ? (
-                <label className="field-row compact-field">
-                  <span>Diameter mm</span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    step="any"
-                    value={targetParams.hole_diameter || ""}
-                    onChange={(event) => updateTargetParam("hole_diameter", event.target.value)}
-                    disabled={isProcessing}
-                  />
-                </label>
-              ) : null}
-              {activeTarget.type === "single_feature" &&
-              activeTarget.feature_type &&
-              activeTarget.feature_type !== "circular_hole" ? (
-                <>
-                  <label className="field-row compact-field">
-                    <span>Width mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.width || ""}
-                      onChange={(event) => updateTargetParam("width", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  <label className="field-row compact-field">
-                    <span>Height mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.height || ""}
-                      onChange={(event) => updateTargetParam("height", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                </>
-              ) : null}
-              {activeTarget.type === "pattern_face" && activeTarget.topology === "rectangular" ? (
-                <>
-                  <label className="field-row compact-field">
-                    <span>Spacing X mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.spacing_x || ""}
-                      onChange={(event) => updateTargetParam("spacing_x", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  <label className="field-row compact-field">
-                    <span>Spacing Y mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.spacing_y || ""}
-                      onChange={(event) => updateTargetParam("spacing_y", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  <label className="field-row compact-field">
-                    <span>Count X</span>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min="1"
-                      step="1"
-                      value={targetParams.count_x || ""}
-                      onChange={(event) => updateTargetParam("count_x", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  <label className="field-row compact-field">
-                    <span>Count Y</span>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min="1"
-                      step="1"
-                      value={targetParams.count_y || ""}
-                      onChange={(event) => updateTargetParam("count_y", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                </>
-              ) : null}
-              {activeTarget.type === "pattern_face" && activeTarget.topology === "radial" ? (
-                <>
-                  <label className="field-row compact-field">
-                    <span>Radial spacing mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.radial_spacing || ""}
-                      onChange={(event) => updateTargetParam("radial_spacing", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  <label className="field-row compact-field">
-                    <span>Ring count</span>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min="1"
-                      step="1"
-                      value={targetParams.ring_count || ""}
-                      onChange={(event) => updateTargetParam("ring_count", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                </>
-              ) : null}
-              {activeTarget.type === "pattern_face" ? (
-                <>
-                  <label className="field-row compact-field">
-                    <span>Margin mm</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="any"
-                      value={targetParams.margin || ""}
-                      onChange={(event) => updateTargetParam("margin", event.target.value)}
-                      disabled={isProcessing}
-                    />
-                  </label>
-                  {activeTarget.pattern?.center_hole_diameter != null ? (
-                    <label className="field-row compact-field">
-                      <span>Center hole mm</span>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="any"
-                        value={targetParams.center_hole_diameter || ""}
-                        onChange={(event) => updateTargetParam("center_hole_diameter", event.target.value)}
-                        disabled={isProcessing}
-                      />
-                    </label>
-                  ) : null}
-                </>
-              ) : null}
-            </div>
+            <PlanarFaceEditor
+              target={activeTarget as never}
+              params={targetParams}
+              onParamChange={updateTargetParam}
+              onParamReset={resetTargetParam}
+              disabled={isProcessing || !activeTarget.editable}
+            />
 
             <div className="text-input-actions">
               <button
+                type="button"
+                className="text-submit secondary-action"
+                onClick={resetTargetDraft}
+                disabled={!activeTarget || isProcessing}
+              >
+                Reset draft
+              </button>
+              <button
                 type="submit"
                 className="text-submit"
-                disabled={!imported || !activeTarget || isProcessing}
+                disabled={!imported || !activeTarget || isProcessing || !activeTarget.editable}
               >
                 Preview
               </button>
@@ -1631,7 +1569,7 @@ export default function ExistingModelPanel({
                 type="button"
                 className="text-submit"
                 onClick={handleApplyEdit}
-                disabled={!imported || !activeTarget || isProcessing || editorState !== "preview_ready"}
+                disabled={!imported || !activeTarget || isProcessing || editorState !== "preview_ready" || !previewJobId}
               >
                 Export STL
               </button>

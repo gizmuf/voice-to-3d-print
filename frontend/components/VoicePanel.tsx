@@ -988,11 +988,10 @@ export default function VoicePanel({
   return (
     <section className="panel">
       <div className="panel-header">
-        <p className="eyebrow">Voice-First Designer</p>
-        <h2>Describe the object you want to print</h2>
+        <p className="eyebrow">Design Workspace</p>
+        <h2>Describe the physical design you want to build</h2>
         <p className="panel-subtitle">
-          Speak first, confirm what the system detected, refine the live preview,
-          and then export a printable STL.
+          Start with text or voice, confirm the detected structure, refine the live parametric preview, and export a printable STL.
         </p>
       </div>
 
@@ -1004,7 +1003,7 @@ export default function VoicePanel({
               className={`mode-chip ${mode === "useful" ? "active" : ""}`}
               onClick={() => setMode("useful")}
             >
-              Useful Object
+              Design Workspace
             </button>
             <button
               type="button"
@@ -1022,7 +1021,7 @@ export default function VoicePanel({
           <div className="intent muted">
             {routeResult?.route_reason ||
               (mode === "useful"
-                ? "Use voice first for stands, holders, trays, hooks, and other practical prints."
+                ? "Use Design Workspace for practical parametric prints such as panels, stands, holders, trays, hooks, and other physical objects."
                 : "Creative mode keeps the mesh-generation path available for figurines and decorative objects.")}
           </div>
           {mode === "useful" && structuredSpec ? (
@@ -1037,7 +1036,7 @@ export default function VoicePanel({
         <div className="voice-surface">
           <div>
             <div className="voice-title">Push to talk</div>
-            <div className="muted">Voice is the fastest path into the Useful Object flow.</div>
+            <div className="muted">Voice is the fastest path into Design Workspace.</div>
           </div>
           <div className="voice-actions">
             <button
@@ -1185,7 +1184,7 @@ export default function VoicePanel({
               <option value="triposr">TripoSR</option>
             </select>
             <span className="muted">
-              Provider choice stays secondary to the workflow. Useful Object mode still routes
+              Provider choice stays secondary to the workflow. Design Workspace still routes
               into the template-backed CAD path.
             </span>
           </div>

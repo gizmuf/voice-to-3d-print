@@ -28,7 +28,8 @@ CIRCLE_GROUP_TOLERANCE_MM = 0.35
 RECT_GROUP_TOLERANCE_MM = 0.5
 PATTERN_TARGET_MIN_COUNT = 4
 MIN_PATTERN_WALL_MM = 0.8
-TARGET_PRIMARY_CONFIDENCE = 0.7
+TARGET_SELECTABLE_CONFIDENCE = 0.7
+TARGET_PRIMARY_CONFIDENCE = 0.85
 
 
 @dataclass
@@ -421,6 +422,88 @@ def _target_id(prefix: str, *parts: object) -> str:
     return _hash_id(prefix, *parts)
 
 
+def _face_frame_payload(cluster: dict) -> dict:
+    frame = cluster.get("local_frame") or {}
+    return {
+        "origin": [round(float(value), 4) for value in (cluster.get("origin_mm") or [0.0, 0.0, 0.0])],
+        "x_axis": [round(float(value), 6) for value in (frame.get("x_axis") or [1.0, 0.0, 0.0])],
+        "y_axis": [round(float(value), 6) for value in (frame.get("y_axis") or [0.0, 1.0, 0.0])],
+        "normal": [round(float(value), 6) for value in (cluster.get("normal") or frame.get("z_axis") or [0.0, 0.0, 1.0])],
+    }
+
+
+def _face_polygon_2d(cluster: dict) -> list[list[float]]:
+    bounds = cluster.get("local_bounds_mm") or {}
+    min_x = float(bounds.get("min_x", 0.0))
+    max_x = float(bounds.get("max_x", 0.0))
+    min_y = float(bounds.get("min_y", 0.0))
+    max_y = float(bounds.get("max_y", 0.0))
+    return [
+        [round(min_x, 4), round(min_y, 4)],
+        [round(max_x, 4), round(min_y, 4)],
+        [round(max_x, 4), round(max_y, 4)],
+        [round(min_x, 4), round(max_y, 4)],
+    ]
+
+
+def _circle_outline(center_x: float, center_y: float, radius: float, segments: int = 24) -> list[list[float]]:
+    return [
+        [
+            round(center_x + math.cos((2.0 * math.pi * index) / segments) * radius, 4),
+            round(center_y + math.sin((2.0 * math.pi * index) / segments) * radius, 4),
+        ]
+        for index in range(segments)
+    ]
+
+
+def _opening_outline_2d(opening: dict) -> list[list[float]]:
+    if opening.get("vertices_2d"):
+        return [
+            [round(float(point[0]), 4), round(float(point[1]), 4)]
+            for point in opening["vertices_2d"]
+            if len(point) >= 2
+        ]
+
+    center = opening.get("center_mm") or {}
+    center_x = float(center.get("x", 0.0))
+    center_y = float(center.get("y", 0.0))
+    width = float(opening.get("width_mm", 0.0) or 0.0)
+    height = float(opening.get("height_mm", 0.0) or 0.0)
+    if (opening.get("shape_guess") or opening.get("type")) == "circle":
+        return _circle_outline(center_x, center_y, min(width, height) / 2.0)
+
+    half_width = width / 2.0
+    half_height = height / 2.0
+    return [
+        [round(center_x - half_width, 4), round(center_y - half_height, 4)],
+        [round(center_x + half_width, 4), round(center_y - half_height, 4)],
+        [round(center_x + half_width, 4), round(center_y + half_height, 4)],
+        [round(center_x - half_width, 4), round(center_y + half_height, 4)],
+    ]
+
+
+def _feature_geometry_2d(cluster: dict, features: Sequence[dict]) -> list[dict]:
+    openings_by_id = {
+        opening.get("opening_id"): opening
+        for opening in cluster.get("openings", [])
+        if opening.get("opening_id")
+    }
+    geometry: list[dict] = []
+    for feature in features:
+        opening = openings_by_id.get(feature.get("opening_id"))
+        geometry.append(
+            {
+                "id": feature["id"],
+                "center": [
+                    round(float(feature["center_mm"]["x"]), 4),
+                    round(float(feature["center_mm"]["y"]), 4),
+                ],
+                "outline": _opening_outline_2d(opening or feature),
+            }
+        )
+    return geometry
+
+
 def _build_feature_projection(analysis: dict) -> dict:
     projected_clusters: list[dict] = []
     features: list[dict] = []
@@ -580,6 +663,8 @@ def _fit_rectangular_pattern_target(group: dict, cluster: dict, face_features: S
     occupancy = len(features) / expected
     if occupancy < 0.45:
         return None
+    if occupancy > 1.35:
+        return None
 
     spacing_x = round(
         sum(abs(right - left) for left, right in zip(x_positions, x_positions[1:])) / max(len(x_positions) - 1, 1),
@@ -598,8 +683,12 @@ def _fit_rectangular_pattern_target(group: dict, cluster: dict, face_features: S
     )
     center_hole = _detect_center_hole_for_target(cluster, face_features, set(group.get("feature_ids") or []))
     confidence = min(0.96, 0.52 + min(occupancy, 1.0) * 0.28 + (0.08 if len(features) >= 8 else 0.0))
-    if confidence < TARGET_PRIMARY_CONFIDENCE:
-        return None
+    editable = confidence >= TARGET_SELECTABLE_CONFIDENCE
+    warnings = []
+    if confidence < TARGET_SELECTABLE_CONFIDENCE:
+        warnings.append("Detected pattern is too low-confidence for safe editing.")
+    elif confidence < TARGET_PRIMARY_CONFIDENCE:
+        warnings.append("Detected pattern is editable, but verify the target before previewing changes.")
 
     element_type = "circular_hole" if group.get("type") == "circle" else "rectangular_cutout"
     size_text = (
@@ -609,21 +698,36 @@ def _fit_rectangular_pattern_target(group: dict, cluster: dict, face_features: S
     )
     return {
         "id": _target_id("target", cluster.get("face_id"), "rectangular", group.get("id")),
-        "type": "pattern_face",
+        "type": "planar_pattern_face",
         "confidence": round(confidence, 3),
+        "editable": editable,
         "label": "Rectangular repeated pattern",
         "summary": f"{len(features)} repeated {group.get('type')} openings on a planar grid · {size_text}",
-        "preview_capability": "supported",
+        "preview_capability": "supported" if editable else "limited",
         "supported_operations": ["resize_feature", "adjust_spacing", "adjust_count", "adjust_margin"],
-        "warnings": [],
+        "warnings": warnings,
         "topology": "rectangular",
         "element_type": element_type,
-        "face_plane": {
-            "origin": cluster.get("origin_mm"),
-            "normal": cluster.get("normal"),
-        },
+        "feature_kind": element_type,
+        "face_frame": _face_frame_payload(cluster),
+        "face_polygon_2d": _face_polygon_2d(cluster),
+        "feature_geometry_2d": _feature_geometry_2d(cluster, features),
         "feature_ids": list(group.get("feature_ids") or []),
         "face_id": cluster.get("face_id"),
+        "measured": {
+            "feature_size": round(float(group.get("avg_width_mm", 0.0)), 3)
+            if element_type == "circular_hole"
+            else {
+                "width": round(float(group.get("avg_width_mm", 0.0)), 3),
+                "height": round(float(group.get("avg_height_mm", 0.0)), 3),
+            },
+            "spacing_x": spacing_x,
+            "spacing_y": spacing_y,
+            "count_x": len(x_positions),
+            "count_y": len(y_positions),
+            "margin": round(max(min_margin, 0.0), 3),
+            "center_hole_diameter": round(float(center_hole.get("diameter_mm", 0.0)), 3) if center_hole else None,
+        },
         "pattern": {
             "element_type": element_type,
             "count": len(features),
@@ -699,8 +803,12 @@ def _fit_radial_pattern_target(group: dict, cluster: dict, face_features: Sequen
         0.97,
         0.56 + min(uniformity, 1.0) * 0.24 + (0.1 if len(ring_radii) >= 3 else 0.0) + (0.06 if len(features) >= 12 else 0.0),
     )
-    if confidence < TARGET_PRIMARY_CONFIDENCE:
-        return None
+    editable = confidence >= TARGET_SELECTABLE_CONFIDENCE
+    warnings = []
+    if confidence < TARGET_SELECTABLE_CONFIDENCE:
+        warnings.append("Detected pattern is too low-confidence for safe editing.")
+    elif confidence < TARGET_PRIMARY_CONFIDENCE:
+        warnings.append("Detected pattern is editable, but verify the target before previewing changes.")
 
     bounds = cluster.get("local_bounds_mm") or {}
     representative_radius = float(group.get("avg_width_mm", 0.0) or 0.0) / 2.0
@@ -721,21 +829,35 @@ def _fit_radial_pattern_target(group: dict, cluster: dict, face_features: Sequen
 
     return {
         "id": _target_id("target", cluster.get("face_id"), "radial", group.get("id")),
-        "type": "pattern_face",
+        "type": "planar_pattern_face",
         "confidence": round(confidence, 3),
+        "editable": editable,
         "label": "Radial repeated pattern",
         "summary": f"{len(features)} repeated {group.get('type')} openings in concentric rings · {size_text}",
-        "preview_capability": "supported",
+        "preview_capability": "supported" if editable else "limited",
         "supported_operations": ["resize_feature", "adjust_spacing", "adjust_count", "adjust_margin"],
-        "warnings": [],
+        "warnings": warnings,
         "topology": "radial",
         "element_type": element_type,
-        "face_plane": {
-            "origin": cluster.get("origin_mm"),
-            "normal": cluster.get("normal"),
-        },
+        "feature_kind": element_type,
+        "face_frame": _face_frame_payload(cluster),
+        "face_polygon_2d": _face_polygon_2d(cluster),
+        "feature_geometry_2d": _feature_geometry_2d(cluster, features),
         "feature_ids": list(group.get("feature_ids") or []),
         "face_id": cluster.get("face_id"),
+        "measured": {
+            "feature_size": round(float(group.get("avg_width_mm", 0.0)), 3)
+            if element_type == "circular_hole"
+            else {
+                "width": round(float(group.get("avg_width_mm", 0.0)), 3),
+                "height": round(float(group.get("avg_height_mm", 0.0)), 3),
+            },
+            "radial_spacing": radial_spacing,
+            "ring_count": len(ring_radii),
+            "holes_per_ring": holes_per_ring,
+            "margin": round(max(radial_margin, 0.0), 3),
+            "center_hole_diameter": round(float(center_hole.get("diameter_mm", 0.0)), 3) if center_hole else None,
+        },
         "pattern": {
             "element_type": element_type,
             "count": len(features),
@@ -825,17 +947,55 @@ def _build_single_feature_targets(projection: dict) -> list[dict]:
         candidates.append(
             {
                 "id": _target_id("target", face_id, "single", feature["id"]),
-                "type": "single_feature",
+                "type": "single_planar_feature",
                 "confidence": round(confidence, 3),
+                "editable": confidence >= TARGET_SELECTABLE_CONFIDENCE,
                 "label": label,
                 "summary": f"{label.lower()} · {size_summary}",
-                "preview_capability": "supported",
+                "preview_capability": "supported" if confidence >= TARGET_SELECTABLE_CONFIDENCE else "limited",
                 "supported_operations": ["resize_feature"],
-                "warnings": [],
+                "warnings": (
+                    []
+                    if confidence >= TARGET_PRIMARY_CONFIDENCE
+                    else ["Detected feature is editable, but verify the target before previewing changes."]
+                    if confidence >= TARGET_SELECTABLE_CONFIDENCE
+                    else ["Detected feature is too low-confidence for safe editing."]
+                ),
                 "face_id": face_id,
                 "feature_type": feature_type,
+                "feature_kind": feature_type,
                 "feature_id": feature["id"],
                 "feature_ids": [feature["id"]],
+                "face_frame": _face_frame_payload(
+                    next(
+                        cluster
+                        for cluster in projection["clusters"]
+                        if cluster.get("face_id") == face_id
+                    )
+                ),
+                "face_polygon_2d": _face_polygon_2d(
+                    next(
+                        cluster
+                        for cluster in projection["clusters"]
+                        if cluster.get("face_id") == face_id
+                    )
+                ),
+                "feature_outline_2d": _opening_outline_2d(
+                    next(
+                        opening
+                        for opening in next(
+                            cluster for cluster in projection["clusters"] if cluster.get("face_id") == face_id
+                        ).get("openings", [])
+                        if opening.get("opening_id") == feature.get("opening_id")
+                    )
+                ),
+                "measured": {
+                    "diameter": round(float(feature.get("diameter_mm", 0.0) or 0.0), 3)
+                    if feature_type == "circular_hole"
+                    else None,
+                    "width": round(float(feature.get("width_mm", 0.0) or 0.0), 3),
+                    "height": round(float(feature.get("height_mm", 0.0) or 0.0), 3),
+                },
                 "dimensions": {
                     "hole_diameter": round(float(feature.get("diameter_mm", 0.0) or 0.0), 3)
                     if feature_type == "circular_hole"
@@ -880,7 +1040,11 @@ def _build_target_projection(analysis: dict, projection: dict | None = None) -> 
         deduped_targets.append(target)
     targets = deduped_targets
 
-    supported_targets = [target for target in targets if float(target.get("confidence", 0.0)) >= TARGET_PRIMARY_CONFIDENCE]
+    supported_targets = [
+        target
+        for target in targets
+        if bool(target.get("editable")) and float(target.get("confidence", 0.0)) >= TARGET_PRIMARY_CONFIDENCE
+    ]
     primary_target_id = supported_targets[0]["id"] if supported_targets else None
 
     if not targets:
@@ -1377,6 +1541,8 @@ def _resolve_target(analysis: dict, target_id: str) -> tuple[dict, dict]:
         raise ValueError("Selected target was not found on the current model.")
     if target.get("type") == "unsupported":
         raise ValueError(target.get("unsupported_reason") or "This target cannot be edited safely.")
+    if not bool(target.get("editable")):
+        raise ValueError("Selected target is not safe enough to edit.")
     cluster = next(
         (candidate for candidate in analysis.get("planar_face_clusters", []) if _stable_face_id(candidate) == target.get("face_id")),
         None,
@@ -1401,7 +1567,7 @@ def _opening_for_feature_id(cluster: dict, feature_id: str | None) -> dict | Non
 
 
 def _default_target_params(target: dict) -> dict:
-    if target.get("type") == "pattern_face":
+    if target.get("type") == "planar_pattern_face":
         pattern = target.get("pattern") or {}
         dimensions = target.get("dimensions") or {}
         defaults = {
@@ -1824,7 +1990,7 @@ def _perform_target_edit(
     target, cluster = _resolve_target(analysis, target_id)
     normalized_params = _normalized_target_params(target, params)
 
-    if target.get("type") == "single_feature":
+    if target.get("type") == "single_planar_feature":
         selection, edit_request = _build_legacy_request_from_target(target, normalized_params)
         return _perform_edit(
             model_id=model_id,

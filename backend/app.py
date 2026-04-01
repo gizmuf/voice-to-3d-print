@@ -235,6 +235,7 @@ class EditPreviewResponse(BaseModel):
 
 class ApplyEditRequest(BaseModel):
     model_id: str
+    preview_id: str | None = None
     preview_revision_id: str | None = None
     parent_revision_id: str | None = None
     selection: dict | None = None
@@ -701,7 +702,11 @@ def preview_edit_endpoint(request: EditPreviewRequest) -> EditPreviewResponse:
 @app.post("/apply-edit", response_model=ApplyEditResponse)
 def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
     job_id = request.job_id or uuid.uuid4().hex
-    parent_revision_id = request.preview_revision_id or request.parent_revision_id
+    preview_revision_id = request.preview_id or request.preview_revision_id
+    if not preview_revision_id:
+        raise HTTPException(status_code=400, detail="Apply requires a successful preview_id.")
+
+    parent_revision_id = preview_revision_id or request.parent_revision_id
     ensure_job(
         job_id,
         _compact_payload(
@@ -723,8 +728,8 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
     )
 
     try:
-        if request.preview_revision_id:
-            source_dir = settings.output_dir / request.preview_revision_id
+        if preview_revision_id:
+            source_dir = settings.output_dir / preview_revision_id
             source_stl = source_dir / "model.stl"
             source_glb = source_dir / "preview.glb"
             if not source_stl.exists():
@@ -741,11 +746,12 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
             shutil.copy(source_stl, final_stl)
             shutil.copy(source_glb, final_glb)
             validation = validate_mesh_file(final_stl)
-            analysis = analyze_model(request.model_id, request.preview_revision_id)
+            analysis = analyze_model(request.model_id, preview_revision_id)
             structured_edit = (
                 {
                     "target_id": request.target_id,
                     "params": request.params or {},
+                    "preview_id": preview_revision_id,
                 }
                 if request.target_id
                 else dict(request.edit_request or {})
@@ -796,6 +802,7 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
             "mesh_analysis": analysis_payload,
             "selection": request.selection,
             "edit_request": request.edit_request,
+            "preview_id": preview_revision_id,
             "structured_edit": applied.structured_edit,
             "validation": applied.validation,
             "fallback_strategy_used": applied.fallback_strategy_used,
@@ -811,6 +818,7 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
             "model_id": request.model_id,
             "mode": "existing-model-edit",
             "revision_type": "applied_edit",
+            "preview_id": preview_revision_id,
             "selection": request.selection,
             "edit_request": request.edit_request,
             "structured_edit": applied.structured_edit,

@@ -17,6 +17,12 @@ export type ViewerSelectionMarker = {
   label: string;
 };
 
+export type ViewerCameraNormal = {
+  x: number;
+  y: number;
+  z: number;
+};
+
 type ModelViewerProps = {
   src?: string | null;
   ghostModelUrl?: string | null;
@@ -24,6 +30,9 @@ type ModelViewerProps = {
   showChanges?: boolean;
   isUpdating?: boolean;
   defaultInteractionMode?: "orbit" | "pan";
+  defaultCameraPreset?: "iso" | "front";
+  defaultCameraNormal?: ViewerCameraNormal | null;
+  resetViewSignal?: number;
   onSelect?: (payload: SelectionPayload) => void;
   selectionMarker?: ViewerSelectionMarker | null;
 };
@@ -182,6 +191,9 @@ export default function ModelViewer({
   showChanges = false,
   isUpdating = false,
   defaultInteractionMode = "orbit",
+  defaultCameraPreset = "iso",
+  defaultCameraNormal = null,
+  resetViewSignal = 0,
   onSelect,
   selectionMarker,
 }: ModelViewerProps) {
@@ -204,23 +216,40 @@ export default function ModelViewer({
     setSelectedLabel(selectionMarker?.label || null);
   }, [selectionMarker]);
 
+  const hasGhost = Boolean(showChanges && ghostModelUrl);
+  const normalizedCamera = useMemo(() => {
+    if (defaultCameraPreset !== "front" || !defaultCameraNormal) return null;
+    const length = Math.hypot(defaultCameraNormal.x, defaultCameraNormal.y, defaultCameraNormal.z) || 1;
+    return {
+      x: defaultCameraNormal.x / length,
+      y: defaultCameraNormal.y / length,
+      z: defaultCameraNormal.z / length,
+    };
+  }, [defaultCameraNormal, defaultCameraPreset]);
+  const cameraPosition =
+    defaultCameraPreset === "front"
+      ? (normalizedCamera
+          ? ([normalizedCamera.x * 3.6, normalizedCamera.y * 3.6, normalizedCamera.z * 3.6] as const)
+          : ([0, 0, 3.6] as const))
+      : ([2.8, 2.2, 2.8] as const);
+  const viewerKey = `${src || "empty"}:${ghostModelUrl || "noghost"}:${defaultCameraPreset}:${normalizedCamera?.x || 0}:${normalizedCamera?.y || 0}:${normalizedCamera?.z || 0}:${resetViewSignal}`;
+
   if (!src) {
     return (
       <div className="model-placeholder">
         <div className="placeholder-title">No model yet</div>
         <div className="placeholder-body">
-          Speak a design intent to generate a printable model.
+          Describe a design or import an STL to start the workspace.
         </div>
       </div>
     );
   }
 
-  const hasGhost = Boolean(showChanges && ghostModelUrl);
-
   return (
     <div className="model-viewer-wrap">
       <Canvas
-        camera={{ position: [2.8, 2.2, 2.8], fov: 40 }}
+        key={viewerKey}
+        camera={{ position: cameraPosition, fov: 40 }}
         dpr={[1, 1.5]}
         frameloop="demand"
         onPointerMissed={() => setHoveredObjectId(null)}

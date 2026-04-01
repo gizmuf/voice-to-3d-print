@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ExistingModelPanel from "../components/ExistingModelPanel";
 import ModelViewer from "../components/ModelViewer";
-import type { SelectionPayload, ViewerSelectionMarker } from "../components/ModelViewer";
+import type { SelectionPayload, ViewerCameraNormal, ViewerSelectionMarker } from "../components/ModelViewer";
 import VoicePanel from "../components/VoicePanel";
 
 export default function Home() {
@@ -20,6 +20,8 @@ export default function Home() {
   const [showOriginalReference, setShowOriginalReference] = useState(false);
   const [editViewerSelection, setEditViewerSelection] = useState<SelectionPayload | null>(null);
   const [editSelectionMarker, setEditSelectionMarker] = useState<ViewerSelectionMarker | null>(null);
+  const [editViewNormal, setEditViewNormal] = useState<ViewerCameraNormal | null>(null);
+  const [editViewResetNonce, setEditViewResetNonce] = useState(0);
   const workflowModeRef = useRef(workflowMode);
 
   useEffect(() => {
@@ -37,6 +39,8 @@ export default function Home() {
     setShowOriginalReference(false);
     setEditViewerSelection(null);
     setEditSelectionMarker(null);
+    setEditViewNormal(null);
+    setEditViewResetNonce(0);
   }, [workflowMode]);
 
   const createModeGuard = useMemo(() => {
@@ -63,12 +67,12 @@ export default function Home() {
   const heroCopy =
     workflowMode === "edit"
       ? {
-          eyebrow: "Upload → Select → Preview → Export",
-          title: "Modify real printable parts with",
-          highlight: " precise STL edits",
-          body: "Edit Existing Model mode imports STL files, detects planar faces and openings, previews exact local modifications, and exports a validated STL revision.",
-          pipeline: "Precision editing",
-          primary: "Existing Model",
+          eyebrow: "Import → Select In 3D → Edit In 2D → Preview → Export",
+          title: "Use STL as a bridge for",
+          highlight: " supported planar edits",
+          body: "Supported STL Face Editing detects safe planar targets, lets you select them in 3D, edits them in a flattened 2D face view, and exports the exact preview revision.",
+          pipeline: "2D STL bridge",
+          primary: "Supported STL Face Editing",
         }
       : workflowMode === "creative"
         ? {
@@ -80,12 +84,12 @@ export default function Home() {
             primary: "Creative Object",
           }
         : {
-            eyebrow: "Voice → Confirm → Preview → Export",
-            title: "Build practical prints from",
-            highlight: " spoken ideas",
-            body: "Useful Object mode leads with voice, confirms dimensions and assumptions, drafts a preview, and exports a validated STL for real-world prints.",
-            pipeline: "Voice-first",
-            primary: "Useful Object",
+            eyebrow: "Describe → Confirm → Live Preview → Export",
+            title: "Build physical designs in a",
+            highlight: " Design Workspace",
+            body: "Design Workspace is the primary parametric lane for print-ready objects. Start with text or voice, refine dimensions and pattern logic, review manufacturability, and export a validated STL.",
+            pipeline: "Parametric core",
+            primary: "Design Workspace",
           };
 
   return (
@@ -108,7 +112,7 @@ export default function Home() {
                 setSourceModelUrl(null);
               }}
             >
-              Useful Object
+              Design Workspace
             </button>
             <button
               type="button"
@@ -125,7 +129,7 @@ export default function Home() {
               className={`mode-chip ${workflowMode === "edit" ? "active" : ""}`}
               onClick={() => setWorkflowMode("edit")}
             >
-              Edit Existing Model
+              STL Face Editing
             </button>
           </div>
           <h1>
@@ -160,6 +164,7 @@ export default function Home() {
               onGcodeUrl={createModeGuard(["edit"], setGcodeUrl)}
               onBundleUrl={createModeGuard(["edit"], setBundleUrl)}
               onSelectionMarker={setEditSelectionMarker}
+              onViewNormalChange={setEditViewNormal}
               viewerSelectionHint={editViewerSelection}
             />
           ) : (
@@ -183,8 +188,8 @@ export default function Home() {
             <h2>{workflowMode === "edit" ? "Inspect the original and edited revision" : "Inspect the current revision"}</h2>
             <p className="panel-subtitle">
               {workflowMode === "edit"
-                ? "Use the original model as a stable reference while previewing the current edited revision."
-                : "Rotate, zoom, and validate the geometry before exporting the STL bundle."}
+                ? "Use the 3D view for inspection, target selection, and before/after comparison. Precise STL edits happen in the flattened 2D face editor."
+                : "Rotate, zoom, and validate the current design revision before exporting the STL bundle."}
             </p>
           </div>
 
@@ -198,6 +203,14 @@ export default function Home() {
               >
                 {showOriginalReference ? "Hide original reference" : "Show original reference"}
               </button>
+              <button
+                type="button"
+                className="mode-chip"
+                onClick={() => setEditViewResetNonce((value) => value + 1)}
+                disabled={!modelUrl && !sourceModelUrl}
+              >
+                Reset to front view
+              </button>
             </div>
           ) : null}
 
@@ -210,6 +223,9 @@ export default function Home() {
                     src={sourceModelUrl}
                     label="Imported STL"
                     defaultInteractionMode="pan"
+                    defaultCameraPreset="front"
+                    defaultCameraNormal={editViewNormal}
+                    resetViewSignal={editViewResetNonce}
                   />
                 </div>
               </div>
@@ -220,6 +236,9 @@ export default function Home() {
                     src={modelUrl || sourceModelUrl}
                     label="Edited STL"
                     defaultInteractionMode="pan"
+                    defaultCameraPreset="front"
+                    defaultCameraNormal={editViewNormal}
+                    resetViewSignal={editViewResetNonce}
                     onSelect={setEditViewerSelection}
                     selectionMarker={editSelectionMarker}
                   />
@@ -249,6 +268,9 @@ export default function Home() {
                   isUpdating={workflowMode === "useful" ? isPreviewUpdating : false}
                   label={workflowMode === "edit" ? "Edited STL" : "Generated object"}
                   defaultInteractionMode={workflowMode === "edit" ? "pan" : "orbit"}
+                  defaultCameraPreset={workflowMode === "edit" ? "front" : "iso"}
+                  defaultCameraNormal={workflowMode === "edit" ? editViewNormal : null}
+                  resetViewSignal={workflowMode === "edit" ? editViewResetNonce : 0}
                   onSelect={workflowMode === "edit" ? setEditViewerSelection : () => undefined}
                   selectionMarker={workflowMode === "edit" ? editSelectionMarker : null}
                 />
