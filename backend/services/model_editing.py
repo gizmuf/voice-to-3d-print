@@ -26,6 +26,9 @@ MAX_OPENINGS_PER_CLUSTER = 512
 FEATURE_ID_QUANTIZATION_MM = 0.05
 CIRCLE_GROUP_TOLERANCE_MM = 0.35
 RECT_GROUP_TOLERANCE_MM = 0.5
+PATTERN_TARGET_MIN_COUNT = 4
+MIN_PATTERN_WALL_MM = 0.8
+TARGET_PRIMARY_CONFIDENCE = 0.7
 
 
 @dataclass
@@ -375,6 +378,49 @@ def _group_title(shape_guess: str, count: int, avg_width: float, avg_height: flo
     return "Large opening" if avg_size > 15.0 else "Single opening"
 
 
+def _face_bounds_center(cluster: dict) -> tuple[float, float]:
+    bounds = cluster.get("local_bounds_mm") or {}
+    return (
+        (float(bounds.get("min_x", 0.0)) + float(bounds.get("max_x", 0.0))) / 2.0,
+        (float(bounds.get("min_y", 0.0)) + float(bounds.get("max_y", 0.0))) / 2.0,
+    )
+
+
+def _cluster_scalar_values(values: Sequence[float], tolerance: float) -> list[float]:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return []
+    buckets: list[list[float]] = [[ordered[0]]]
+    for value in ordered[1:]:
+        if abs(value - buckets[-1][-1]) <= tolerance:
+            buckets[-1].append(value)
+        else:
+            buckets.append([value])
+    return [round(sum(bucket) / len(bucket), 3) for bucket in buckets]
+
+
+def _feature_major_dimension(feature: dict) -> float:
+    return max(
+        float(feature.get("width_mm", 0.0) or 0.0),
+        float(feature.get("height_mm", 0.0) or 0.0),
+        float(feature.get("diameter_mm", 0.0) or 0.0),
+    )
+
+
+def _feature_minor_dimension(feature: dict) -> float:
+    candidates = [
+        float(feature.get("width_mm", 0.0) or 0.0),
+        float(feature.get("height_mm", 0.0) or 0.0),
+        float(feature.get("diameter_mm", 0.0) or 0.0),
+    ]
+    non_zero = [value for value in candidates if value > 0]
+    return min(non_zero) if non_zero else 0.0
+
+
+def _target_id(prefix: str, *parts: object) -> str:
+    return _hash_id(prefix, *parts)
+
+
 def _build_feature_projection(analysis: dict) -> dict:
     projected_clusters: list[dict] = []
     features: list[dict] = []
@@ -495,8 +541,363 @@ def _build_feature_projection(analysis: dict) -> dict:
     }
 
 
+def _detect_center_hole_for_target(cluster: dict, face_features: Sequence[dict], excluded_feature_ids: set[str]) -> dict | None:
+    center_x, center_y = _face_bounds_center(cluster)
+    best_feature: dict | None = None
+    best_score = float("inf")
+    for feature in face_features:
+        if feature["id"] in excluded_feature_ids:
+            continue
+        if feature.get("type") != "circle":
+            continue
+        diameter = float(feature.get("diameter_mm", 0.0) or 0.0)
+        if diameter < 8.0:
+            continue
+        center = feature.get("center_mm") or {}
+        distance = math.hypot(float(center.get("x", 0.0)) - center_x, float(center.get("y", 0.0)) - center_y)
+        score = distance - diameter * 0.12
+        if score < best_score:
+            best_feature = feature
+            best_score = score
+    return best_feature
+
+
+def _fit_rectangular_pattern_target(group: dict, cluster: dict, face_features: Sequence[dict]) -> dict | None:
+    features = [feature for feature in face_features if feature["id"] in set(group.get("feature_ids") or [])]
+    if len(features) < PATTERN_TARGET_MIN_COUNT:
+        return None
+
+    avg_width = float(group.get("avg_width_mm", 0.0) or 0.0)
+    avg_height = float(group.get("avg_height_mm", 0.0) or 0.0)
+    line_tolerance_x = max(avg_width * 0.6, 0.8)
+    line_tolerance_y = max(avg_height * 0.6, 0.8)
+    x_positions = _cluster_scalar_values([feature["center_mm"]["x"] for feature in features], line_tolerance_x)
+    y_positions = _cluster_scalar_values([feature["center_mm"]["y"] for feature in features], line_tolerance_y)
+    if len(x_positions) < 2 or len(y_positions) < 2:
+        return None
+
+    expected = max(len(x_positions) * len(y_positions), 1)
+    occupancy = len(features) / expected
+    if occupancy < 0.45:
+        return None
+
+    spacing_x = round(
+        sum(abs(right - left) for left, right in zip(x_positions, x_positions[1:])) / max(len(x_positions) - 1, 1),
+        3,
+    )
+    spacing_y = round(
+        sum(abs(right - left) for left, right in zip(y_positions, y_positions[1:])) / max(len(y_positions) - 1, 1),
+        3,
+    )
+    bounds = cluster.get("local_bounds_mm") or {}
+    min_margin = min(
+        min(float(feature["bounds_mm"]["min_x"]) - float(bounds.get("min_x", 0.0)) for feature in features),
+        min(float(bounds.get("max_x", 0.0)) - float(feature["bounds_mm"]["max_x"]) for feature in features),
+        min(float(feature["bounds_mm"]["min_y"]) - float(bounds.get("min_y", 0.0)) for feature in features),
+        min(float(bounds.get("max_y", 0.0)) - float(feature["bounds_mm"]["max_y"]) for feature in features),
+    )
+    center_hole = _detect_center_hole_for_target(cluster, face_features, set(group.get("feature_ids") or []))
+    confidence = min(0.96, 0.52 + min(occupancy, 1.0) * 0.28 + (0.08 if len(features) >= 8 else 0.0))
+    if confidence < TARGET_PRIMARY_CONFIDENCE:
+        return None
+
+    element_type = "circular_hole" if group.get("type") == "circle" else "rectangular_cutout"
+    size_text = (
+        f"{group['avg_width_mm']:.2f} mm"
+        if element_type == "circular_hole"
+        else f"{group['avg_width_mm']:.2f} × {group['avg_height_mm']:.2f} mm"
+    )
+    return {
+        "id": _target_id("target", cluster.get("face_id"), "rectangular", group.get("id")),
+        "type": "pattern_face",
+        "confidence": round(confidence, 3),
+        "label": "Rectangular repeated pattern",
+        "summary": f"{len(features)} repeated {group.get('type')} openings on a planar grid · {size_text}",
+        "preview_capability": "supported",
+        "supported_operations": ["resize_feature", "adjust_spacing", "adjust_count", "adjust_margin"],
+        "warnings": [],
+        "topology": "rectangular",
+        "element_type": element_type,
+        "face_plane": {
+            "origin": cluster.get("origin_mm"),
+            "normal": cluster.get("normal"),
+        },
+        "feature_ids": list(group.get("feature_ids") or []),
+        "face_id": cluster.get("face_id"),
+        "pattern": {
+            "element_type": element_type,
+            "count": len(features),
+            "spacing_x": spacing_x,
+            "spacing_y": spacing_y,
+            "count_x": len(x_positions),
+            "count_y": len(y_positions),
+            "margin": round(max(min_margin, 0.0), 3),
+            "center_hole_diameter": round(float(center_hole.get("diameter_mm", 0.0)), 3) if center_hole else None,
+        },
+        "dimensions": {
+            "hole_diameter": round(float(group.get("avg_width_mm", 0.0)), 3)
+            if element_type == "circular_hole"
+            else None,
+            "width": round(float(group.get("avg_width_mm", 0.0)), 3),
+            "height": round(float(group.get("avg_height_mm", 0.0)), 3),
+        },
+        "fit": {
+            "center_x": round(sum(x_positions) / len(x_positions), 3),
+            "center_y": round(sum(y_positions) / len(y_positions), 3),
+            "x_positions": x_positions,
+            "y_positions": y_positions,
+            "center_hole_feature_id": center_hole["id"] if center_hole else None,
+        },
+    }
+
+
+def _fit_radial_pattern_target(group: dict, cluster: dict, face_features: Sequence[dict]) -> dict | None:
+    features = [feature for feature in face_features if feature["id"] in set(group.get("feature_ids") or [])]
+    if len(features) < PATTERN_TARGET_MIN_COUNT:
+        return None
+
+    center_x, center_y = _face_bounds_center(cluster)
+    radii = [
+        math.hypot(float(feature["center_mm"]["x"]) - center_x, float(feature["center_mm"]["y"]) - center_y)
+        for feature in features
+    ]
+    average_size = max(float(group.get("avg_width_mm", 0.0) or 0.0), 1.0)
+    ring_tolerance = max(average_size * 0.75, 2.5)
+    ring_radii = _cluster_scalar_values(radii, ring_tolerance)
+    if len(ring_radii) < 2:
+        return None
+
+    holes_per_ring: list[int] = []
+    grouped_rings: list[list[dict]] = [[] for _ in ring_radii]
+    for feature in features:
+        radius = math.hypot(float(feature["center_mm"]["x"]) - center_x, float(feature["center_mm"]["y"]) - center_y)
+        ring_index = min(range(len(ring_radii)), key=lambda index: abs(radius - ring_radii[index]))
+        grouped_rings[ring_index].append(feature)
+    holes_per_ring = [len(bucket) for bucket in grouped_rings]
+    if max(holes_per_ring, default=0) < 4:
+        return None
+
+    spacing_values = [abs(right - left) for left, right in zip(ring_radii, ring_radii[1:]) if abs(right - left) > 1e-6]
+    radial_spacing = round(sum(spacing_values) / len(spacing_values), 3) if spacing_values else 0.0
+
+    uniformity_scores: list[float] = []
+    for radius, bucket in zip(ring_radii, grouped_rings):
+        if len(bucket) < 3 or radius <= 1e-6:
+            continue
+        angles = sorted(
+            math.atan2(float(feature["center_mm"]["y"]) - center_y, float(feature["center_mm"]["x"]) - center_x)
+            for feature in bucket
+        )
+        wrapped = angles + [angles[0] + 2.0 * math.pi]
+        gaps = [wrapped[index + 1] - wrapped[index] for index in range(len(angles))]
+        gap_mean = sum(gaps) / len(gaps)
+        gap_std = (sum((gap - gap_mean) ** 2 for gap in gaps) / len(gaps)) ** 0.5 if gaps else 0.0
+        uniformity_scores.append(max(0.0, 1.0 - (gap_std / max(gap_mean, 1e-6))))
+
+    uniformity = sum(uniformity_scores) / len(uniformity_scores) if uniformity_scores else 0.0
+    confidence = min(
+        0.97,
+        0.56 + min(uniformity, 1.0) * 0.24 + (0.1 if len(ring_radii) >= 3 else 0.0) + (0.06 if len(features) >= 12 else 0.0),
+    )
+    if confidence < TARGET_PRIMARY_CONFIDENCE:
+        return None
+
+    bounds = cluster.get("local_bounds_mm") or {}
+    representative_radius = float(group.get("avg_width_mm", 0.0) or 0.0) / 2.0
+    outer_radius = max(ring_radii, default=0.0) + representative_radius
+    radial_margin = min(
+        abs(float(bounds.get("max_x", 0.0)) - center_x) - outer_radius,
+        abs(center_x - float(bounds.get("min_x", 0.0))) - outer_radius,
+        abs(float(bounds.get("max_y", 0.0)) - center_y) - outer_radius,
+        abs(center_y - float(bounds.get("min_y", 0.0))) - outer_radius,
+    )
+    center_hole = _detect_center_hole_for_target(cluster, face_features, set(group.get("feature_ids") or []))
+    element_type = "circular_hole" if group.get("type") == "circle" else "rectangular_cutout"
+    size_text = (
+        f"{group['avg_width_mm']:.2f} mm"
+        if element_type == "circular_hole"
+        else f"{group['avg_width_mm']:.2f} × {group['avg_height_mm']:.2f} mm"
+    )
+
+    return {
+        "id": _target_id("target", cluster.get("face_id"), "radial", group.get("id")),
+        "type": "pattern_face",
+        "confidence": round(confidence, 3),
+        "label": "Radial repeated pattern",
+        "summary": f"{len(features)} repeated {group.get('type')} openings in concentric rings · {size_text}",
+        "preview_capability": "supported",
+        "supported_operations": ["resize_feature", "adjust_spacing", "adjust_count", "adjust_margin"],
+        "warnings": [],
+        "topology": "radial",
+        "element_type": element_type,
+        "face_plane": {
+            "origin": cluster.get("origin_mm"),
+            "normal": cluster.get("normal"),
+        },
+        "feature_ids": list(group.get("feature_ids") or []),
+        "face_id": cluster.get("face_id"),
+        "pattern": {
+            "element_type": element_type,
+            "count": len(features),
+            "radial_spacing": radial_spacing,
+            "ring_count": len(ring_radii),
+            "holes_per_ring": holes_per_ring,
+            "margin": round(max(radial_margin, 0.0), 3),
+            "center_hole_diameter": round(float(center_hole.get("diameter_mm", 0.0)), 3) if center_hole else None,
+        },
+        "dimensions": {
+            "hole_diameter": round(float(group.get("avg_width_mm", 0.0)), 3)
+            if element_type == "circular_hole"
+            else None,
+            "width": round(float(group.get("avg_width_mm", 0.0)), 3),
+            "height": round(float(group.get("avg_height_mm", 0.0)), 3),
+        },
+        "fit": {
+            "center_x": round(center_x, 3),
+            "center_y": round(center_y, 3),
+            "ring_radii": ring_radii,
+            "holes_per_ring": holes_per_ring,
+            "center_hole_feature_id": center_hole["id"] if center_hole else None,
+        },
+    }
+
+
+def _build_pattern_target(group: dict, cluster: dict, face_features: Sequence[dict]) -> dict | None:
+    if group.get("count", 0) < PATTERN_TARGET_MIN_COUNT:
+        return None
+    if group.get("type") not in {"circle", "rectangle"}:
+        return None
+    radial_target = _fit_radial_pattern_target(group, cluster, face_features)
+    rectangular_target = _fit_rectangular_pattern_target(group, cluster, face_features)
+    candidates: list[dict] = []
+    for candidate in (radial_target, rectangular_target):
+        if not candidate:
+            continue
+        try:
+            default_params = _normalized_target_params(candidate, None)
+            positions = _build_pattern_positions(candidate, default_params)
+            _validate_pattern_target_edit(cluster, candidate, default_params, positions)
+        except Exception:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: float(candidate.get("confidence", 0.0)))
+
+
+def _build_single_feature_targets(projection: dict) -> list[dict]:
+    candidates: list[dict] = []
+    features_by_face: dict[str, list[dict]] = {}
+    for feature in projection["features"]:
+        features_by_face.setdefault(feature["face_id"], []).append(feature)
+
+    single_candidates = [
+        feature
+        for feature in projection["features"]
+        if feature.get("type") in {"circle", "slot", "rectangle"} and _feature_major_dimension(feature) >= 6.0
+    ]
+    single_candidates.sort(
+        key=lambda feature: (
+            -_feature_major_dimension(feature),
+            feature["face_id"],
+        )
+    )
+    seen_ids: set[str] = set()
+    for feature in single_candidates[:8]:
+        if feature["id"] in seen_ids:
+            continue
+        seen_ids.add(feature["id"])
+        feature_type = (
+            "circular_hole"
+            if feature.get("type") == "circle"
+            else "slot"
+            if feature.get("type") == "slot"
+            else "rectangular_cutout"
+        )
+        face_id = feature["face_id"]
+        confidence = 0.9 if feature.get("group_id") is None else 0.76
+        label = "Single circular hole" if feature_type == "circular_hole" else "Single slot" if feature_type == "slot" else "Single rectangular cutout"
+        size_summary = (
+            f"{float(feature.get('diameter_mm', 0.0) or 0.0):.2f} mm"
+            if feature_type == "circular_hole"
+            else f"{float(feature.get('width_mm', 0.0) or 0.0):.2f} × {float(feature.get('height_mm', 0.0) or 0.0):.2f} mm"
+        )
+        candidates.append(
+            {
+                "id": _target_id("target", face_id, "single", feature["id"]),
+                "type": "single_feature",
+                "confidence": round(confidence, 3),
+                "label": label,
+                "summary": f"{label.lower()} · {size_summary}",
+                "preview_capability": "supported",
+                "supported_operations": ["resize_feature"],
+                "warnings": [],
+                "face_id": face_id,
+                "feature_type": feature_type,
+                "feature_id": feature["id"],
+                "feature_ids": [feature["id"]],
+                "dimensions": {
+                    "hole_diameter": round(float(feature.get("diameter_mm", 0.0) or 0.0), 3)
+                    if feature_type == "circular_hole"
+                    else None,
+                    "width": round(float(feature.get("width_mm", 0.0) or 0.0), 3),
+                    "height": round(float(feature.get("height_mm", 0.0) or 0.0), 3),
+                },
+            }
+        )
+    return candidates
+
+
+def _build_target_projection(analysis: dict, projection: dict | None = None) -> dict:
+    projection = projection or _build_feature_projection(analysis)
+    targets: list[dict] = []
+    unsupported_reasons: list[str] = []
+
+    features_by_face: dict[str, list[dict]] = {}
+    groups_by_face: dict[str, list[dict]] = {}
+    for feature in projection["features"]:
+        features_by_face.setdefault(feature["face_id"], []).append(feature)
+    for group in projection["groups"]:
+        groups_by_face.setdefault(group["face_id"], []).append(group)
+
+    for cluster in projection["clusters"]:
+        face_id = cluster.get("face_id")
+        face_features = features_by_face.get(face_id, [])
+        candidate_groups = groups_by_face.get(face_id, [])
+        for group in sorted(candidate_groups, key=lambda item: (-item["count"], item["avg_width_mm"])):
+            target = _build_pattern_target(group, cluster, face_features)
+            if target:
+                targets.append(target)
+
+    targets.extend(_build_single_feature_targets(projection))
+
+    deduped_targets: list[dict] = []
+    seen_target_ids: set[str] = set()
+    for target in sorted(targets, key=lambda item: (-float(item.get("confidence", 0.0)), item.get("label", ""), item["id"])):
+        if target["id"] in seen_target_ids:
+            continue
+        seen_target_ids.add(target["id"])
+        deduped_targets.append(target)
+    targets = deduped_targets
+
+    supported_targets = [target for target in targets if float(target.get("confidence", 0.0)) >= TARGET_PRIMARY_CONFIDENCE]
+    primary_target_id = supported_targets[0]["id"] if supported_targets else None
+
+    if not targets:
+        unsupported_reasons.append("No safe planar repeated pattern or isolated feature could be fit from this STL.")
+    elif not supported_targets:
+        unsupported_reasons.append("Detected editable regions were too low-confidence for the primary editor.")
+
+    return {
+        "primary_target_id": primary_target_id,
+        "targets": targets,
+        "unsupported_reasons": unsupported_reasons,
+    }
+
+
 def public_analysis_payload(analysis: dict) -> dict:
     projection = _build_feature_projection(analysis)
+    target_projection = _build_target_projection(analysis, projection)
     clusters: list[dict] = []
     for cluster in projection["clusters"]:
         openings = []
@@ -538,6 +939,9 @@ def public_analysis_payload(analysis: dict) -> dict:
         "planar_face_clusters": clusters,
         "features": projection["features"],
         "groups": projection["groups"],
+        "primary_target_id": target_projection["primary_target_id"],
+        "targets": target_projection["targets"],
+        "unsupported_reasons": target_projection["unsupported_reasons"],
     }
 
 
@@ -966,6 +1370,369 @@ def _build_opening_plug_mesh(opening: dict, cluster: dict, z_min: float, z_max: 
     return mesh
 
 
+def _resolve_target(analysis: dict, target_id: str) -> tuple[dict, dict]:
+    projection = _build_target_projection(analysis)
+    target = next((item for item in projection["targets"] if item["id"] == target_id), None)
+    if not target:
+        raise ValueError("Selected target was not found on the current model.")
+    if target.get("type") == "unsupported":
+        raise ValueError(target.get("unsupported_reason") or "This target cannot be edited safely.")
+    cluster = next(
+        (candidate for candidate in analysis.get("planar_face_clusters", []) if _stable_face_id(candidate) == target.get("face_id")),
+        None,
+    )
+    if not cluster:
+        raise ValueError("Selected target face was not found on the current model.")
+    return target, cluster
+
+
+def _feature_lookup_for_cluster(cluster: dict) -> dict[str, dict]:
+    face_id = _stable_face_id(cluster)
+    return {
+        _stable_feature_id(face_id, opening): opening
+        for opening in cluster.get("openings", [])
+    }
+
+
+def _opening_for_feature_id(cluster: dict, feature_id: str | None) -> dict | None:
+    if not feature_id:
+        return None
+    return _feature_lookup_for_cluster(cluster).get(feature_id)
+
+
+def _default_target_params(target: dict) -> dict:
+    if target.get("type") == "pattern_face":
+        pattern = target.get("pattern") or {}
+        dimensions = target.get("dimensions") or {}
+        defaults = {
+            "margin": pattern.get("margin"),
+            "center_hole_diameter": pattern.get("center_hole_diameter"),
+        }
+        if target.get("topology") == "rectangular":
+            defaults.update(
+                {
+                    "hole_diameter": dimensions.get("hole_diameter"),
+                    "width": dimensions.get("width"),
+                    "height": dimensions.get("height"),
+                    "spacing_x": pattern.get("spacing_x"),
+                    "spacing_y": pattern.get("spacing_y"),
+                    "count_x": pattern.get("count_x"),
+                    "count_y": pattern.get("count_y"),
+                }
+            )
+        else:
+            defaults.update(
+                {
+                    "hole_diameter": dimensions.get("hole_diameter"),
+                    "width": dimensions.get("width"),
+                    "height": dimensions.get("height"),
+                    "radial_spacing": pattern.get("radial_spacing"),
+                    "ring_count": pattern.get("ring_count"),
+                    "holes_per_ring": pattern.get("holes_per_ring"),
+                }
+            )
+        return defaults
+
+    dimensions = target.get("dimensions") or {}
+    return {
+        "hole_diameter": dimensions.get("hole_diameter"),
+        "width": dimensions.get("width"),
+        "height": dimensions.get("height"),
+    }
+
+
+def _numeric_or_default(params: dict, key: str, default: float | None) -> float | None:
+    if key not in params:
+        return default
+    value = params.get(key)
+    if value in ("", None):
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _int_or_default(params: dict, key: str, default: int | None) -> int | None:
+    if key not in params:
+        return default
+    value = params.get(key)
+    if value in ("", None):
+        return default
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return default
+
+
+def _normalized_target_params(target: dict, params: dict | None) -> dict:
+    params = params or {}
+    defaults = _default_target_params(target)
+    normalized = dict(defaults)
+    for key in (
+        "hole_diameter",
+        "width",
+        "height",
+        "spacing_x",
+        "spacing_y",
+        "radial_spacing",
+        "margin",
+        "center_hole_diameter",
+    ):
+        normalized[key] = _numeric_or_default(params, key, normalized.get(key))
+    for key in ("count_x", "count_y", "ring_count"):
+        normalized[key] = _int_or_default(params, key, normalized.get(key))
+    if "holes_per_ring" in params and isinstance(params.get("holes_per_ring"), list):
+        normalized["holes_per_ring"] = [max(int(round(float(value))), 1) for value in params["holes_per_ring"]]
+    return normalized
+
+
+def _build_pattern_positions(target: dict, normalized_params: dict) -> list[tuple[float, float]]:
+    fit = target.get("fit") or {}
+    topology = target.get("topology")
+    if topology == "rectangular":
+        original_x_positions = [float(value) for value in (fit.get("x_positions") or [])]
+        original_y_positions = [float(value) for value in (fit.get("y_positions") or [])]
+        original_spacing_x = float((target.get("pattern") or {}).get("spacing_x") or 0.0)
+        original_spacing_y = float((target.get("pattern") or {}).get("spacing_y") or 0.0)
+        count_x = max(int(normalized_params.get("count_x") or len(original_x_positions) or 1), 1)
+        count_y = max(int(normalized_params.get("count_y") or len(original_y_positions) or 1), 1)
+        spacing_x = max(float(normalized_params.get("spacing_x") or original_spacing_x or 0.0), 0.1)
+        spacing_y = max(float(normalized_params.get("spacing_y") or original_spacing_y or 0.0), 0.1)
+
+        use_original_x = len(original_x_positions) == count_x and abs(spacing_x - original_spacing_x) <= 0.35
+        use_original_y = len(original_y_positions) == count_y and abs(spacing_y - original_spacing_y) <= 0.35
+        if use_original_x and original_x_positions:
+            x_positions = original_x_positions
+        else:
+            center_x = float(fit.get("center_x", 0.0))
+            x_positions = [
+                round(center_x + (x_index - (count_x - 1) / 2.0) * spacing_x, 4)
+                for x_index in range(count_x)
+            ]
+        if use_original_y and original_y_positions:
+            y_positions = original_y_positions
+        else:
+            center_y = float(fit.get("center_y", 0.0))
+            y_positions = [
+                round(center_y + (y_index - (count_y - 1) / 2.0) * spacing_y, 4)
+                for y_index in range(count_y)
+            ]
+
+        positions: list[tuple[float, float]] = []
+        for x in x_positions:
+            for y in y_positions:
+                positions.append((round(x, 4), round(y, 4)))
+        return positions
+
+    center_x = float(fit.get("center_x", 0.0))
+    center_y = float(fit.get("center_y", 0.0))
+    original_ring_radii = [float(value) for value in (fit.get("ring_radii") or [])]
+    original_holes_per_ring = [max(int(value), 1) for value in (fit.get("holes_per_ring") or [])]
+    ring_count = max(int(normalized_params.get("ring_count") or len(original_ring_radii) or 1), 1)
+    radial_spacing = float(normalized_params.get("radial_spacing") or 0.0)
+    if radial_spacing <= 0 and len(original_ring_radii) > 1:
+        radial_spacing = (original_ring_radii[-1] - original_ring_radii[0]) / max(len(original_ring_radii) - 1, 1)
+    radial_spacing = max(radial_spacing, 0.1)
+    first_ring_radius = float(original_ring_radii[0]) if original_ring_radii else radial_spacing
+    if original_ring_radii and original_holes_per_ring:
+        average_arc_spacing = sum(
+            (2.0 * math.pi * radius) / max(count, 1)
+            for radius, count in zip(original_ring_radii, original_holes_per_ring)
+            if radius > 1e-6 and count > 0
+        ) / max(len(original_ring_radii), 1)
+    else:
+        average_arc_spacing = radial_spacing * 1.6
+
+    requested_holes = normalized_params.get("holes_per_ring") or []
+    positions: list[tuple[float, float]] = []
+    use_original_rings = ring_count == len(original_ring_radii) and abs(radial_spacing - float((target.get("pattern") or {}).get("radial_spacing") or radial_spacing)) <= 0.35
+    ring_radii = original_ring_radii if use_original_rings and original_ring_radii else [first_ring_radius + ring_index * radial_spacing for ring_index in range(ring_count)]
+
+    for ring_index, radius in enumerate(ring_radii[:ring_count]):
+        if ring_index < len(requested_holes):
+            hole_count = max(int(requested_holes[ring_index]), 1)
+        elif ring_index < len(original_holes_per_ring):
+            hole_count = max(int(original_holes_per_ring[ring_index]), 1)
+        else:
+            hole_count = max(int(round((2.0 * math.pi * radius) / max(average_arc_spacing, 1e-6))), 1)
+        for hole_index in range(hole_count):
+            angle = (2.0 * math.pi * hole_index) / hole_count
+            positions.append(
+                (
+                    round(center_x + math.cos(angle) * radius, 4),
+                    round(center_y + math.sin(angle) * radius, 4),
+                )
+            )
+    return positions
+
+
+def _validate_pattern_target_edit(cluster: dict, target: dict, params: dict, positions: Sequence[tuple[float, float]]) -> None:
+    bounds = cluster.get("local_bounds_mm") or {}
+    margin = max(float(params.get("margin") or 0.0), 0.0)
+    element_type = target.get("element_type")
+    if element_type == "circular_hole":
+        diameter = float(params.get("hole_diameter") or 0.0)
+        if diameter <= 0:
+            raise ValueError("Hole diameter must be greater than 0 mm.")
+        half_width = diameter / 2.0
+        half_height = diameter / 2.0
+    else:
+        width = float(params.get("width") or 0.0)
+        height = float(params.get("height") or 0.0)
+        if width <= 0 or height <= 0:
+            raise ValueError("Pattern width and height must be greater than 0 mm.")
+        half_width = width / 2.0
+        half_height = height / 2.0
+
+    min_x = float(bounds.get("min_x", 0.0)) + margin
+    max_x = float(bounds.get("max_x", 0.0)) - margin
+    min_y = float(bounds.get("min_y", 0.0)) + margin
+    max_y = float(bounds.get("max_y", 0.0)) - margin
+    for x, y in positions:
+        if x - half_width < min_x or x + half_width > max_x or y - half_height < min_y or y + half_height > max_y:
+            raise ValueError("Target exceeds face boundary or requested margin.")
+
+    min_gap = MIN_PATTERN_WALL_MM
+    for index, (left_x, left_y) in enumerate(positions):
+        for compare_index in range(index + 1, len(positions)):
+            right_x, right_y = positions[compare_index]
+            if element_type == "circular_hole":
+                center_distance = math.hypot(left_x - right_x, left_y - right_y)
+                if center_distance < (half_width + half_width + min_gap):
+                    raise ValueError("Hole overlap detected at the requested spacing.")
+            else:
+                if abs(left_x - right_x) < (half_width * 2.0 + min_gap) and abs(left_y - right_y) < (half_height * 2.0 + min_gap):
+                    raise ValueError("Cutout overlap detected at the requested spacing.")
+
+    center_hole_diameter = float(params.get("center_hole_diameter") or 0.0)
+    if center_hole_diameter > 0:
+        fit = target.get("fit") or {}
+        center_x = float(fit.get("center_x", 0.0))
+        center_y = float(fit.get("center_y", 0.0))
+        center_radius = center_hole_diameter / 2.0
+        for x, y in positions:
+            center_distance = math.hypot(x - center_x, y - center_y)
+            clearance = half_width if element_type == "circular_hole" else math.hypot(half_width, half_height)
+            if center_distance < center_radius + clearance + min_gap:
+                raise ValueError("Center hole conflicts with the repeated pattern at the requested size.")
+
+
+def _build_pattern_cutter_mesh(
+    cluster: dict,
+    target: dict,
+    params: dict,
+    positions: Sequence[tuple[float, float]],
+    z_min: float,
+    z_max: float,
+    temp_path: Path,
+) -> trimesh.Trimesh:
+    tolerance_mm = DEFAULT_TOLERANCE_MM
+    element_type = target.get("element_type")
+    hole_diameter = float(params.get("hole_diameter") or 0.0)
+    width = float(params.get("width") or 0.0)
+    height = float(params.get("height") or 0.0)
+    if element_type == "circular_hole":
+        shape = "circle"
+        width = hole_diameter
+        height = hole_diameter
+    else:
+        shape = "rectangle"
+
+    total_depth = (z_max - z_min) + tolerance_mm * 4.0
+    base_solid = _build_shape_solid(
+        shape,
+        width + tolerance_mm,
+        height + tolerance_mm,
+        hole_diameter + tolerance_mm,
+        0.0,
+        total_depth,
+    )
+    base_mesh = _export_cq_solid_to_mesh(base_solid, temp_path)
+    z_center = (z_min + z_max) / 2.0
+
+    meshes: list[trimesh.Trimesh] = []
+    for index, (x, y) in enumerate(positions, start=1):
+        clone = base_mesh.copy()
+        clone.apply_translation((x, y, z_center))
+        meshes.append(clone)
+
+    center_hole_diameter = float(params.get("center_hole_diameter") or 0.0)
+    if center_hole_diameter > 0:
+        fit = target.get("fit") or {}
+        center_mesh = _export_cq_solid_to_mesh(
+            _build_shape_solid("circle", center_hole_diameter, center_hole_diameter, center_hole_diameter, 0.0, total_depth),
+            temp_path.with_name(f"{temp_path.stem}-center{temp_path.suffix}"),
+        )
+        center_mesh.apply_translation((float(fit.get("center_x", 0.0)), float(fit.get("center_y", 0.0)), z_center))
+        meshes.append(center_mesh)
+
+    combined = trimesh.util.concatenate(meshes)
+    combined.apply_transform(_local_transform_matrix(cluster))
+    return combined
+
+
+def _build_pattern_plug_mesh(
+    cluster: dict,
+    target_openings: Sequence[dict],
+    center_hole_opening: dict | None,
+    z_min: float,
+    z_max: float,
+    temp_path: Path,
+) -> trimesh.Trimesh | None:
+    openings = list(target_openings)
+    if center_hole_opening is not None:
+        openings.append(center_hole_opening)
+    if not openings:
+        return None
+    meshes: list[trimesh.Trimesh] = []
+    for index, opening in enumerate(openings, start=1):
+        meshes.append(
+            _build_opening_plug_mesh(
+                opening,
+                cluster,
+                z_min,
+                z_max,
+                DEFAULT_TOLERANCE_MM,
+                temp_path.with_name(f"{temp_path.stem}-{index}{temp_path.suffix}"),
+            )
+        )
+    return trimesh.util.concatenate(meshes)
+
+
+def _build_legacy_request_from_target(target: dict, params: dict) -> tuple[dict, dict]:
+    feature_type = target.get("feature_type")
+    feature_id = target.get("feature_id")
+    if feature_type == "circular_hole":
+        diameter = float(params.get("hole_diameter") or 0.0)
+        edit_request = {
+            "operation": "resize_cutout",
+            "target_shape": "circle",
+            "diameter_mm": diameter,
+            "width_mm": diameter,
+            "height_mm": diameter,
+            "through_all": True,
+            "tolerance_mm": DEFAULT_TOLERANCE_MM,
+        }
+    else:
+        width = float(params.get("width") or 0.0)
+        height = float(params.get("height") or 0.0)
+        edit_request = {
+            "operation": "resize_cutout",
+            "target_shape": "rounded_slot" if feature_type == "slot" else "rectangle",
+            "width_mm": width,
+            "height_mm": height,
+            "diameter_mm": min(width, height),
+            "through_all": True,
+            "tolerance_mm": DEFAULT_TOLERANCE_MM,
+        }
+    selection = {
+        "feature_id": feature_id,
+        "scope": "one",
+    }
+    return selection, edit_request
+
+
 def _save_meshlib_mesh(mesh: mm.Mesh, path: Path) -> None:
     mm.saveMesh(mesh, str(path))
 
@@ -1041,18 +1808,139 @@ def _edit_specific_warnings(structured_edit: dict, cluster: dict) -> list[str]:
     return warnings
 
 
-def _perform_edit(
+def _perform_target_edit(
     *,
     model_id: str,
     job_id: str,
-    selection: dict,
-    edit_request: dict,
+    target_id: str,
+    params: dict | None,
     prompt: str | None,
     parent_revision_id: str | None,
     preview: bool,
 ) -> EditedModelResult:
+    base_stl_path = _resolve_base_stl(model_id, parent_revision_id)
+    base_mesh = _load_mesh(base_stl_path)
+    analysis = analyze_mesh(base_mesh)
+    target, cluster = _resolve_target(analysis, target_id)
+    normalized_params = _normalized_target_params(target, params)
+
+    if target.get("type") == "single_feature":
+        selection, edit_request = _build_legacy_request_from_target(target, normalized_params)
+        return _perform_edit(
+            model_id=model_id,
+            job_id=job_id,
+            selection=selection,
+            edit_request=edit_request,
+            prompt=prompt,
+            parent_revision_id=parent_revision_id,
+            preview=preview,
+            target_id=None,
+            params=None,
+        )
+
+    frame = cluster["local_frame"]
+    origin = np.asarray(cluster["origin_mm"], dtype=float)
+    x_axis = np.asarray(frame["x_axis"], dtype=float)
+    y_axis = np.asarray(frame["y_axis"], dtype=float)
+    z_axis = np.asarray(frame["z_axis"], dtype=float)
+    local_vertices = _project_points(np.asarray(base_mesh.vertices, dtype=float), origin, x_axis, y_axis, z_axis)
+    z_min = float(local_vertices[:, 2].min())
+    z_max = float(local_vertices[:, 2].max())
+
+    positions = _build_pattern_positions(target, normalized_params)
+    _validate_pattern_target_edit(cluster, target, normalized_params, positions)
+
+    opening_lookup = _feature_lookup_for_cluster(cluster)
+    target_openings = [opening_lookup[feature_id] for feature_id in target.get("feature_ids", []) if feature_id in opening_lookup]
+    center_hole_opening = _opening_for_feature_id(cluster, (target.get("fit") or {}).get("center_hole_feature_id"))
+
+    job_dir = _job_dir(job_id)
+    analysis_path = job_dir / "analysis.json"
+    preview_glb_path = job_dir / "preview.glb"
+    result_glb_path = preview_glb_path if preview else job_dir / "model.glb"
+    result_stl_path = job_dir / "model.stl"
+
+    cutter_mesh = _build_pattern_cutter_mesh(
+        cluster,
+        target,
+        normalized_params,
+        positions,
+        z_min,
+        z_max,
+        job_dir / "pattern-cutter.stl",
+    )
+    plug_mesh = _build_pattern_plug_mesh(
+        cluster,
+        target_openings,
+        center_hole_opening if normalized_params.get("center_hole_diameter") is not None else None,
+        z_min,
+        z_max,
+        job_dir / "pattern-plug.stl",
+    )
+
+    edited_stl_path, fallback_strategy_used = _run_edit_boolean_chain(base_stl_path, plug_mesh, cutter_mesh, job_dir)
+    edited_mesh = _load_mesh(edited_stl_path)
+    edited_mesh.export(result_stl_path)
+    _write_glb(edited_mesh, result_glb_path)
+    validation = validate_mesh_file(result_stl_path)
+
+    current_analysis = analyze_mesh(edited_mesh)
+    _write_analysis(analysis_path, current_analysis)
+    structured_edit = {
+        "editor_type": "pattern_face",
+        "target_id": target_id,
+        "target_type": target.get("topology"),
+        "params": normalized_params,
+        "selection": {
+            "target_id": target_id,
+            "face_id": target.get("face_id"),
+            "feature_ids": target.get("feature_ids"),
+        },
+        "prompt": prompt or "",
+    }
+
+    warnings = list(dict.fromkeys([*(validation.get("warnings") or []), *target.get("warnings", [])]))
+    return EditedModelResult(
+        job_id=job_id,
+        model_id=model_id,
+        glb_path=result_glb_path,
+        stl_path=result_stl_path,
+        analysis=current_analysis,
+        structured_edit=structured_edit,
+        validation=validation,
+        warnings=warnings,
+        fallback_strategy_used=fallback_strategy_used,
+    )
+
+
+def _perform_edit(
+    *,
+    model_id: str,
+    job_id: str,
+    selection: dict | None,
+    edit_request: dict | None,
+    prompt: str | None,
+    parent_revision_id: str | None,
+    preview: bool,
+    target_id: str | None = None,
+    params: dict | None = None,
+) -> EditedModelResult:
     if cq_exporters is None:
         raise RuntimeError("CadQuery is not available for model editing.")
+
+    if target_id:
+        return _perform_target_edit(
+            model_id=model_id,
+            job_id=job_id,
+            target_id=target_id,
+            params=params,
+            prompt=prompt,
+            parent_revision_id=parent_revision_id,
+            preview=preview,
+        )
+
+    if selection is None or edit_request is None:
+        raise ValueError("Legacy edit flow requires selection and edit_request.")
 
     base_stl_path = _resolve_base_stl(model_id, parent_revision_id)
     base_mesh = _load_mesh(base_stl_path)
@@ -1130,10 +2018,12 @@ def preview_edit(
     *,
     model_id: str,
     job_id: str,
-    selection: dict,
-    edit_request: dict,
+    selection: dict | None,
+    edit_request: dict | None,
     prompt: str | None = None,
     parent_revision_id: str | None = None,
+    target_id: str | None = None,
+    params: dict | None = None,
 ) -> EditedModelResult:
     return _perform_edit(
         model_id=model_id,
@@ -1143,6 +2033,8 @@ def preview_edit(
         prompt=prompt,
         parent_revision_id=parent_revision_id,
         preview=True,
+        target_id=target_id,
+        params=params,
     )
 
 
@@ -1150,10 +2042,12 @@ def apply_edit(
     *,
     model_id: str,
     job_id: str,
-    selection: dict,
-    edit_request: dict,
+    selection: dict | None,
+    edit_request: dict | None,
     prompt: str | None = None,
     parent_revision_id: str | None = None,
+    target_id: str | None = None,
+    params: dict | None = None,
 ) -> EditedModelResult:
     return _perform_edit(
         model_id=model_id,
@@ -1163,4 +2057,6 @@ def apply_edit(
         prompt=prompt,
         parent_revision_id=parent_revision_id,
         preview=False,
+        target_id=target_id,
+        params=params,
     )

@@ -212,8 +212,10 @@ class AnalyzeModelResponse(BaseModel):
 class EditPreviewRequest(BaseModel):
     model_id: str
     parent_revision_id: str | None = None
-    selection: dict
-    edit_request: dict
+    selection: dict | None = None
+    edit_request: dict | None = None
+    target_id: str | None = None
+    params: dict | None = None
     prompt: str | None = None
     job_id: str | None = None
     project_id: str | None = None
@@ -235,8 +237,10 @@ class ApplyEditRequest(BaseModel):
     model_id: str
     preview_revision_id: str | None = None
     parent_revision_id: str | None = None
-    selection: dict
-    edit_request: dict
+    selection: dict | None = None
+    edit_request: dict | None = None
+    target_id: str | None = None
+    params: dict | None = None
     prompt: str | None = None
     job_id: str | None = None
     project_id: str | None = None
@@ -619,6 +623,8 @@ def preview_edit_endpoint(request: EditPreviewRequest) -> EditPreviewResponse:
                 "model_id": request.model_id,
                 "selection": request.selection,
                 "edit_request": request.edit_request,
+                "target_id": request.target_id,
+                "params": request.params,
                 "input.prompt_final": request.prompt,
             }
         ),
@@ -630,6 +636,8 @@ def preview_edit_endpoint(request: EditPreviewRequest) -> EditPreviewResponse:
             job_id=job_id,
             selection=request.selection,
             edit_request=request.edit_request,
+            target_id=request.target_id,
+            params=request.params,
             prompt=request.prompt,
             parent_revision_id=request.parent_revision_id,
         )
@@ -650,6 +658,8 @@ def preview_edit_endpoint(request: EditPreviewRequest) -> EditPreviewResponse:
             "mesh_analysis": analysis_payload,
             "selection": request.selection,
             "edit_request": request.edit_request,
+            "target_id": request.target_id,
+            "params": request.params,
             "structured_edit": preview.structured_edit,
             "validation": preview.validation,
             "fallback_strategy_used": preview.fallback_strategy_used,
@@ -665,6 +675,8 @@ def preview_edit_endpoint(request: EditPreviewRequest) -> EditPreviewResponse:
             "revision_type": "preview_edit",
             "selection": request.selection,
             "edit_request": request.edit_request,
+            "target_id": request.target_id,
+            "params": request.params,
             "structured_edit": preview.structured_edit,
             "mesh_analysis": analysis_payload,
             "preview_artifacts": {"glb_url": glb_url, "stl_url": stl_url},
@@ -703,6 +715,8 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
                 "model_id": request.model_id,
                 "selection": request.selection,
                 "edit_request": request.edit_request,
+                "target_id": request.target_id,
+                "params": request.params,
                 "input.prompt_final": request.prompt,
             }
         ),
@@ -728,7 +742,14 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
             shutil.copy(source_glb, final_glb)
             validation = validate_mesh_file(final_stl)
             analysis = analyze_model(request.model_id, request.preview_revision_id)
-            structured_edit = dict(request.edit_request)
+            structured_edit = (
+                {
+                    "target_id": request.target_id,
+                    "params": request.params or {},
+                }
+                if request.target_id
+                else dict(request.edit_request or {})
+            )
             fallback_strategy_used = None
             gcode_generated = _slice_mesh(final_stl, target_dir / "output.gcode")
             validation["gcode_status"] = "generated" if gcode_generated else "not_generated"
@@ -748,6 +769,8 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
                 job_id=job_id,
                 selection=request.selection,
                 edit_request=request.edit_request,
+                target_id=request.target_id,
+                params=request.params,
                 prompt=request.prompt,
                 parent_revision_id=parent_revision_id,
             )

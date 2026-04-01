@@ -107,6 +107,48 @@ type ModelAnalysis = {
   planar_face_clusters: PlanarFaceCluster[];
   features?: FeatureSummary[];
   groups?: FeatureGroupSummary[];
+  primary_target_id?: string | null;
+  targets?: ExistingModelTarget[];
+  unsupported_reasons?: string[];
+};
+
+type ExistingModelTarget = {
+  id: string;
+  type: "pattern_face" | "single_feature" | "unsupported";
+  confidence: number;
+  label: string;
+  summary: string;
+  preview_capability: "supported" | "limited" | "unsupported";
+  supported_operations: string[];
+  warnings: string[];
+  unsupported_reason?: string | null;
+  topology?: "rectangular" | "radial";
+  face_id?: string;
+  face_plane?: {
+    origin: [number, number, number];
+    normal: [number, number, number];
+  };
+  pattern?: {
+    element_type: "circular_hole" | "rectangular_cutout";
+    count: number;
+    spacing_x?: number;
+    spacing_y?: number;
+    count_x?: number;
+    count_y?: number;
+    radial_spacing?: number;
+    ring_count?: number;
+    holes_per_ring?: number[];
+    margin?: number;
+    center_hole_diameter?: number | null;
+  };
+  dimensions?: {
+    hole_diameter?: number | null;
+    width?: number | null;
+    height?: number | null;
+  };
+  feature_type?: "circular_hole" | "slot" | "rectangular_cutout";
+  feature_id?: string;
+  feature_ids?: string[];
 };
 
 type FeatureSelection = {
@@ -366,6 +408,68 @@ const describeCluster = (cluster: PlanarFaceCluster) => {
   return `${cluster.cluster_id} · solid face`;
 };
 
+const defaultTargetParams = (target: ExistingModelTarget | null) => {
+  if (!target) return {} as Record<string, string>;
+  if (target.type === "pattern_face") {
+    return {
+      hole_diameter: target.dimensions?.hole_diameter != null ? String(target.dimensions.hole_diameter) : "",
+      width: target.dimensions?.width != null ? String(target.dimensions.width) : "",
+      height: target.dimensions?.height != null ? String(target.dimensions.height) : "",
+      spacing_x: target.pattern?.spacing_x != null ? String(target.pattern.spacing_x) : "",
+      spacing_y: target.pattern?.spacing_y != null ? String(target.pattern.spacing_y) : "",
+      count_x: target.pattern?.count_x != null ? String(target.pattern.count_x) : "",
+      count_y: target.pattern?.count_y != null ? String(target.pattern.count_y) : "",
+      radial_spacing: target.pattern?.radial_spacing != null ? String(target.pattern.radial_spacing) : "",
+      ring_count: target.pattern?.ring_count != null ? String(target.pattern.ring_count) : "",
+      margin: target.pattern?.margin != null ? String(target.pattern.margin) : "",
+      center_hole_diameter:
+        target.pattern?.center_hole_diameter != null ? String(target.pattern.center_hole_diameter) : "",
+    };
+  }
+  return {
+    hole_diameter: target.dimensions?.hole_diameter != null ? String(target.dimensions.hole_diameter) : "",
+    width: target.dimensions?.width != null ? String(target.dimensions.width) : "",
+    height: target.dimensions?.height != null ? String(target.dimensions.height) : "",
+  };
+};
+
+const buildTargetParamsPayload = (target: ExistingModelTarget, params: Record<string, string>) => {
+  const payload: Record<string, unknown> = {};
+  const assignNumber = (key: string) => {
+    const value = params[key];
+    if (value === undefined || value === "") return;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) payload[key] = parsed;
+  };
+  if (target.type === "pattern_face") {
+    if (target.pattern?.element_type === "circular_hole") {
+      assignNumber("hole_diameter");
+    } else {
+      assignNumber("width");
+      assignNumber("height");
+    }
+    if (target.topology === "rectangular") {
+      assignNumber("spacing_x");
+      assignNumber("spacing_y");
+      assignNumber("count_x");
+      assignNumber("count_y");
+    } else if (target.topology === "radial") {
+      assignNumber("radial_spacing");
+      assignNumber("ring_count");
+    }
+    assignNumber("margin");
+    assignNumber("center_hole_diameter");
+  } else {
+    if (target.feature_type === "circular_hole") {
+      assignNumber("hole_diameter");
+    } else {
+      assignNumber("width");
+      assignNumber("height");
+    }
+  }
+  return payload;
+};
+
 export default function ExistingModelPanel({
   onModelUrl,
   onSourceModelUrl,
@@ -385,6 +489,11 @@ export default function ExistingModelPanel({
   const [lastError, setLastError] = useState<string | null>(null);
   const [imported, setImported] = useState<ImportModelResponse | null>(null);
   const [analysis, setAnalysis] = useState<ModelAnalysis | null>(null);
+  const [editorState, setEditorState] = useState<
+    "idle" | "analyzed" | "target_selected" | "dirty" | "preview_loading" | "preview_ready" | "preview_failed"
+  >("idle");
+  const [selectedTargetId, setSelectedTargetId] = useState("");
+  const [targetParams, setTargetParams] = useState<Record<string, string>>({});
   const [featureSelection, setFeatureSelection] = useState<FeatureSelection | null>(null);
   const [selectedClusterId, setSelectedClusterId] = useState("");
   const [selectedOpeningId, setSelectedOpeningId] = useState("");
@@ -477,6 +586,19 @@ export default function ExistingModelPanel({
     );
   }, [analysis?.groups, selectedCluster]);
 
+  const supportedTargets = useMemo(
+    () =>
+      (analysis?.targets || []).filter(
+        (target) => target.type !== "unsupported" && target.preview_capability !== "unsupported"
+      ),
+    [analysis?.targets]
+  );
+
+  const activeTarget = useMemo(
+    () => supportedTargets.find((target) => target.id === selectedTargetId) || null,
+    [selectedTargetId, supportedTargets]
+  );
+
   const activeFeatureGroup = useMemo(() => {
     if (!selectedFeature) return null;
     const explicitGroup = featureSelection?.groupId
@@ -525,14 +647,14 @@ export default function ExistingModelPanel({
         : selectedFeature?.type === "rectangle"
           ? "rectangular cutout"
           : "feature";
-  const selectedTargetHeadline = activeFeatureGroup
+  const legacySelectedTargetHeadline = activeFeatureGroup
     ? applyToSimilar && activeFeatureGroup.count > 1
       ? `${activeFeatureGroup.count} similar ${selectedTypeLabel}s selected`
       : `1 ${selectedTypeLabel} selected from a repeated group`
     : selectedFeature
       ? `1 ${selectedTypeLabel} selected`
       : "No feature selected yet";
-  const selectedTargetDetail = selectedFeature
+  const legacySelectedTargetDetail = selectedFeature
     ? usesDiameterField
       ? `Current diameter ${Number(diameterMm || 0).toFixed(2)} mm on ${selectedCluster?.face_id || selectedCluster?.cluster_id || "the active face"}.`
       : `Current size ${Number(widthMm || 0).toFixed(2)} × ${Number(heightMm || 0).toFixed(2)} mm on ${selectedCluster?.face_id || selectedCluster?.cluster_id || "the active face"}.`
@@ -607,12 +729,71 @@ export default function ExistingModelPanel({
     Boolean(imported && selectedFeature) &&
     currentDraftSignature !== lastPreviewSignature;
 
+  const selectedTargetHeadline = activeTarget
+    ? activeTarget.label
+    : supportedTargets.length
+      ? "Pick a detected target"
+      : "No supported target detected yet";
+  const selectedTargetDetail = activeTarget
+    ? activeTarget.summary
+    : analysis?.unsupported_reasons?.[0] || "Import an STL to detect supported editable targets.";
+  const targetCountSummary =
+    activeTarget?.type === "pattern_face" && activeTarget.pattern
+      ? `${activeTarget.pattern.count} repeated openings detected`
+      : activeTarget?.type === "single_feature"
+        ? "Single editable feature"
+        : null;
+  const targetDirty =
+    Boolean(activeTarget) &&
+    JSON.stringify(defaultTargetParams(activeTarget)) !== JSON.stringify(targetParams) &&
+    editorState !== "preview_loading";
+
   useEffect(() => {
     if (!sortedClusters.length) return;
     if (!selectedClusterId || !sortedClusters.some((cluster) => cluster.cluster_id === selectedClusterId)) {
       setSelectedClusterId(sortedClusters[0].cluster_id);
     }
   }, [selectedClusterId, sortedClusters]);
+
+  useEffect(() => {
+    if (!analysis) return;
+    const availableIds = new Set(supportedTargets.map((target) => target.id));
+    if (selectedTargetId && availableIds.has(selectedTargetId)) {
+      return;
+    }
+    const nextTargetId =
+      (analysis.primary_target_id && availableIds.has(analysis.primary_target_id)
+        ? analysis.primary_target_id
+        : supportedTargets[0]?.id) || "";
+    if (nextTargetId) {
+      setSelectedTargetId(nextTargetId);
+      setEditorState("target_selected");
+    }
+  }, [analysis, selectedTargetId, supportedTargets]);
+
+  useEffect(() => {
+    if (!activeTarget) return;
+    setTargetParams(defaultTargetParams(activeTarget));
+    setEditorState("target_selected");
+
+    if (activeTarget.face_id && analysis) {
+      const cluster = analysis.planar_face_clusters.find((candidate) => candidate.face_id === activeTarget.face_id);
+      if (cluster) {
+        setSelectedClusterId(cluster.cluster_id);
+      }
+    }
+    if (activeTarget.feature_id && analysis?.features) {
+      const feature = analysis.features.find((candidate) => candidate.id === activeTarget.feature_id);
+      if (feature) {
+        setSelectedOpeningId(feature.opening_id);
+        setFeatureSelection({
+          featureId: feature.id,
+          groupId: feature.group_id || null,
+          scope: "one",
+        });
+      }
+    }
+  }, [activeTarget?.id]);
 
   useEffect(() => {
     if (!selectedCluster) return;
@@ -713,15 +894,57 @@ export default function ExistingModelPanel({
     });
     setSelectedClusterId(match.clusterId);
     setSelectedOpeningId(match.openingId);
+    const matchedTarget =
+      analysis.targets?.find((target) => target.feature_id === match.featureId) ||
+      analysis.targets?.find((target) => target.feature_ids?.includes(match.featureId));
+    if (matchedTarget) {
+      setSelectedTargetId(matchedTarget.id);
+      setEditorState("target_selected");
+    }
     const matchedGroup = analysis.groups?.find((group) => group.id === match.groupId);
     setViewerSelectionMessage(
-      matchedGroup && match.scope === "group"
-        ? `Picked ${matchedGroup.count} similar ${matchedGroup.type} features from the 3D view.`
-        : `Picked ${match.openingId} from the 3D view.`
+      matchedTarget
+        ? `Picked ${matchedTarget.label.toLowerCase()} from the 3D view.`
+        : matchedGroup && match.scope === "group"
+          ? `Picked ${matchedGroup.count} similar ${matchedGroup.type} features from the 3D view.`
+          : `Picked ${match.openingId} from the 3D view.`
     );
   }, [analysis, lastSelectionHintKey, viewerSelectionHint]);
 
   useEffect(() => {
+    if (activeTarget?.type === "pattern_face" && activeTarget.feature_ids?.length && analysis?.features?.length) {
+      const cluster = analysis.planar_face_clusters.find((candidate) => candidate.face_id === activeTarget.face_id);
+      const targetFeatures = activeTarget.feature_ids
+        .map((featureId) => analysis.features?.find((feature) => feature.id === featureId))
+        .filter((feature): feature is FeatureSummary => Boolean(feature));
+      if (cluster && targetFeatures.length) {
+        const representative = targetFeatures[Math.floor(targetFeatures.length / 2)];
+        const worldPoint = featureCenterToWorldPoint(representative, cluster);
+        if (worldPoint) {
+          onSelectionMarker?.({
+            point: worldPoint,
+            label: `${activeTarget.label}${targetCountSummary ? ` · ${targetCountSummary}` : ""}`,
+          });
+          return;
+        }
+      }
+    }
+
+    if (activeTarget?.type === "single_feature" && activeTarget.feature_id && analysis?.features?.length) {
+      const feature = analysis.features.find((candidate) => candidate.id === activeTarget.feature_id);
+      const cluster = analysis.planar_face_clusters.find((candidate) => candidate.face_id === activeTarget.face_id || candidate.cluster_id === feature?.cluster_id);
+      if (feature && cluster) {
+        const worldPoint = featureCenterToWorldPoint(feature, cluster);
+        if (worldPoint) {
+          onSelectionMarker?.({
+            point: worldPoint,
+            label: activeTarget.label,
+          });
+          return;
+        }
+      }
+    }
+
     if (!selectedFeature || !selectedCluster) {
       onSelectionMarker?.(null);
       return;
@@ -735,7 +958,7 @@ export default function ExistingModelPanel({
       point: worldPoint,
       label: viewerSelectionLabel,
     });
-  }, [onSelectionMarker, selectedCluster, selectedFeature, viewerSelectionLabel]);
+  }, [activeTarget, analysis?.features, analysis?.planar_face_clusters, onSelectionMarker, selectedCluster, selectedFeature, targetCountSummary, viewerSelectionLabel]);
 
   const resetOutputs = () => {
     onStlUrl(null);
@@ -766,6 +989,9 @@ export default function ExistingModelPanel({
       const data = (await response.json()) as ImportModelResponse;
       setImported(data);
       setAnalysis(data.analysis);
+      setEditorState("analyzed");
+      setSelectedTargetId(data.analysis.primary_target_id || "");
+      setTargetParams({});
       setFeatureSelection(null);
       onSelectionMarker?.(null);
       setLastPreviewSignature(null);
@@ -775,7 +1001,7 @@ export default function ExistingModelPanel({
       setPreviewJobId(null);
       onSourceModelUrl(resolveUrl(backendUrl, data.source_glb_url));
       onModelUrl(resolveUrl(backendUrl, data.source_glb_url));
-      onStlUrl(resolveUrl(backendUrl, data.source_stl_url));
+      onStlUrl(null);
       setStatus("selecting");
       void refreshProjects();
     } catch (error) {
@@ -804,6 +1030,7 @@ export default function ExistingModelPanel({
       if (!response.ok) throw new Error("Could not refresh mesh analysis");
       const data = (await response.json()) as AnalyzeModelResponse;
       setAnalysis(data.analysis);
+      setEditorState("analyzed");
     } catch (error) {
       console.error(error);
       setStatus("error");
@@ -820,6 +1047,7 @@ export default function ExistingModelPanel({
       applyToSimilar && activeFeatureGroup?.opening_ids?.length ? activeFeatureGroup.opening_ids : undefined;
     return {
       model_id: imported?.model_id,
+      parent_revision_id: previewJobId,
       preview_revision_id: previewJobId,
       selection: {
         planar_face_id: selectedFeature?.cluster_id || selectedClusterId,
@@ -848,6 +1076,19 @@ export default function ExistingModelPanel({
         center_x_mm: Number(centerX) || 0,
         center_y_mm: Number(centerY) || 0,
       },
+      prompt,
+      project_id: activeProjectId,
+    };
+  };
+
+  const buildTargetPreviewPayload = () => {
+    if (!activeTarget) return null;
+    return {
+      model_id: imported?.model_id,
+      parent_revision_id: previewJobId,
+      preview_revision_id: previewJobId,
+      target_id: activeTarget.id,
+      params: buildTargetParamsPayload(activeTarget, targetParams),
       prompt,
       project_id: activeProjectId,
     };
@@ -889,18 +1130,19 @@ export default function ExistingModelPanel({
   };
 
   const handlePreviewEdit = async () => {
-    if (!imported || !selectedClusterId || isProcessing) return;
+    if (!imported || (!selectedClusterId && !activeTarget) || isProcessing) return;
     setIsProcessing(true);
     setLastError(null);
     resetOutputs();
     try {
       setStatus("previewing");
+      setEditorState("preview_loading");
       const response = await fetchWithTimeout(
         `${backendUrl}/preview-edit`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildEditPayload()),
+          body: JSON.stringify(activeTarget ? buildTargetPreviewPayload() : buildEditPayload()),
         },
         TIMEOUTS.preview
       );
@@ -920,10 +1162,12 @@ export default function ExistingModelPanel({
       onStlUrl(resolveUrl(backendUrl, data.stl_url));
       onBundleUrl(null);
       setStatus("ready");
+      setEditorState("preview_ready");
       void refreshProjects();
     } catch (error) {
       console.error(error);
       setStatus("error");
+      setEditorState("preview_failed");
       setLastError((error as Error).message || "Something went wrong.");
     } finally {
       setIsProcessing(false);
@@ -931,7 +1175,7 @@ export default function ExistingModelPanel({
   };
 
   const handleApplyEdit = async () => {
-    if (!imported || !selectedClusterId || isProcessing) return;
+    if (!imported || (!selectedClusterId && !activeTarget) || isProcessing) return;
     setIsProcessing(true);
     setLastError(null);
     try {
@@ -941,7 +1185,7 @@ export default function ExistingModelPanel({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildEditPayload()),
+          body: JSON.stringify(activeTarget ? buildTargetPreviewPayload() : buildEditPayload()),
         },
         TIMEOUTS.apply
       );
@@ -961,10 +1205,12 @@ export default function ExistingModelPanel({
       onGcodeUrl(resolveUrl(backendUrl, data.gcode_url));
       onBundleUrl(resolveUrl(backendUrl, data.bundle_url));
       setStatus("ready");
+      setEditorState("preview_ready");
       void refreshProjects();
     } catch (error) {
       console.error(error);
       setStatus("error");
+      setEditorState("preview_failed");
       setLastError((error as Error).message || "Something went wrong.");
     } finally {
       setIsProcessing(false);
@@ -973,7 +1219,14 @@ export default function ExistingModelPanel({
 
   const selectionSummary = selectedCluster
     ? `${selectedCluster.area_mm2.toFixed(0)} mm² editable face · ${selectedCluster.openings.length} detected openings`
-    : "Import an STL to detect editable features";
+    : activeTarget?.type === "pattern_face" && activeTarget.pattern
+      ? `${activeTarget.pattern.count} detected openings in the selected pattern`
+      : "Import an STL to detect editable features";
+
+  const updateTargetParam = (key: string, value: string) => {
+    setTargetParams((current) => ({ ...current, [key]: value }));
+    setEditorState("dirty");
+  };
 
   return (
     <section className="panel">
@@ -988,11 +1241,13 @@ export default function ExistingModelPanel({
       <div className="panel-body">
         <div className="status-card">
           <div className="status-label">Current stage</div>
-          <div className="status-value">{humanStatus(status)}</div>
+          <div className="status-value">{editorState.replace(/_/g, " ")}</div>
           <div className="intent muted">
-            {selectedCluster
+            {activeTarget
               ? `${selectedTargetHeadline}. ${selectionSummary}.`
-              : "Upload an STL first, then choose a detected feature to edit."}
+              : analysis
+                ? "Choose one of the detected targets to begin editing."
+                : "Upload an STL first, then choose a detected target to edit."}
           </div>
         </div>
 
@@ -1098,81 +1353,297 @@ export default function ExistingModelPanel({
 
         {analysis ? (
           <div className="project-summary">
-            <div className="status-label">Quick target</div>
-            {selectedCluster ? (
-              <>
-                <div className="muted">
-                  Editing {describeCluster(selectedCluster)}. Choose the kind of feature you want to change.
-                </div>
-                {selectedFeatureGroups.length ? (
-                  <div className="target-group-list">
-                    {selectedFeatureGroups.map((group) => (
-                      <button
-                        key={group.id}
-                        type="button"
-                        className={`target-group-card ${activeFeatureGroup?.id === group.id ? "active" : ""}`}
-                        onClick={() => {
-                          const representativeFeature = analysis?.features?.find(
-                            (feature) => feature.id === group.representative_feature_id
-                          );
-                          if (!representativeFeature) return;
-                          setFeatureSelection({
-                            featureId: representativeFeature.id,
-                            groupId: group.id,
-                            scope: group.count > 1 ? "group" : "one",
-                          });
-                          setSelectedClusterId(group.cluster_id);
-                          setSelectedOpeningId(representativeFeature.opening_id);
-                        }}
-                        disabled={isProcessing}
-                      >
-                        <strong>{group.title}</strong>
-                        <span>{group.summary}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="muted">This face has no detected openings to target.</div>
-                )}
-                {activeFeatureGroup ? (
-                  <div className="project-summary">
-                    <div className="status-label">Scope</div>
-                    <div className="text-input-actions">
-                      <button
-                        type="button"
-                        className={`text-submit ${!applyToSimilar ? "secondary-action" : ""}`}
-                        onClick={() =>
-                          setFeatureSelection((current) =>
-                            current ? { ...current, scope: "one" } : current
-                          )
-                        }
-                        disabled={isProcessing}
-                      >
-                        Change one opening
-                      </button>
-                      <button
-                        type="button"
-                        className={`text-submit ${applyToSimilar ? "" : "secondary-action"}`}
-                        onClick={() =>
-                          setFeatureSelection((current) =>
-                            current ? { ...current, scope: "group", groupId: activeFeatureGroup.id } : current
-                          )
-                        }
-                        disabled={isProcessing || !isRepeatedGroup}
-                      >
-                        Change all similar openings
-                      </button>
-                    </div>
-                    <div className="muted">{scopeSummary}</div>
-                  </div>
-                ) : null}
-              </>
+            <div className="status-label">Detected targets</div>
+            {supportedTargets.length ? (
+              <div className="target-group-list">
+                {supportedTargets.map((target) => (
+                  <button
+                    key={target.id}
+                    type="button"
+                    className={`target-group-card ${activeTarget?.id === target.id ? "active" : ""}`}
+                    onClick={() => {
+                      setSelectedTargetId(target.id);
+                      setEditorState("target_selected");
+                    }}
+                    disabled={isProcessing}
+                  >
+                    <strong>{target.label}</strong>
+                    <span>{target.summary}</span>
+                    <span className="muted">Confidence {Math.round(target.confidence * 100)}%</span>
+                  </button>
+                ))}
+              </div>
             ) : (
-              <div className="muted">Import an STL to detect editable openings.</div>
+              <div className="warning-list">
+                {(analysis.unsupported_reasons?.length
+                  ? analysis.unsupported_reasons
+                  : ["No supported semantic target detected on this STL."]).map((reason) => (
+                  <span key={reason} className="warning-chip">
+                    {reason}
+                  </span>
+                ))}
+              </div>
             )}
+          </div>
+        ) : null}
 
-            <details className="advanced-panel">
-              <summary>Advanced selection</summary>
+        {activeTarget ? (
+          <div className="project-summary">
+            <div className="status-label">Selected target</div>
+            <div className="analysis-grid">
+              <span>{activeTarget.label}</span>
+              <span>{activeTarget.type === "pattern_face" ? `${activeTarget.topology} pattern` : activeTarget.feature_type}</span>
+              {targetCountSummary ? <span>{targetCountSummary}</span> : null}
+            </div>
+            <div className="muted">{selectedTargetDetail}</div>
+            {activeTarget.warnings?.length ? (
+              <div className="warning-list">
+                {activeTarget.warnings.map((warning) => (
+                  <span key={warning} className="warning-chip">
+                    {warning}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {viewerSelectionMessage ? (
+              <div className="chip chip-warm">{viewerSelectionMessage}</div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {activeTarget ? (
+          <form
+            className="field-row"
+            onSubmit={(event: FormEvent<HTMLFormElement>) => {
+              event.preventDefault();
+              void handlePreviewEdit();
+            }}
+          >
+            <div className="project-summary">
+              <div className="status-label">Preview state</div>
+              <div className="validation-headline">{selectedTargetHeadline}</div>
+              <div className="muted">{selectedTargetDetail}</div>
+              <div className="warning-list">
+                <span className="chip">{editorState.replace(/_/g, " ")}</span>
+                {targetCountSummary ? <span className="chip">{targetCountSummary}</span> : null}
+                {targetDirty ? <span className="chip chip-warm">Draft changed</span> : null}
+              </div>
+              {lastError ? <div className="warning-chip">{lastError}</div> : null}
+            </div>
+
+            <div className="spec-grid">
+              {activeTarget.type === "pattern_face" && activeTarget.pattern?.element_type === "circular_hole" ? (
+                <label className="field-row compact-field">
+                  <span>Hole diameter mm</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    value={targetParams.hole_diameter || ""}
+                    onChange={(event) => updateTargetParam("hole_diameter", event.target.value)}
+                    disabled={isProcessing}
+                  />
+                </label>
+              ) : null}
+              {activeTarget.type === "pattern_face" && activeTarget.pattern?.element_type === "rectangular_cutout" ? (
+                <>
+                  <label className="field-row compact-field">
+                    <span>Width mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.width || ""}
+                      onChange={(event) => updateTargetParam("width", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  <label className="field-row compact-field">
+                    <span>Height mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.height || ""}
+                      onChange={(event) => updateTargetParam("height", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {activeTarget.type === "single_feature" && activeTarget.feature_type === "circular_hole" ? (
+                <label className="field-row compact-field">
+                  <span>Diameter mm</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    value={targetParams.hole_diameter || ""}
+                    onChange={(event) => updateTargetParam("hole_diameter", event.target.value)}
+                    disabled={isProcessing}
+                  />
+                </label>
+              ) : null}
+              {activeTarget.type === "single_feature" &&
+              activeTarget.feature_type &&
+              activeTarget.feature_type !== "circular_hole" ? (
+                <>
+                  <label className="field-row compact-field">
+                    <span>Width mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.width || ""}
+                      onChange={(event) => updateTargetParam("width", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  <label className="field-row compact-field">
+                    <span>Height mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.height || ""}
+                      onChange={(event) => updateTargetParam("height", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {activeTarget.type === "pattern_face" && activeTarget.topology === "rectangular" ? (
+                <>
+                  <label className="field-row compact-field">
+                    <span>Spacing X mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.spacing_x || ""}
+                      onChange={(event) => updateTargetParam("spacing_x", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  <label className="field-row compact-field">
+                    <span>Spacing Y mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.spacing_y || ""}
+                      onChange={(event) => updateTargetParam("spacing_y", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  <label className="field-row compact-field">
+                    <span>Count X</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min="1"
+                      step="1"
+                      value={targetParams.count_x || ""}
+                      onChange={(event) => updateTargetParam("count_x", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  <label className="field-row compact-field">
+                    <span>Count Y</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min="1"
+                      step="1"
+                      value={targetParams.count_y || ""}
+                      onChange={(event) => updateTargetParam("count_y", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {activeTarget.type === "pattern_face" && activeTarget.topology === "radial" ? (
+                <>
+                  <label className="field-row compact-field">
+                    <span>Radial spacing mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.radial_spacing || ""}
+                      onChange={(event) => updateTargetParam("radial_spacing", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  <label className="field-row compact-field">
+                    <span>Ring count</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min="1"
+                      step="1"
+                      value={targetParams.ring_count || ""}
+                      onChange={(event) => updateTargetParam("ring_count", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {activeTarget.type === "pattern_face" ? (
+                <>
+                  <label className="field-row compact-field">
+                    <span>Margin mm</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="any"
+                      value={targetParams.margin || ""}
+                      onChange={(event) => updateTargetParam("margin", event.target.value)}
+                      disabled={isProcessing}
+                    />
+                  </label>
+                  {activeTarget.pattern?.center_hole_diameter != null ? (
+                    <label className="field-row compact-field">
+                      <span>Center hole mm</span>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="any"
+                        value={targetParams.center_hole_diameter || ""}
+                        onChange={(event) => updateTargetParam("center_hole_diameter", event.target.value)}
+                        disabled={isProcessing}
+                      />
+                    </label>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+
+            <div className="text-input-actions">
+              <button
+                type="submit"
+                className="text-submit"
+                disabled={!imported || !activeTarget || isProcessing}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                className="text-submit"
+                onClick={handleApplyEdit}
+                disabled={!imported || !activeTarget || isProcessing || editorState !== "preview_ready"}
+              >
+                Export STL
+              </button>
+            </div>
+          </form>
+        ) : null}
+
+        <details className="advanced-panel">
+          <summary>Advanced / Legacy</summary>
+          {analysis ? (
+            <div className="project-summary">
+              <div className="status-label">Advanced selection</div>
               <div className="selection-grid advanced-selection-grid">
                 <label className="field-row">
                   <span>Editable face</span>
@@ -1219,253 +1690,9 @@ export default function ExistingModelPanel({
                   </select>
                 </label>
               </div>
-            </details>
-          </div>
-        ) : null}
-
-        {selectedCluster ? (
-          <div className="project-summary">
-            <div className="status-label">Selected target</div>
-            <div className="analysis-grid">
-              <span>
-                Face bounds: {selectedCluster.local_bounds_mm.min_x} to {selectedCluster.local_bounds_mm.max_x} x
-              </span>
-              <span>
-                {selectedCluster.local_bounds_mm.min_y} to {selectedCluster.local_bounds_mm.max_y} y
-              </span>
-              <span>Normal: {selectedCluster.normal.join(", ")}</span>
             </div>
-            {selectedOpening ? (
-              <div className="selection-detail-stack">
-                <div className="muted">
-                  {selectedTargetHeadline}. Centered near {selectedOpening.center_mm.x}, {selectedOpening.center_mm.y} mm
-                  {" · "}detected as {selectedFeature?.type || selectedOpening.shape_guess}{" "}
-                  {selectedOpening.width_mm.toFixed(2)} × {selectedOpening.height_mm.toFixed(2)} mm.
-                </div>
-                <div className="muted">{scopeSummary}</div>
-              </div>
-            ) : (
-              <div className="muted">
-                No feature selected yet. Pick a quick target card or click a supported opening in the preview.
-              </div>
-            )}
-            {viewerSelectionMessage ? (
-              <div className="chip chip-warm">{viewerSelectionMessage}</div>
-            ) : null}
-          </div>
-        ) : null}
-
-        <form
-          className="field-row"
-          onSubmit={(event: FormEvent<HTMLFormElement>) => {
-            event.preventDefault();
-            void handlePreviewEdit();
-          }}
-        >
-          <div className="project-summary">
-            <div className="status-label">Describe change</div>
-            <div className="validation-headline">{selectedTargetHeadline}</div>
-            <div className="muted">{selectedTargetDetail}</div>
-            {hasPendingPreview ? (
-              <div className="chip chip-warm">
-                Draft changed. Click Preview to update the 3D view.
-              </div>
-            ) : null}
-            {diameterLikelyTooLarge ? (
-              <div className="warning-chip">
-                {`This repeated pattern will likely fail above about ${estimatedMaxDiameter} mm. ${diameterMm} mm is too large for the current spacing.`}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="spec-grid">
-            {usesWidthHeightFields ? (
-              <>
-                <label className="field-row compact-field">
-                  <span>Width mm</span>
-                  <input type="number" inputMode="decimal" step="any" value={widthMm} onChange={(event) => setWidthMm(event.target.value)} disabled={isProcessing} />
-                </label>
-                <label className="field-row compact-field">
-                  <span>Height mm</span>
-                  <input type="number" inputMode="decimal" step="any" value={heightMm} onChange={(event) => setHeightMm(event.target.value)} disabled={isProcessing} />
-                </label>
-              </>
-            ) : null}
-            {usesDiameterField ? (
-              <label className="field-row compact-field">
-                <span>Diameter mm</span>
-                <input type="number" inputMode="decimal" step="any" value={diameterMm} onChange={(event) => setDiameterMm(event.target.value)} disabled={isProcessing} />
-              </label>
-            ) : null}
-            <label className="field-row compact-field">
-              <span>Through all</span>
-              <select value={throughAll ? "true" : "false"} onChange={(event) => setThroughAll(event.target.value === "true")} disabled={isProcessing}>
-                <option value="true">True</option>
-                <option value="false">False</option>
-              </select>
-            </label>
-          </div>
-
-          <details className="advanced-panel">
-            <summary>Advanced edit controls</summary>
-            <div className="spec-grid">
-              <label className="field-row compact-field">
-                <span>Operation</span>
-                <select value={operation} onChange={(event) => setOperation(event.target.value)} disabled={isProcessing}>
-                  <option value="replace_cutout_shape">Replace cutout shape</option>
-                  <option value="resize_cutout">Resize cutout</option>
-                  <option value="replace_hole_with_slot">Replace hole with slot</option>
-                  <option value="replace_hole_with_rectangle">Replace hole with rectangle</option>
-                  <option value="replace_slot_with_rectangle">Replace slot with rectangle</option>
-                  <option value="replace_rectangle_with_circle">Replace rectangle with circle</option>
-                  <option value="array_selected_cutout">Array selected cutout</option>
-                </select>
-              </label>
-              <label className="field-row compact-field">
-                <span>Target shape</span>
-                <select value={targetShape} onChange={(event) => setTargetShape(event.target.value)} disabled={isProcessing}>
-                  <option value="rectangle">Rectangle</option>
-                  <option value="rounded_slot">Rounded slot</option>
-                  <option value="circle">Circle</option>
-                </select>
-              </label>
-              <label className="field-row compact-field">
-                <span>Depth mm</span>
-                <input type="number" inputMode="decimal" step="any" value={depthMm} onChange={(event) => setDepthMm(event.target.value)} disabled={isProcessing || throughAll} />
-              </label>
-              {showCornerRadiusField ? (
-                <label className="field-row compact-field">
-                  <span>Corner radius mm</span>
-                  <input type="number" inputMode="decimal" step="any" value={cornerRadiusMm} onChange={(event) => setCornerRadiusMm(event.target.value)} disabled={isProcessing} />
-                </label>
-              ) : null}
-            </div>
-            <label htmlFor="edit-prompt">Describe the change</label>
-            <textarea
-              id="edit-prompt"
-              rows={3}
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              disabled={isProcessing}
-              placeholder="Make the selected holes larger"
-            />
-            <div className="prompt-chips">
-              {editPromptExamples.map((chip) => (
-                <button
-                  key={chip}
-                  type="button"
-                  className="prompt-chip"
-                  onClick={() => setPrompt(chip)}
-                  disabled={isProcessing}
-                >
-                  {chip}
-                </button>
-              ))}
-            </div>
-
-            <div className="spec-grid">
-              <label className="field-row compact-field">
-                <span>Center X mm</span>
-                <input type="number" inputMode="decimal" step="any" value={centerX} onChange={(event) => setCenterX(event.target.value)} disabled={isProcessing || applyToSimilar} />
-              </label>
-              <label className="field-row compact-field">
-                <span>Center Y mm</span>
-                <input type="number" inputMode="decimal" step="any" value={centerY} onChange={(event) => setCenterY(event.target.value)} disabled={isProcessing || applyToSimilar} />
-              </label>
-              <label className="field-row compact-field">
-                <span>Pattern</span>
-                <select value={pattern} onChange={(event) => setPattern(event.target.value)} disabled={isProcessing || applyToSimilar}>
-                  <option value="none">None</option>
-                  <option value="linear">Linear</option>
-                  <option value="circular">Circular</option>
-                </select>
-              </label>
-              <label className="field-row compact-field">
-                <span>Count</span>
-                <input type="number" inputMode="numeric" min="1" step="1" value={count} onChange={(event) => setCount(event.target.value)} disabled={isProcessing || applyToSimilar} />
-              </label>
-              <label className="field-row compact-field">
-                <span>Spacing mm</span>
-                <input type="number" inputMode="decimal" step="any" value={spacingMm} onChange={(event) => setSpacingMm(event.target.value)} disabled={isProcessing || applyToSimilar} />
-              </label>
-              <label className="field-row compact-field">
-                <span>Array radius mm</span>
-                <input type="number" inputMode="decimal" step="any" value={arrayRadiusMm} onChange={(event) => setArrayRadiusMm(event.target.value)} disabled={isProcessing || applyToSimilar} />
-              </label>
-              <label className="field-row compact-field">
-                <span>Tolerance mm</span>
-                <input type="number" inputMode="decimal" step="any" value={toleranceMm} onChange={(event) => setToleranceMm(event.target.value)} disabled={isProcessing} />
-              </label>
-            </div>
-
-            <label htmlFor="edit-spec">Structured edit spec</label>
-            <textarea
-              id="edit-spec"
-              rows={6}
-              value={specText}
-              onChange={(event) => setSpecText(event.target.value)}
-              disabled={isProcessing}
-              placeholder={`operation: resize_cutout\ndiameter_mm: 8\nthrough_all: true`}
-            />
-            <div className="text-input-actions">
-              <button
-                type="button"
-                className="text-submit"
-                onClick={handleApplySpec}
-                disabled={!specText.trim() || isProcessing}
-              >
-                Apply spec
-              </button>
-              <span className="muted">
-                Supports JSON or flat <code>key: value</code> lines.
-              </span>
-            </div>
-
-            {parseSummary.length ? (
-              <div className="project-summary">
-                <div className="status-label">Applied spec values</div>
-                <div className="warning-list">
-                  {parseSummary.map((item) => (
-                    <span key={item} className="chip">
-                      {item}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {parseWarnings.length ? (
-              <div className="project-summary">
-                <div className="status-label">Spec warnings</div>
-                <div className="warning-list">
-                  {parseWarnings.map((warning) => (
-                    <span key={warning} className="warning-chip">
-                      {warning}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </details>
-
-          <div className="text-input-actions">
-            <button
-              type="submit"
-              className="text-submit"
-              disabled={!imported || !selectedClusterId || isProcessing}
-            >
-              {hasPendingPreview ? "Preview changes" : "Preview"}
-            </button>
-            <button
-              type="button"
-              className="text-submit"
-              onClick={handleApplyEdit}
-              disabled={!imported || !selectedClusterId || isProcessing}
-            >
-              Export STL
-            </button>
-          </div>
-        </form>
+          ) : null}
+        </details>
 
         {validation ? (
           <div className="validation-card">
