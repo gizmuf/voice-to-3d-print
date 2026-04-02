@@ -889,6 +889,75 @@ code {
   pointer-events: none;
 }
 
+.floating-quick-editor-wrap {
+  pointer-events: none;
+}
+
+.floating-quick-editor-wrap.docked {
+  position: fixed;
+  right: 36px;
+  top: 180px;
+  z-index: 40;
+}
+
+.floating-quick-editor {
+  pointer-events: auto;
+  width: min(300px, 72vw);
+  background: rgba(255, 252, 247, 0.95);
+  border: 1px solid rgba(25, 22, 20, 0.12);
+  border-radius: 22px;
+  box-shadow: 0 18px 40px rgba(20, 16, 13, 0.18);
+  backdrop-filter: blur(16px);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.floating-quick-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.floating-quick-editor-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.subtle-chip {
+  opacity: 0.88;
+}
+
+.semantic-annotation {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.95);
+  border: 1px solid rgba(43, 140, 122, 0.18);
+  color: var(--ink);
+  font-size: 0.76rem;
+  white-space: nowrap;
+  box-shadow: 0 10px 20px rgba(20, 16, 13, 0.1);
+}
+
+.reference-image-card,
+.image-reference-upload,
+.image-reference-preview,
+.element-ai-input {
+  display: grid;
+  gap: 10px;
+}
+
+.reference-image-preview,
+.image-reference-preview img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: cover;
+  border-radius: 20px;
+  border: 1px solid rgba(25, 22, 20, 0.08);
+}
+
 .model-loading {
   position: absolute;
   right: 12px;
@@ -1204,6 +1273,13 @@ code {
 
   .voice-surface {
     align-items: flex-start;
+  }
+
+  .floating-quick-editor-wrap.docked {
+    right: 18px;
+    left: 18px;
+    top: auto;
+    bottom: 18px;
   }
 }
 

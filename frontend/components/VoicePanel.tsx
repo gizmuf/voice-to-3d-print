@@ -3,6 +3,7 @@
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 
+import ImageReferenceUpload from "./ImageReferenceUpload";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
 import type { WorkspaceResponse } from "../types/editable-model";
 
@@ -48,6 +49,7 @@ type ProcessResponse = {
 type VoicePanelProps = {
   workflowMode: "workspace" | "creative";
   onCreateNativeWorkspace: (payload: { structured_spec: Record<string, unknown>; source: "native" }) => Promise<WorkspaceResponse | null>;
+  onReferenceImageChange?: (url: string | null) => void;
   onCreativeModelUrl?: (url: string | null) => void;
   onCreativeStlUrl?: (url: string | null) => void;
   onCreativeGcodeUrl?: (url: string | null) => void;
@@ -98,6 +100,7 @@ const fetchWithTimeout = async (
 export default function VoicePanel({
   workflowMode,
   onCreateNativeWorkspace,
+  onReferenceImageChange,
   onCreativeModelUrl,
   onCreativeStlUrl,
   onCreativeGcodeUrl,
@@ -108,6 +111,8 @@ export default function VoicePanel({
   const [status, setStatus] = useState<"idle" | "understanding" | "creating" | "generating" | "ready" | "error">("idle");
   const [lastError, setLastError] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [referenceImageFile, setReferenceImageFile] = useState<File | null>(null);
+  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const loadHealth = async () => {
@@ -126,6 +131,23 @@ export default function VoicePanel({
     setStatus("idle");
     setLastError(null);
   }, [workflowMode]);
+
+  useEffect(() => {
+    if (!referenceImageFile) {
+      if (referenceImageUrl) {
+        URL.revokeObjectURL(referenceImageUrl);
+      }
+      setReferenceImageUrl(null);
+      onReferenceImageChange?.(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(referenceImageFile);
+    setReferenceImageUrl(objectUrl);
+    onReferenceImageChange?.(objectUrl);
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [onReferenceImageChange, referenceImageFile]);
 
   const examplePrompts = workflowMode === "creative" ? creativePromptExamples : usefulPromptExamples;
 
@@ -195,15 +217,36 @@ export default function VoicePanel({
 
     setStatus("understanding");
     try {
+      let promptForRouting = prompt;
+      if (referenceImageFile) {
+        const imageForm = new FormData();
+        imageForm.append("image", referenceImageFile);
+        imageForm.append("input_type", "image");
+        const imageIntentResponse = await fetchWithTimeout(
+          `${backendUrl}/image-intent`,
+          {
+            method: "POST",
+            body: imageForm,
+          },
+          45000
+        );
+        if (!imageIntentResponse.ok) throw new Error("Could not understand the reference image.");
+        const imageIntent = (await imageIntentResponse.json()) as { prompt: string };
+        promptForRouting = imageIntent.prompt?.trim()
+          ? `${prompt}\nReference image: ${imageIntent.prompt.trim()}`
+          : prompt;
+      }
+
       const response = await fetchWithTimeout(
         `${backendUrl}/route-intent`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            raw_text: prompt,
+            raw_text: promptForRouting,
             source: "text",
             mode_hint: "useful",
+            has_image: Boolean(referenceImageFile),
           }),
         },
         25000
@@ -307,6 +350,15 @@ export default function VoicePanel({
             </button>
           ))}
         </div>
+
+        {workflowMode === "workspace" ? (
+          <ImageReferenceUpload
+            disabled={status === "understanding" || status === "creating"}
+            imagePreviewUrl={referenceImageUrl}
+            onChange={setReferenceImageFile}
+            onRemove={() => setReferenceImageFile(null)}
+          />
+        ) : null}
 
         <div className="actions">
           <button type="submit" className="download-button action-button" disabled={status === "understanding" || status === "creating" || status === "generating"}>

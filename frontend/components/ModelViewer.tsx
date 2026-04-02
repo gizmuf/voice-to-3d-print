@@ -1,10 +1,10 @@
 "use client";
 
-import { Suspense, createElement, useEffect, useMemo, useState } from "react";
+import { Suspense, createElement, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import { Bounds, Html, OrbitControls, useGLTF } from "@react-three/drei";
-import { Canvas, type ThreeEvent } from "@react-three/fiber";
+import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import type { Material, Mesh } from "three";
-import { Color, MOUSE } from "three";
+import { Color, MOUSE, Vector3 } from "three";
 
 export type SelectionPayload = {
   objectName: string;
@@ -23,6 +23,11 @@ export type ViewerCameraNormal = {
   z: number;
 };
 
+export type ViewerFocusTarget = {
+  point: { x: number; y: number; z: number };
+  distance?: number;
+};
+
 type ModelViewerProps = {
   src?: string | null;
   ghostModelUrl?: string | null;
@@ -34,7 +39,12 @@ type ModelViewerProps = {
   defaultCameraNormal?: ViewerCameraNormal | null;
   resetViewSignal?: number;
   onSelect?: (payload: SelectionPayload) => void;
+  onClearSelection?: () => void;
   selectionMarker?: ViewerSelectionMarker | null;
+  focusTarget?: ViewerFocusTarget | null;
+  floatingEditor?: ReactNode;
+  floatingPoint?: { x: number; y: number; z: number } | null;
+  annotations?: ReactNode;
 };
 
 type LoadedModelProps = {
@@ -184,6 +194,50 @@ function SelectionMarker({ marker }: { marker: ViewerSelectionMarker }) {
   );
 }
 
+function CameraTargetController({
+  focusTarget,
+  controlsRef,
+}: {
+  focusTarget: ViewerFocusTarget | null;
+  controlsRef: MutableRefObject<{ target: Vector3; update: () => void } | null>;
+}) {
+  const { camera } = useThree();
+  const desiredTargetRef = useRef<Vector3 | null>(null);
+  const desiredCameraRef = useRef<Vector3 | null>(null);
+
+  useEffect(() => {
+    if (!focusTarget) return;
+    const nextTarget = new Vector3(focusTarget.point.x, focusTarget.point.y, focusTarget.point.z);
+    const currentTarget = controlsRef.current?.target?.clone() ?? new Vector3(0, 0, 0);
+    const direction = camera.position.clone().sub(currentTarget);
+    if (direction.lengthSq() < 0.0001) {
+      direction.set(0, 0, 1);
+    }
+    direction.normalize();
+    const distance = Math.max(focusTarget.distance ?? camera.position.distanceTo(currentTarget), 12);
+    desiredTargetRef.current = nextTarget;
+    desiredCameraRef.current = nextTarget.clone().add(direction.multiplyScalar(distance));
+  }, [camera.position, controlsRef, focusTarget]);
+
+  useFrame(() => {
+    if (!desiredTargetRef.current || !desiredCameraRef.current) return;
+    camera.position.lerp(desiredCameraRef.current, 0.16);
+    if (controlsRef.current) {
+      controlsRef.current.target.lerp(desiredTargetRef.current, 0.16);
+      controlsRef.current.update();
+      if (
+        camera.position.distanceTo(desiredCameraRef.current) < 0.05 &&
+        controlsRef.current.target.distanceTo(desiredTargetRef.current) < 0.05
+      ) {
+        desiredTargetRef.current = null;
+        desiredCameraRef.current = null;
+      }
+    }
+  });
+
+  return null;
+}
+
 export default function ModelViewer({
   src,
   ghostModelUrl,
@@ -195,12 +249,18 @@ export default function ModelViewer({
   defaultCameraNormal = null,
   resetViewSignal = 0,
   onSelect,
+  onClearSelection,
   selectionMarker,
+  focusTarget = null,
+  floatingEditor,
+  floatingPoint = null,
+  annotations,
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [interactionMode, setInteractionMode] = useState<"orbit" | "pan">(defaultInteractionMode);
+  const controlsRef = useRef<{ target: Vector3; update: () => void } | null>(null);
 
   useEffect(() => {
     setHoveredObjectId(null);
@@ -252,7 +312,12 @@ export default function ModelViewer({
         camera={{ position: cameraPosition, fov: 40 }}
         dpr={[1, 1.5]}
         frameloop="demand"
-        onPointerMissed={() => setHoveredObjectId(null)}
+        onPointerMissed={() => {
+          setHoveredObjectId(null);
+          setSelectedObjectId(null);
+          setSelectedLabel(null);
+          onClearSelection?.();
+        }}
       >
         {createElement("color", { attach: "background", args: ["#fff8ef"] })}
         {createElement("ambientLight", { intensity: 0.9 })}
@@ -281,10 +346,24 @@ export default function ModelViewer({
                 }}
               />
               {selectionMarker ? <SelectionMarker marker={selectionMarker} /> : null}
+              {annotations}
+              {floatingPoint && floatingEditor ? (
+                createElement(
+                  "group",
+                  { position: [floatingPoint.x, floatingPoint.y, floatingPoint.z] },
+                  createElement(
+                    Html,
+                    { distanceFactor: 14, center: false, style: { pointerEvents: "none" } },
+                    floatingEditor
+                  )
+                )
+              ) : null}
             </>
           </Bounds>
         </Suspense>
+        <CameraTargetController focusTarget={focusTarget} controlsRef={controlsRef} />
         <OrbitControls
+          ref={controlsRef as never}
           enableDamping
           dampingFactor={0.12}
           enablePan

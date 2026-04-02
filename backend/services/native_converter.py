@@ -127,6 +127,16 @@ def editable_to_structured_spec(model: EditableModel) -> dict[str, Any]:
     return base
 
 
+def refresh_manufacturability(model: EditableModel) -> Manufacturability:
+    if not model.bodies:
+        return Manufacturability(status="invalid", messages=["Editable model has no root body."])
+    root = model.bodies[0]
+    template_id = str(root.params.get("_template_id", ""))
+    if template_id == "perforated_disc":
+        return _perforated_disc_manufacturability(editable_to_structured_spec(model))
+    return Manufacturability(status="safe", messages=["Geometry is within the current manufacturable range."])
+
+
 def _template_children(template_id: str, root_id: str, constraints: dict[str, Any]) -> list[BodyNode]:
     if template_id == "phone_stand":
         return [
@@ -227,4 +237,3 @@ def _perforated_disc_manufacturability(spec: dict[str, Any]) -> Manufacturabilit
         return Manufacturability(status=status, messages=messages)
     except Exception as exc:
         return Manufacturability(status="invalid", messages=[str(exc)])
-

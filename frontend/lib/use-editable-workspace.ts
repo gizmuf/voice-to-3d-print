@@ -35,6 +35,8 @@ type BuildResponse = {
   validation: Record<string, unknown>;
 };
 
+type AiEditResponse = WorkspaceResponse;
+
 export function useEditableWorkspace() {
   const backendUrl = resolveBackendUrl();
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
@@ -197,6 +199,35 @@ export function useEditableWorkspace() {
     }
   }, [backendUrl, editableModel, loadWorkspace, workspaceId]);
 
+  const aiEdit = useCallback(async (bodyId: string, prompt: string) => {
+    if (!workspaceId || !editableModel) return null;
+    setIsBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`${backendUrl}/workspace/${workspaceId}/ai-edit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          body_id: bodyId,
+          prompt,
+          expected_revision_id: editableModel.revision_id,
+        }),
+      });
+      if (response.status === 409) {
+        await loadWorkspace(workspaceId);
+        throw new Error("Workspace changed before the AI edit could be applied.");
+      }
+      const data = (await response.json()) as AiEditResponse | { detail?: string };
+      if (!response.ok) {
+        throw new Error((data as { detail?: string }).detail || "AI edit failed.");
+      }
+      hydrateWorkspace(data as AiEditResponse);
+      return data as AiEditResponse;
+    } finally {
+      setIsBusy(false);
+    }
+  }, [backendUrl, editableModel, hydrateWorkspace, loadWorkspace, workspaceId]);
+
   return {
     workspaceId,
     editableModel,
@@ -214,5 +245,6 @@ export function useEditableWorkspace() {
     selectFeature,
     preview,
     build,
+    aiEdit,
   };
 }

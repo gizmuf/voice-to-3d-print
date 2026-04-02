@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import settings
+from services.ai_edit import ai_edit_workspace_model
 from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt, extract_prompt_from_image
 from services.generation import GenerationResult, generate_model, generate_model_from_image
@@ -227,6 +228,12 @@ class WorkspacePreviewResponse(BaseModel):
 
 
 class WorkspaceBuildRequest(BaseModel):
+    expected_revision_id: str
+
+
+class WorkspaceAiEditRequest(BaseModel):
+    body_id: str
+    prompt: str
     expected_revision_id: str
 
 
@@ -556,6 +563,25 @@ def build_workspace_endpoint(workspace_id: str, request: WorkspaceBuildRequest) 
         gcode_url=gcode_url,
         bundle_url=bundle_url,
         validation=validation,
+    )
+
+
+@app.post("/workspace/{workspace_id}/ai-edit", response_model=WorkspaceResponse)
+async def ai_edit_workspace_endpoint(workspace_id: str, request: WorkspaceAiEditRequest) -> WorkspaceResponse:
+    record = ensure_current_revision(workspace_id, request.expected_revision_id)
+    param_changes = await ai_edit_workspace_model(record.editable_model, request.body_id, request.prompt)
+    updated = update_workspace(
+        workspace_id,
+        WorkspaceMutation(
+            expected_revision_id=request.expected_revision_id,
+            body_updates=[{"body_id": request.body_id, "params": param_changes}],
+        ),
+    )
+    return WorkspaceResponse(
+        workspace_id=updated.workspace_id,
+        editable_model=updated.editable_model.model_dump(mode="json"),
+        latest_preview=updated.latest_preview.model_dump(mode="json") if updated.latest_preview else None,
+        latest_build=updated.latest_build.model_dump(mode="json") if updated.latest_build else None,
     )
 
 

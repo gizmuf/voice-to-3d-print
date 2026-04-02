@@ -3,28 +3,23 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { BodyNode } from "../types/editable-model";
+import {
+  asNumber,
+  buildPerforatedDiscLayout,
+  extractDiscGeometry,
+  inferDiscSelectedPart,
+} from "../lib/perforated-disc-geometry";
 
 type Props = {
   rootBody: BodyNode;
-  selectedBodyId: string | null;
+  selectedFeatureId: string | null;
   disabled?: boolean;
-  onSelectBody: (bodyId: string) => void;
-  onParamChange: (bodyId: string, key: string, value: string) => void;
+  onSelectFeature: (bodyId: string) => void;
+  onParamChange: (featureId: string, key: string, value: string) => void;
 };
 
 type Point2D = [number, number];
 type SelectedPart = "outer" | "pattern" | "center";
-
-const MIN_WALL_MM = 0.8;
-
-const asNumber = (value: string | number | boolean | undefined, fallback: number) => {
-  if (typeof value === "number") return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return fallback;
-};
 
 const circlePath = (center: Point2D, radius: number, segments = 48) => {
   const points = Array.from({ length: segments }, (_, index) => {
@@ -34,123 +29,12 @@ const circlePath = (center: Point2D, radius: number, segments = 48) => {
   return `M ${points.map((point) => `${point[0]} ${point[1]}`).join(" L ")} Z`;
 };
 
-const buildLayout = ({
-  outerDiameter,
-  thickness,
-  holeDiameter,
-  centerHoleDiameter,
-  ringCount,
-  radialSpacing,
-  tangentialSpacing,
-  edgeMargin,
-}: {
-  outerDiameter: number;
-  thickness: number;
-  holeDiameter: number;
-  centerHoleDiameter: number;
-  ringCount: number;
-  radialSpacing: number;
-  tangentialSpacing: number;
-  edgeMargin: number;
-}) => {
-  const outerRadius = outerDiameter / 2;
-  const holeRadius = holeDiameter / 2;
-  const centerHoleRadius = centerHoleDiameter / 2;
-  const minCenterRadius = centerHoleRadius + edgeMargin + holeRadius;
-  const maxCenterRadius = outerRadius - edgeMargin - holeRadius;
-
-  if (outerDiameter <= 0 || thickness <= 0 || holeDiameter <= 0) {
-    throw new Error("All primary dimensions must be greater than zero.");
-  }
-  if (maxCenterRadius <= minCenterRadius) {
-    throw new Error("Center hole and edge margin leave no room for the perforation pattern.");
-  }
-  if (ringCount > 1 && radialSpacing < holeDiameter + MIN_WALL_MM) {
-    throw new Error("Radial spacing is too small for the selected hole diameter.");
-  }
-
-  const ringRadii =
-    ringCount === 1
-      ? [(minCenterRadius + maxCenterRadius) / 2]
-      : Array.from({ length: ringCount }, (_, index) => minCenterRadius + index * radialSpacing);
-
-  if (ringRadii[ringRadii.length - 1] > maxCenterRadius + 1e-6) {
-    throw new Error("Ring count and radial spacing push the pattern beyond the disc boundary.");
-  }
-
-  const pitch = holeDiameter + tangentialSpacing;
-  const holes: Array<{ center: Point2D; radius: number }> = [];
-  const holesPerRing: number[] = [];
-
-  for (const radius of ringRadii) {
-    const circumference = 2 * Math.PI * radius;
-    const count = Math.max(4, Math.floor(circumference / Math.max(pitch, 0.1)));
-    const arcPitch = circumference / count;
-    if (arcPitch < holeDiameter + MIN_WALL_MM) {
-      throw new Error("Tangential spacing is too small for the selected hole diameter.");
-    }
-    holesPerRing.push(count);
-    for (let index = 0; index < count; index += 1) {
-      const angle = (2 * Math.PI * index) / count;
-      holes.push({
-        center: [Math.cos(angle) * radius, Math.sin(angle) * radius],
-        radius: holeRadius,
-      });
-    }
-  }
-
-  const messages: string[] = [];
-  let status: "safe" | "risk" | "invalid" = "safe";
-  if (edgeMargin < 4) {
-    status = "risk";
-    messages.push("Edge margin is tight near the outer boundary.");
-  }
-  if (ringCount > 1 && radialSpacing < holeDiameter + 1.4) {
-    status = "risk";
-    messages.push("Wall thickness between rings is getting tight.");
-  }
-  if (pitch < holeDiameter + 1.4) {
-    status = "risk";
-    messages.push("Tangential spacing is getting tight around the rings.");
-  }
-  if (!messages.length) {
-    messages.push("Geometry is within the current manufacturable range.");
-  }
-
-  return {
-    outerRadius,
-    thickness,
-    holeDiameter,
-    centerHoleDiameter,
-    ringCount,
-    radialSpacing,
-    tangentialSpacing,
-    edgeMargin,
-    ringRadii,
-    holesPerRing,
-    holes,
-    status,
-    messages,
-  };
-};
-
-const partForBody = (
-  selectedBodyId: string | null,
-  rootId: string,
-  patternId: string,
-  centerHoleId: string
-): SelectedPart => {
-  if (selectedBodyId === centerHoleId) return "center";
-  if (selectedBodyId === patternId) return "pattern";
-  if (!selectedBodyId || selectedBodyId === rootId) return "outer";
-  return "outer";
-};
 
 export default function PerforatedDiscDesigner({
   rootBody,
-  selectedBodyId,
+  selectedFeatureId,
   disabled,
-  onSelectBody,
+  onSelectFeature,
   onParamChange,
 }: Props) {
   const centerHoleBody = rootBody.children.find((child) => child.label === "Center hole" || child.kind === "hole");
@@ -161,30 +45,21 @@ export default function PerforatedDiscDesigner({
   const patternId = patternBody?.id ?? `${rootBody.id}:pattern`;
 
   const [selectedPart, setSelectedPart] = useState<SelectedPart>(
-    partForBody(selectedBodyId, rootBody.id, patternId, centerHoleId)
+    inferDiscSelectedPart(selectedFeatureId, rootBody.id, patternId, centerHoleId)
   );
 
   useEffect(() => {
-    setSelectedPart(partForBody(selectedBodyId, rootBody.id, patternId, centerHoleId));
-  }, [centerHoleId, patternId, rootBody.id, selectedBodyId]);
+    setSelectedPart(inferDiscSelectedPart(selectedFeatureId, rootBody.id, patternId, centerHoleId));
+  }, [centerHoleId, patternId, rootBody.id, selectedFeatureId]);
 
   const geometry = useMemo(
-    () => ({
-      outerDiameter: asNumber(rootBody.params.outer_diameter, 340),
-      thickness: asNumber(thicknessBody?.params.thickness_mm, asNumber(rootBody.params.thickness, 15)),
-      holeDiameter: asNumber(patternBody?.params.hole_diameter_mm, 7.08),
-      centerHoleDiameter: asNumber(centerHoleBody?.params.diameter_mm, 32.93),
-      ringCount: Math.max(1, Math.round(asNumber(patternBody?.params.ring_count, 12))),
-      radialSpacing: asNumber(patternBody?.params.radial_spacing_mm, 9.387),
-      tangentialSpacing: asNumber(patternBody?.params.tangential_spacing_mm, 7),
-      edgeMargin: asNumber(patternBody?.params.edge_margin_mm, 12.421),
-    }),
-    [centerHoleBody?.params.diameter_mm, patternBody?.params.edge_margin_mm, patternBody?.params.hole_diameter_mm, patternBody?.params.radial_spacing_mm, patternBody?.params.ring_count, patternBody?.params.tangential_spacing_mm, rootBody.params.outer_diameter, rootBody.params.thickness, thicknessBody?.params.thickness_mm]
+    () => extractDiscGeometry(rootBody),
+    [rootBody]
   );
 
   const layout = useMemo(() => {
     try {
-      return buildLayout(geometry);
+      return buildPerforatedDiscLayout(geometry);
     } catch (error) {
       return {
         error: (error as Error).message,
@@ -206,14 +81,14 @@ export default function PerforatedDiscDesigner({
   const selectPart = (part: SelectedPart) => {
     setSelectedPart(part);
     if (part === "center") {
-      onSelectBody(centerHoleId);
+      onSelectFeature(centerHoleId);
       return;
     }
     if (part === "pattern") {
-      onSelectBody(patternId);
+      onSelectFeature(patternId);
       return;
     }
-    onSelectBody(rootBody.id);
+    onSelectFeature(rootBody.id);
   };
 
   const handleCanvasClick = (event: React.MouseEvent<SVGSVGElement>) => {

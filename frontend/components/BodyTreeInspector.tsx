@@ -1,33 +1,32 @@
 "use client";
 
 import type { BodyNode, EditableModel } from "../types/editable-model";
+import { formatParamLabel, getEditableParamEntries } from "../lib/param-editor-utils";
 
 type Props = {
   model: EditableModel;
-  selectedBodyId: string | null;
-  onSelect: (bodyId: string) => void;
-  onParamChange: (bodyId: string, key: string, value: string) => void;
+  selectedFeatureId: string | null;
+  onSelect: (featureId: string) => void;
+  onParamChange: (featureId: string, key: string, value: string) => void;
   disabled?: boolean;
 };
-
-const formatLabel = (key: string) => key.replace(/^_/, "").replace(/_/g, " ");
 
 function BodyTreeNode({
   body,
   depth,
-  selectedBodyId,
+  selectedFeatureId,
   onSelect,
 }: {
   body: BodyNode;
   depth: number;
-  selectedBodyId: string | null;
-  onSelect: (bodyId: string) => void;
+  selectedFeatureId: string | null;
+  onSelect: (featureId: string) => void;
 }) {
   return (
     <div className="body-tree-node">
       <button
         type="button"
-        className={`body-tree-button ${selectedBodyId === body.id ? "active" : ""}`}
+        className={`body-tree-button ${selectedFeatureId === body.id ? "active" : ""}`}
         style={{ paddingLeft: `${depth * 16 + 12}px` }}
         onClick={() => onSelect(body.id)}
       >
@@ -39,7 +38,7 @@ function BodyTreeNode({
           key={child.id}
           body={child}
           depth={depth + 1}
-          selectedBodyId={selectedBodyId}
+          selectedFeatureId={selectedFeatureId}
           onSelect={onSelect}
         />
       ))}
@@ -49,13 +48,13 @@ function BodyTreeNode({
 
 export default function BodyTreeInspector({
   model,
-  selectedBodyId,
+  selectedFeatureId,
   onSelect,
   onParamChange,
   disabled,
 }: Props) {
   const allBodies = flattenBodies(model.bodies);
-  const selectedBody = allBodies.find((body) => body.id === selectedBodyId) ?? model.bodies[0] ?? null;
+  const selectedBody = allBodies.find((body) => body.id === selectedFeatureId) ?? null;
 
   return (
     <div className="body-tree-inspector">
@@ -70,7 +69,7 @@ export default function BodyTreeInspector({
             key={body.id}
             body={body}
             depth={0}
-            selectedBodyId={selectedBody?.id ?? null}
+            selectedFeatureId={selectedFeatureId}
             onSelect={onSelect}
           />
         ))}
@@ -78,12 +77,11 @@ export default function BodyTreeInspector({
 
       {selectedBody ? (
         <div className="spec-grid">
-          {Object.entries(selectedBody.params)
-            .filter(([key]) => !key.startsWith("_"))
-            .map(([key, value]) => (
+          {getEditableParamEntries(selectedBody)
+            .map(({ key, value, type }) => (
               <label key={key} className="field-row compact-field">
-                <span>{formatLabel(key)}</span>
-                {typeof value === "boolean" ? (
+                <span>{formatParamLabel(key)}</span>
+                {type === "boolean" ? (
                   <select
                     value={value ? "true" : "false"}
                     onChange={(event) => onParamChange(selectedBody.id, key, event.target.value)}
@@ -94,7 +92,7 @@ export default function BodyTreeInspector({
                   </select>
                 ) : (
                   <input
-                    type={typeof value === "number" ? "number" : "text"}
+                    type={type === "number" ? "number" : "text"}
                     value={String(value)}
                     onChange={(event) => onParamChange(selectedBody.id, key, event.target.value)}
                     disabled={disabled || !selectedBody.editable}
@@ -106,7 +104,12 @@ export default function BodyTreeInspector({
             <div className="warning-chip">{selectedBody.unsupported_reason}</div>
           ) : null}
         </div>
-      ) : null}
+      ) : (
+        <div className="project-summary">
+          <div className="status-label">No feature selected</div>
+          <div className="muted">Choose a semantic feature from the tree or the 3D preview to edit exact values.</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -114,4 +117,3 @@ export default function BodyTreeInspector({
 function flattenBodies(bodies: BodyNode[]): BodyNode[] {
   return bodies.flatMap((body) => [body, ...flattenBodies(body.children)]);
 }
-

@@ -4,25 +4,41 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 import BodyTreeInspector from "../components/BodyTreeInspector";
+import ElementAiInput from "../components/ElementAiInput";
+import FloatingQuickEditor from "../components/FloatingQuickEditor";
 import ExistingModelPanel, {
-  type ExistingModelTarget,
   type WorkspaceImportContext,
 } from "../components/ExistingModelPanel";
-import ModelViewer from "../components/ModelViewer";
+import ModelViewer, { type SelectionPayload, type ViewerFocusTarget } from "../components/ModelViewer";
 import PerforatedDiscDesigner from "../components/PerforatedDiscDesigner";
 import PlanarFaceEditor from "../components/PlanarFaceEditor";
+import SemanticAnnotations from "../components/SemanticAnnotations";
 import VoicePanel from "../components/VoicePanel";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
+import {
+  classifyPerforatedDiscClick,
+  getPerforatedDiscAnnotations,
+  getPerforatedDiscFocusTarget,
+  type SemanticAnnotation,
+} from "../lib/perforated-disc-geometry";
 import { useEditableWorkspace } from "../lib/use-editable-workspace";
 import type { BodyNode, EditableModel, WorkspacePresentationMode, WorkspaceResponse } from "../types/editable-model";
 
 const STORAGE_KEY = "3dprint:workspace-shell";
+
+type StoredWorkspaceShell = {
+  workspaceId?: string;
+  context?: Pick<WorkspaceImportContext, "mode" | "sourceModelUrl" | "sourceStlUrl" | "message"> | null;
+};
 
 const flattenBodies = (bodies: BodyNode[]): BodyNode[] =>
   bodies.flatMap((body) => [body, ...flattenBodies(body.children)]);
 
 const findBodyById = (bodies: BodyNode[], bodyId: string | null) =>
   bodyId ? flattenBodies(bodies).find((body) => body.id === bodyId) ?? null : null;
+
+const firstEditableFeatureId = (model: EditableModel | null) =>
+  model ? flattenBodies(model.bodies).find((body) => body.editable)?.id ?? null : null;
 
 const coerceParamValue = (current: number | string | boolean | undefined, nextRaw: string) => {
   if (typeof current === "boolean") {
@@ -48,20 +64,21 @@ const isEditablePresentation = (mode: WorkspacePresentationMode | null) =>
 const isPerforatedDiscModel = (model: EditableModel | null) =>
   Boolean(model?.bodies[0]?.params?._template_id === "perforated_disc");
 
-const getSelectedBody = (model: EditableModel | null) => {
-  if (!model?.bodies.length) return null;
-  const selectedId = model.selection?.feature_id ?? model.bodies[0]?.id ?? null;
-  return findBodyById(model.bodies, selectedId) ?? model.bodies[0] ?? null;
-};
-
 const toAbsolute = (backendUrl: string, value?: string | null) => resolveUrl(backendUrl, value);
+
+type FloatingEditorContext = {
+  point: { x: number; y: number; z: number };
+  mode: "floating" | "docked";
+} | null;
 
 function WorkspaceEditor({
   editableModel,
   presentationMode,
   importContext,
   isBusy,
-  onSelectBody,
+  selectedFeatureId,
+  referenceImageUrl,
+  onSelectFeature,
   onBodyParamChange,
   onPlanarSelection,
 }: {
@@ -69,11 +86,13 @@ function WorkspaceEditor({
   presentationMode: WorkspacePresentationMode | null;
   importContext: WorkspaceImportContext | null;
   isBusy: boolean;
-  onSelectBody: (bodyId: string) => void;
-  onBodyParamChange: (bodyId: string, key: string, value: string) => void;
+  selectedFeatureId: string | null;
+  referenceImageUrl: string | null;
+  onSelectFeature: (featureId: string, source?: "tree" | "designer" | "planar" | "viewer") => void;
+  onBodyParamChange: (featureId: string, key: string, value: string) => void;
   onPlanarSelection: (selection: { kind: "pattern" } | { kind: "feature"; featureId: string } | { kind: "center_hole"; featureId?: string }) => void;
 }) {
-  const selectedBody = getSelectedBody(editableModel);
+  const selectedBody = editableModel ? findBodyById(editableModel.bodies, selectedFeatureId) : null;
   const flattenedBodies = useMemo(
     () => (editableModel ? flattenBodies(editableModel.bodies) : []),
     [editableModel]
@@ -203,10 +222,17 @@ function WorkspaceEditor({
         </div>
       ) : null}
 
+      {referenceImageUrl ? (
+        <div className="reference-image-card">
+          <div className="status-label">Reference image</div>
+          <img src={referenceImageUrl} alt="Workspace reference" className="reference-image-preview" />
+        </div>
+      ) : null}
+
       <BodyTreeInspector
         model={editableModel}
-        selectedBodyId={selectedBodyId}
-        onSelect={onSelectBody}
+        selectedFeatureId={selectedBodyId}
+        onSelect={(featureId) => onSelectFeature(featureId, "tree")}
         onParamChange={onBodyParamChange}
         disabled={isBusy || !isEditablePresentation(presentationMode)}
       />
@@ -214,9 +240,9 @@ function WorkspaceEditor({
       {showDiscDesigner && editableModel.bodies[0] ? (
         <PerforatedDiscDesigner
           rootBody={editableModel.bodies[0]}
-          selectedBodyId={selectedBodyId}
+          selectedFeatureId={selectedBodyId}
           disabled={isBusy}
-          onSelectBody={onSelectBody}
+          onSelectFeature={(featureId) => onSelectFeature(featureId, "designer")}
           onParamChange={onBodyParamChange}
         />
       ) : null}
@@ -325,6 +351,7 @@ export default function Home() {
   const [showOriginalReference, setShowOriginalReference] = useState(false);
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoredRef = useRef(false);
+  const selectionWorkspaceRef = useRef<string | null>(null);
   const {
     workspaceId,
     editableModel,
@@ -338,20 +365,23 @@ export default function Home() {
     hydrateWorkspace,
     resetWorkspace,
     updateBody,
-    selectFeature,
     preview,
     build,
+    aiEdit,
   } = workspace;
+  const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
+  const [floatingEditorContext, setFloatingEditorContext] = useState<FloatingEditorContext>(null);
+  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (restoredRef.current || typeof window === "undefined") return;
     restoredRef.current = true;
     const params = new URLSearchParams(window.location.search);
     const fromQuery = params.get("workspace");
-    let parsed: { workspaceId?: string; context?: WorkspaceImportContext | null } | null = null;
+    let parsed: StoredWorkspaceShell | null = null;
     try {
       const fromStorage = window.localStorage.getItem(STORAGE_KEY);
-      parsed = fromStorage ? JSON.parse(fromStorage) as { workspaceId?: string; context?: WorkspaceImportContext | null } : null;
+      parsed = fromStorage ? JSON.parse(fromStorage) as StoredWorkspaceShell : null;
     } catch {
       parsed = null;
     }
@@ -377,20 +407,68 @@ export default function Home() {
   }, [loadWorkspace]);
 
   useEffect(() => {
+    if (!editableModel) {
+      selectionWorkspaceRef.current = null;
+      setSelectedFeatureId(null);
+      setFloatingEditorContext(null);
+      return;
+    }
+
+    const allBodies = flattenBodies(editableModel.bodies);
+    if (selectionWorkspaceRef.current !== workspaceId) {
+      selectionWorkspaceRef.current = workspaceId;
+      const restoredSelection =
+        editableModel.selection?.feature_id && allBodies.some((body) => body.id === editableModel.selection?.feature_id)
+          ? editableModel.selection.feature_id
+          : firstEditableFeatureId(editableModel);
+      setSelectedFeatureId(restoredSelection);
+      if (!restoredSelection) {
+        setFloatingEditorContext(null);
+      }
+      return;
+    }
+
+    if (!selectedFeatureId) {
+      return;
+    }
+
+    const currentStillExists = allBodies.some((body) => body.id === selectedFeatureId);
+    if (!currentStillExists) {
+      setSelectedFeatureId(null);
+      setFloatingEditorContext(null);
+    }
+  }, [editableModel, selectedFeatureId, workspaceId]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     if (workspaceId) {
       params.set("workspace", workspaceId);
-      window.localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          workspaceId,
-          context: presentationContext,
-        })
-      );
+      try {
+        window.localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            workspaceId,
+            context: presentationContext
+              ? {
+                  mode: presentationContext.mode,
+                  sourceModelUrl: presentationContext.sourceModelUrl,
+                  sourceStlUrl: presentationContext.sourceStlUrl,
+                  message: presentationContext.message ?? null,
+                }
+              : null,
+          } satisfies StoredWorkspaceShell)
+        );
+      } catch {
+        // Storage quota should not break the active workspace session.
+      }
     } else {
       params.delete("workspace");
-      window.localStorage.removeItem(STORAGE_KEY);
+      try {
+        window.localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // Ignore storage cleanup failures.
+      }
     }
     const query = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
@@ -435,8 +513,12 @@ export default function Home() {
     setError,
   ]);
 
-  const selectedBody = getSelectedBody(editableModel);
+  const selectedFeature =
+    editableModel ? findBodyById(editableModel.bodies, selectedFeatureId) : null;
   const workspaceMode = presentationContext?.mode ?? inferPresentationMode(editableModel);
+  const isPreviewStale =
+    workflowMode === "workspace" &&
+    Boolean(editableModel && editableModel.revision_id !== latestPreview?.revision_id);
   const workspaceModelUrl =
     toAbsolute(backendUrl, latestBuild?.glb_url) ??
     toAbsolute(backendUrl, latestPreview?.glb_url) ??
@@ -465,23 +547,36 @@ export default function Home() {
     setWorkflowMode("workspace");
     setWorkspaceEntryMode("native");
     setShowOriginalReference(false);
+    setPresentationContext({
+      mode: "native",
+      sourceModelUrl: null,
+      sourceStlUrl: null,
+      message: null,
+    });
     const created = await createWorkspace(payload);
     if (created) {
-      setPresentationContext({
-        mode: "native",
-        sourceModelUrl: null,
-        sourceStlUrl: null,
-        message: null,
-      });
+      const nextSelection =
+        created.editable_model.selection?.feature_id && findBodyById(created.editable_model.bodies, created.editable_model.selection.feature_id)
+          ? created.editable_model.selection.feature_id
+          : firstEditableFeatureId(created.editable_model);
+      setSelectedFeatureId(nextSelection);
     }
     return created;
   };
 
-  const handleBodySelect = async (bodyId: string) => {
-    try {
-      await selectFeature({ feature_id: bodyId, scope: "body" });
-    } catch (error) {
-      setError((error as Error).message || "Could not update selection.");
+  const handleFeatureSelect = (featureId: string, source: "tree" | "designer" | "planar" | "viewer" = "tree") => {
+    setSelectedFeatureId(featureId);
+    if (source !== "viewer") {
+      const rootBody = editableModel?.bodies[0];
+      if (rootBody && isPerforatedDiscModel(editableModel)) {
+        const focus = getPerforatedDiscFocusTarget(rootBody, featureId);
+        if (focus) {
+          setFloatingEditorContext({
+            point: focus.anchorPoint,
+            mode: source === "tree" ? "docked" : "floating",
+          });
+        }
+      }
     }
   };
 
@@ -503,7 +598,7 @@ export default function Home() {
     if (selection.kind === "pattern") {
       const patternTarget = targets.find((target) => target.type === "planar_pattern_face" && target.editable);
       if (patternTarget) {
-        void handleBodySelect(patternTarget.id);
+        handleFeatureSelect(patternTarget.id, "planar");
       }
       return;
     }
@@ -518,7 +613,75 @@ export default function Home() {
           target.type === "single_planar_feature" &&
           (target.id === selection.featureId || (target as { feature_id?: string }).feature_id === selection.featureId)
       )?.id ?? selection.featureId;
-    void handleBodySelect(targetId);
+    handleFeatureSelect(targetId, "planar");
+  };
+
+  const focusTarget = useMemo<ViewerFocusTarget | null>(() => {
+    if (!editableModel || !selectedFeature || !isEditablePresentation(workspaceMode)) return null;
+    if (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) {
+      const focus = getPerforatedDiscFocusTarget(editableModel.bodies[0], selectedFeature.id);
+      return focus ? { point: focus.anchorPoint, distance: focus.focusDistance } : null;
+    }
+    return floatingEditorContext ? { point: floatingEditorContext.point, distance: 42 } : null;
+  }, [editableModel, floatingEditorContext, selectedFeature, workspaceMode]);
+
+  const selectionMarker = useMemo(() => {
+    if (selectedFeature && focusTarget) {
+      return { point: focusTarget.point, label: selectedFeature.label };
+    }
+    return null;
+  }, [focusTarget, selectedFeature]);
+
+  const semanticAnnotations = useMemo<SemanticAnnotation[]>(() => {
+    if (!editableModel || !selectedFeature || workspaceMode !== "native" || !isPerforatedDiscModel(editableModel)) {
+      return [];
+    }
+    return getPerforatedDiscAnnotations(editableModel.bodies[0], selectedFeature.id);
+  }, [editableModel, selectedFeature, workspaceMode]);
+
+  const floatingEditor =
+    selectedFeature && isEditablePresentation(workspaceMode) ? (
+      <FloatingQuickEditor
+        body={selectedFeature}
+        disabled={isBusy}
+        mode={floatingEditorContext?.mode ?? "docked"}
+        onParamChange={handleBodyParamChange}
+        onDismiss={() => setFloatingEditorContext(null)}
+        aiInput={
+          workspaceMode === "native" && isPerforatedDiscModel(editableModel) ? (
+            <ElementAiInput
+              disabled={isBusy}
+              onSubmit={async (prompt) => {
+                await aiEdit(selectedFeature.id, prompt);
+              }}
+            />
+          ) : undefined
+        }
+      />
+    ) : null;
+  const floatingCanvasEditor = floatingEditorContext?.mode === "floating" ? floatingEditor : null;
+  const dockedFloatingEditor = floatingEditorContext?.mode === "docked" ? floatingEditor : null;
+
+  const handleViewerSelect = (payload: SelectionPayload) => {
+    if (!editableModel) return;
+    if (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) {
+      const hit = classifyPerforatedDiscClick(payload.point, editableModel.bodies[0]);
+      if (!hit) return;
+      const nextFeatureId =
+        hit.confidence < 0.88 && !hit.fallbackToOuter ? editableModel.bodies[0].id : hit.featureId;
+      setSelectedFeatureId(nextFeatureId);
+      setFloatingEditorContext({
+        point: hit.anchorPoint,
+        mode: typeof window !== "undefined" && window.innerWidth < 1280 ? "docked" : hit.fallbackToOuter ? "docked" : "floating",
+      });
+      return;
+    }
+    if (!isEditablePresentation(workspaceMode)) {
+      setFloatingEditorContext({
+        point: payload.point,
+        mode: "docked",
+      });
+    }
   };
 
   const isCompareMode =
@@ -606,7 +769,11 @@ export default function Home() {
               </section>
 
               {workspaceEntryMode === "native" ? (
-                <VoicePanel workflowMode="workspace" onCreateNativeWorkspace={handleCreateNativeWorkspace} />
+                <VoicePanel
+                  workflowMode="workspace"
+                  onCreateNativeWorkspace={handleCreateNativeWorkspace}
+                  onReferenceImageChange={setReferenceImageUrl}
+                />
               ) : (
                 <ExistingModelPanel
                   createWorkspace={createWorkspace}
@@ -618,6 +785,9 @@ export default function Home() {
                     setWorkflowMode("workspace");
                     setWorkspaceEntryMode("import");
                     setShowOriginalReference(false);
+                    setReferenceImageUrl(null);
+                    setSelectedFeatureId(null);
+                    setFloatingEditorContext(null);
                   }}
                 />
               )}
@@ -627,7 +797,9 @@ export default function Home() {
                 presentationMode={workspaceMode}
                 importContext={presentationContext}
                 isBusy={isBusy}
-                onSelectBody={handleBodySelect}
+                selectedFeatureId={selectedFeatureId}
+                referenceImageUrl={referenceImageUrl}
+                onSelectFeature={handleFeatureSelect}
                 onBodyParamChange={handleBodyParamChange}
                 onPlanarSelection={handlePlanarSelection}
               />
@@ -698,13 +870,20 @@ export default function Home() {
 
             {isCompareMode ? (
               <div className="model-toolbar">
-                <button
-                  type="button"
-                  className="mode-chip"
+              {isPreviewStale ? <span className="warning-chip subtle">Rebuilding exact preview…</span> : null}
+              <button
+                type="button"
+                className="mode-chip"
                   onClick={() => setShowOriginalReference((value) => !value)}
                 >
                   {showOriginalReference ? "Hide original reference" : "Show original reference"}
                 </button>
+              </div>
+            ) : null}
+
+            {!isCompareMode && isPreviewStale ? (
+              <div className="model-toolbar">
+                <span className="warning-chip subtle">Rebuilding exact preview…</span>
               </div>
             ) : null}
 
@@ -740,9 +919,21 @@ export default function Home() {
                   label={workflowMode === "creative" ? "Creative object" : "Workspace revision"}
                   defaultInteractionMode={workflowMode === "creative" ? "orbit" : "pan"}
                   defaultCameraPreset={workflowMode === "creative" ? "iso" : "front"}
+                  onSelect={workflowMode === "workspace" ? handleViewerSelect : undefined}
+                  onClearSelection={() => {
+                    setSelectedFeatureId(null);
+                    setFloatingEditorContext(null);
+                  }}
+                  selectionMarker={selectionMarker}
+                  focusTarget={focusTarget}
+                  floatingPoint={floatingEditorContext?.mode === "floating" ? floatingEditorContext.point : null}
+                  floatingEditor={floatingCanvasEditor}
+                  annotations={semanticAnnotations.length ? <SemanticAnnotations items={semanticAnnotations} /> : null}
                 />
               </div>
             )}
+
+            {dockedFloatingEditor}
 
             <div className="actions">
               <a

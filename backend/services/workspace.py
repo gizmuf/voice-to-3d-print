@@ -14,6 +14,7 @@ from services.editable_model import (
     WorkspaceMutation,
     WorkspaceRecord,
 )
+from services.native_converter import refresh_manufacturability
 
 
 WORKSPACES_DIR = settings.output_dir / "workspaces"
@@ -73,13 +74,13 @@ def update_workspace(
     record = get_workspace(workspace_id)
     model = record.editable_model.model_copy(deep=True)
     if mutation.expected_revision_id != model.revision_id:
-      raise HTTPException(
-          status_code=409,
-          detail={
-              "message": "Workspace revision is stale.",
-              "editable_model": record.editable_model.model_dump(mode="json"),
-          },
-      )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Workspace revision is stale.",
+                "editable_model": record.editable_model.model_dump(mode="json"),
+            },
+        )
 
     removal_ids = set(mutation.body_removes)
     if removal_ids:
@@ -97,6 +98,7 @@ def update_workspace(
     if mutation.selection is not None:
         model.selection = mutation.selection
 
+    model.manufacturability = refresh_manufacturability(model)
     model.revision_id = _next_revision_id()
     record.editable_model = model
     return save_workspace(record)
@@ -175,4 +177,3 @@ def _apply_body_update(bodies: list, body_id: str, params: dict[str, float | str
         if _apply_body_update(body.children, body_id, params):
             return True
     return False
-
