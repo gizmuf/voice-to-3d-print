@@ -68,3 +68,10 @@ export type WorkspaceResponse = {
   } | null;
 };
 
+export type WorkspacePresentationMode =
+  | "native"
+  | "step_reference"
+  | "step_editable"
+  | "stl_reconstruction"
+  | "stl_reference"
+  | "stl_locked";

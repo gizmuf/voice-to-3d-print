@@ -1,19 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-type StructuredSpec = {
-  template_id: string;
-  object_label: string;
-  dimensions_mm: Record<string, number>;
-  constraints: Record<string, string | number | boolean>;
-};
+import type { BodyNode } from "../types/editable-model";
 
 type Props = {
-  spec: StructuredSpec;
+  rootBody: BodyNode;
+  selectedBodyId: string | null;
   disabled?: boolean;
-  onDimensionChange: (key: string, value: string) => void;
-  onConstraintChange: (key: string, value: string) => void;
+  onSelectBody: (bodyId: string) => void;
+  onParamChange: (bodyId: string, key: string, value: string) => void;
 };
 
 type Point2D = [number, number];
@@ -38,16 +34,25 @@ const circlePath = (center: Point2D, radius: number, segments = 48) => {
   return `M ${points.map((point) => `${point[0]} ${point[1]}`).join(" L ")} Z`;
 };
 
-const buildLayout = (spec: StructuredSpec) => {
-  const outerDiameter = asNumber(spec.dimensions_mm.outer_diameter, 340);
-  const thickness = asNumber(spec.dimensions_mm.thickness, 15);
-  const holeDiameter = asNumber(spec.constraints.hole_diameter_mm, 7.08);
-  const centerHoleDiameter = asNumber(spec.constraints.center_hole_diameter_mm, 32.93);
-  const ringCount = Math.max(1, Math.round(asNumber(spec.constraints.ring_count, 12)));
-  const radialSpacing = asNumber(spec.constraints.radial_spacing_mm, 9.387);
-  const tangentialSpacing = asNumber(spec.constraints.tangential_spacing_mm, 7);
-  const edgeMargin = asNumber(spec.constraints.edge_margin_mm, 12.421);
-
+const buildLayout = ({
+  outerDiameter,
+  thickness,
+  holeDiameter,
+  centerHoleDiameter,
+  ringCount,
+  radialSpacing,
+  tangentialSpacing,
+  edgeMargin,
+}: {
+  outerDiameter: number;
+  thickness: number;
+  holeDiameter: number;
+  centerHoleDiameter: number;
+  ringCount: number;
+  radialSpacing: number;
+  tangentialSpacing: number;
+  edgeMargin: number;
+}) => {
   const outerRadius = outerDiameter / 2;
   const holeRadius = holeDiameter / 2;
   const centerHoleRadius = centerHoleDiameter / 2;
@@ -129,26 +134,65 @@ const buildLayout = (spec: StructuredSpec) => {
   };
 };
 
+const partForBody = (
+  selectedBodyId: string | null,
+  rootId: string,
+  patternId: string,
+  centerHoleId: string
+): SelectedPart => {
+  if (selectedBodyId === centerHoleId) return "center";
+  if (selectedBodyId === patternId) return "pattern";
+  if (!selectedBodyId || selectedBodyId === rootId) return "outer";
+  return "outer";
+};
+
 export default function PerforatedDiscDesigner({
-  spec,
+  rootBody,
+  selectedBodyId,
   disabled,
-  onDimensionChange,
-  onConstraintChange,
+  onSelectBody,
+  onParamChange,
 }: Props) {
-  const [selectedPart, setSelectedPart] = useState<SelectedPart>("pattern");
+  const centerHoleBody = rootBody.children.find((child) => child.label === "Center hole" || child.kind === "hole");
+  const patternBody = rootBody.children.find((child) => child.kind === "circular_pattern");
+  const thicknessBody = rootBody.children.find((child) => child.kind === "thickness");
+
+  const centerHoleId = centerHoleBody?.id ?? `${rootBody.id}:center_hole`;
+  const patternId = patternBody?.id ?? `${rootBody.id}:pattern`;
+
+  const [selectedPart, setSelectedPart] = useState<SelectedPart>(
+    partForBody(selectedBodyId, rootBody.id, patternId, centerHoleId)
+  );
+
+  useEffect(() => {
+    setSelectedPart(partForBody(selectedBodyId, rootBody.id, patternId, centerHoleId));
+  }, [centerHoleId, patternId, rootBody.id, selectedBodyId]);
+
+  const geometry = useMemo(
+    () => ({
+      outerDiameter: asNumber(rootBody.params.outer_diameter, 340),
+      thickness: asNumber(thicknessBody?.params.thickness_mm, asNumber(rootBody.params.thickness, 15)),
+      holeDiameter: asNumber(patternBody?.params.hole_diameter_mm, 7.08),
+      centerHoleDiameter: asNumber(centerHoleBody?.params.diameter_mm, 32.93),
+      ringCount: Math.max(1, Math.round(asNumber(patternBody?.params.ring_count, 12))),
+      radialSpacing: asNumber(patternBody?.params.radial_spacing_mm, 9.387),
+      tangentialSpacing: asNumber(patternBody?.params.tangential_spacing_mm, 7),
+      edgeMargin: asNumber(patternBody?.params.edge_margin_mm, 12.421),
+    }),
+    [centerHoleBody?.params.diameter_mm, patternBody?.params.edge_margin_mm, patternBody?.params.hole_diameter_mm, patternBody?.params.radial_spacing_mm, patternBody?.params.ring_count, patternBody?.params.tangential_spacing_mm, rootBody.params.outer_diameter, rootBody.params.thickness, thicknessBody?.params.thickness_mm]
+  );
 
   const layout = useMemo(() => {
     try {
-      return buildLayout(spec);
+      return buildLayout(geometry);
     } catch (error) {
       return {
         error: (error as Error).message,
       } as const;
     }
-  }, [spec]);
+  }, [geometry]);
 
-  const outerDiameter = asNumber(spec.dimensions_mm.outer_diameter, 340);
-  const outerRadius = outerDiameter / 2;
+  const outerRadius = geometry.outerDiameter / 2;
   const viewPad = outerRadius * 0.18;
   const viewBox = `${-outerRadius - viewPad} ${-outerRadius - viewPad} ${(outerRadius + viewPad) * 2} ${(outerRadius + viewPad) * 2}`;
 
@@ -159,23 +203,36 @@ export default function PerforatedDiscDesigner({
         ? "manufacturability-risk"
         : "manufacturability-safe";
 
+  const selectPart = (part: SelectedPart) => {
+    setSelectedPart(part);
+    if (part === "center") {
+      onSelectBody(centerHoleId);
+      return;
+    }
+    if (part === "pattern") {
+      onSelectBody(patternId);
+      return;
+    }
+    onSelectBody(rootBody.id);
+  };
+
   const handleCanvasClick = (event: React.MouseEvent<SVGSVGElement>) => {
     if ("error" in layout) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * (outerRadius + viewPad) * 2 - (outerRadius + viewPad);
     const y = ((event.clientY - rect.top) / rect.height) * (outerRadius + viewPad) * 2 - (outerRadius + viewPad);
     const distance = Math.hypot(x, y);
-    if (distance <= layout.centerHoleDiameter / 2) {
-      setSelectedPart("center");
+    if (distance <= geometry.centerHoleDiameter / 2) {
+      selectPart("center");
       return;
     }
-    const hitHole = layout.holes.some((hole) => Math.hypot(x - hole.center[0], y - hole.center[1]) <= hole.radius * 1.4);
+    const hitHole = "error" in layout ? false : layout.holes.some((hole) => Math.hypot(x - hole.center[0], y - hole.center[1]) <= hole.radius * 1.4);
     if (hitHole) {
-      setSelectedPart("pattern");
+      selectPart("pattern");
       return;
     }
-    if (distance <= layout.outerRadius) {
-      setSelectedPart("outer");
+    if (distance <= outerRadius) {
+      selectPart("outer");
     }
   };
 
@@ -185,7 +242,7 @@ export default function PerforatedDiscDesigner({
         <div>
           <div className="status-label">Flagship designer</div>
           <div className="validation-headline">Perforated disc CAD workspace</div>
-          <div className="muted">Click the outer disc, center hole, or perforation field to focus the relevant controls.</div>
+          <div className="muted">The 2D canvas edits the semantic model directly. Select the outer disc, the pattern, or the center hole.</div>
         </div>
         <div className={`manufacturability-pill ${statusClass}`}>
           {"error" in layout ? "Invalid" : layout.status === "risk" ? "Risk" : "Safe"}
@@ -193,13 +250,13 @@ export default function PerforatedDiscDesigner({
       </div>
 
       <div className="designer-part-switch">
-        <button type="button" className={`mode-chip ${selectedPart === "outer" ? "active" : ""}`} onClick={() => setSelectedPart("outer")}>
+        <button type="button" className={`mode-chip ${selectedPart === "outer" ? "active" : ""}`} onClick={() => selectPart("outer")}>
           Outer disc
         </button>
-        <button type="button" className={`mode-chip ${selectedPart === "pattern" ? "active" : ""}`} onClick={() => setSelectedPart("pattern")}>
+        <button type="button" className={`mode-chip ${selectedPart === "pattern" ? "active" : ""}`} onClick={() => selectPart("pattern")}>
           Hole pattern
         </button>
-        <button type="button" className={`mode-chip ${selectedPart === "center" ? "active" : ""}`} onClick={() => setSelectedPart("center")}>
+        <button type="button" className={`mode-chip ${selectedPart === "center" ? "active" : ""}`} onClick={() => selectPart("center")}>
           Center hole
         </button>
       </div>
@@ -235,9 +292,9 @@ export default function PerforatedDiscDesigner({
         ) : (
           <>
             <div className="face-editor-legend">
-              <span><i className="legend-swatch manufacturability-safe" /> Outer disc {outerDiameter.toFixed(1)} mm</span>
+              <span><i className="legend-swatch manufacturability-safe" /> Outer disc {geometry.outerDiameter.toFixed(1)} mm</span>
               <span><i className="legend-swatch manufacturability-risk" /> {layout.holes.length} holes</span>
-              <span><i className="legend-swatch ghost" /> Thickness {layout.thickness.toFixed(1)} mm</span>
+              <span><i className="legend-swatch ghost" /> Thickness {geometry.thickness.toFixed(1)} mm</span>
             </div>
             <div className="warning-list">
               {layout.messages.map((message) => (
@@ -257,8 +314,8 @@ export default function PerforatedDiscDesigner({
               <span>Outer diameter mm</span>
               <input
                 type="number"
-                value={spec.dimensions_mm.outer_diameter}
-                onChange={(event) => onDimensionChange("outer_diameter", event.target.value)}
+                value={geometry.outerDiameter}
+                onChange={(event) => onParamChange(rootBody.id, "outer_diameter", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -266,8 +323,8 @@ export default function PerforatedDiscDesigner({
               <span>Thickness mm</span>
               <input
                 type="number"
-                value={spec.dimensions_mm.thickness}
-                onChange={(event) => onDimensionChange("thickness", event.target.value)}
+                value={geometry.thickness}
+                onChange={(event) => onParamChange(thicknessBody?.id ?? rootBody.id, thicknessBody ? "thickness_mm" : "thickness", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -275,8 +332,8 @@ export default function PerforatedDiscDesigner({
               <span>Edge margin mm</span>
               <input
                 type="number"
-                value={String(spec.constraints.edge_margin_mm ?? "")}
-                onChange={(event) => onConstraintChange("edge_margin_mm", event.target.value)}
+                value={geometry.edgeMargin}
+                onChange={(event) => onParamChange(patternId, "edge_margin_mm", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -289,8 +346,8 @@ export default function PerforatedDiscDesigner({
               <span>Hole diameter mm</span>
               <input
                 type="number"
-                value={String(spec.constraints.hole_diameter_mm ?? "")}
-                onChange={(event) => onConstraintChange("hole_diameter_mm", event.target.value)}
+                value={geometry.holeDiameter}
+                onChange={(event) => onParamChange(patternId, "hole_diameter_mm", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -298,8 +355,8 @@ export default function PerforatedDiscDesigner({
               <span>Ring count</span>
               <input
                 type="number"
-                value={String(spec.constraints.ring_count ?? "")}
-                onChange={(event) => onConstraintChange("ring_count", event.target.value)}
+                value={geometry.ringCount}
+                onChange={(event) => onParamChange(patternId, "ring_count", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -307,8 +364,8 @@ export default function PerforatedDiscDesigner({
               <span>Radial spacing mm</span>
               <input
                 type="number"
-                value={String(spec.constraints.radial_spacing_mm ?? "")}
-                onChange={(event) => onConstraintChange("radial_spacing_mm", event.target.value)}
+                value={geometry.radialSpacing}
+                onChange={(event) => onParamChange(patternId, "radial_spacing_mm", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -316,8 +373,8 @@ export default function PerforatedDiscDesigner({
               <span>Tangential spacing mm</span>
               <input
                 type="number"
-                value={String(spec.constraints.tangential_spacing_mm ?? "")}
-                onChange={(event) => onConstraintChange("tangential_spacing_mm", event.target.value)}
+                value={geometry.tangentialSpacing}
+                onChange={(event) => onParamChange(patternId, "tangential_spacing_mm", event.target.value)}
                 disabled={disabled}
               />
             </label>
@@ -326,28 +383,16 @@ export default function PerforatedDiscDesigner({
 
         {selectedPart === "center" ? (
           <label className="field-row compact-field">
-            <span>Center hole diameter mm</span>
+            <span>Center hole mm</span>
             <input
               type="number"
-              value={String(spec.constraints.center_hole_diameter_mm ?? "")}
-              onChange={(event) => onConstraintChange("center_hole_diameter_mm", event.target.value)}
+              value={geometry.centerHoleDiameter}
+              onChange={(event) => onParamChange(centerHoleId, "diameter_mm", event.target.value)}
               disabled={disabled}
             />
           </label>
         ) : null}
       </div>
-
-      {"error" in layout ? null : (
-        <div className="project-summary">
-          <div className="status-label">Derived pattern</div>
-          <div className="analysis-grid">
-            <span>{layout.holes.length} total holes</span>
-            <span>{layout.ringCount} rings</span>
-            <span>{layout.holesPerRing.join(" / ")} per ring</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
-

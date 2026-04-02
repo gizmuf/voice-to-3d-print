@@ -219,6 +219,32 @@ body {
   resize: vertical;
 }
 
+.field-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.example-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.example-chip {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: #fff8ef;
+  color: var(--ink);
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.action-button {
+  border: none;
+  cursor: pointer;
+}
+
 .field-row span.muted {
   font-size: 0.8rem;
 }
@@ -675,6 +701,42 @@ code {
   border: 1px solid rgba(0, 0, 0, 0.06);
   display: grid;
   gap: 8px;
+}
+
+.body-tree-inspector {
+  display: grid;
+  gap: 16px;
+}
+
+.body-tree-list {
+  display: grid;
+  gap: 8px;
+}
+
+.body-tree-node {
+  display: grid;
+  gap: 6px;
+}
+
+.body-tree-button {
+  width: 100%;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: #fffdf8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.body-tree-button.active {
+  border-color: rgba(43, 140, 122, 0.38);
+  background: rgba(232, 247, 243, 0.72);
+  box-shadow: 0 10px 18px rgba(43, 140, 122, 0.12);
 }
 
 .analysis-grid {

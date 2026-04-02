@@ -44,11 +44,19 @@ export function useEditableWorkspace() {
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const hydrate = useCallback((payload: WorkspaceResponse) => {
+  const hydrateWorkspace = useCallback((payload: WorkspaceResponse) => {
     setWorkspaceId(payload.workspace_id);
     setEditableModel(payload.editable_model);
     setLatestPreview(payload.latest_preview ?? null);
     setLatestBuild(payload.latest_build ?? null);
+  }, []);
+
+  const resetWorkspace = useCallback(() => {
+    setWorkspaceId(null);
+    setEditableModel(null);
+    setLatestPreview(null);
+    setLatestBuild(null);
+    setError(null);
   }, []);
 
   const createWorkspace = useCallback(async (payload: CreatePayload) => {
@@ -62,23 +70,23 @@ export function useEditableWorkspace() {
       });
       if (!response.ok) throw new Error("Could not create the design workspace.");
       const data = (await response.json()) as WorkspaceResponse;
-      hydrate(data);
+      hydrateWorkspace(data);
       return data;
     } finally {
       setIsBusy(false);
     }
-  }, [backendUrl, hydrate]);
+  }, [backendUrl, hydrateWorkspace]);
 
-  const refreshWorkspace = useCallback(async (id = workspaceId) => {
+  const loadWorkspace = useCallback(async (id = workspaceId) => {
     if (!id) return null;
     const response = await fetch(`${backendUrl}/workspace/${id}`);
     if (!response.ok) throw new Error("Could not refresh the workspace.");
     const data = (await response.json()) as WorkspaceResponse;
-    hydrate(data);
+    hydrateWorkspace(data);
     return data;
-  }, [backendUrl, hydrate, workspaceId]);
+  }, [backendUrl, hydrateWorkspace, workspaceId]);
 
-  const mutate = useCallback(async (payload: MutationPayload) => {
+  const mutate = useCallback(async (payload: MutationPayload, allowRetry = true) => {
     if (!workspaceId || !editableModel) return null;
     setError(null);
     const requestBody = {
@@ -94,15 +102,24 @@ export function useEditableWorkspace() {
     if (response.status === 409) {
       const stale = await response.json();
       if (stale?.detail?.editable_model) {
-        setEditableModel(stale.detail.editable_model as EditableModel);
+        const refreshed = {
+          workspace_id: workspaceId,
+          editable_model: stale.detail.editable_model as EditableModel,
+          latest_preview: latestPreview ?? null,
+          latest_build: latestBuild ?? null,
+        } satisfies WorkspaceResponse;
+        hydrateWorkspace(refreshed);
+        if (allowRetry) {
+          return mutate(payload, false);
+        }
       }
       throw new Error("Workspace changed while editing. Try again.");
     }
     if (!response.ok) throw new Error("Could not apply the edit.");
     const data = (await response.json()) as WorkspaceResponse;
-    hydrate(data);
+    hydrateWorkspace(data);
     return data;
-  }, [backendUrl, editableModel, hydrate, workspaceId]);
+  }, [backendUrl, editableModel, hydrateWorkspace, latestBuild, latestPreview, workspaceId]);
 
   const updateBody = useCallback(async (bodyId: string, params: BodyNode["params"]) => {
     return mutate({
@@ -125,7 +142,7 @@ export function useEditableWorkspace() {
         body: JSON.stringify({ expected_revision_id: editableModel.revision_id }),
       });
       if (response.status === 409) {
-        await refreshWorkspace(workspaceId);
+        await loadWorkspace(workspaceId);
         throw new Error("Workspace changed before preview could run.");
       }
       if (!response.ok) throw new Error("Could not preview the current revision.");
@@ -142,7 +159,7 @@ export function useEditableWorkspace() {
     } finally {
       setIsBusy(false);
     }
-  }, [backendUrl, editableModel, refreshWorkspace, workspaceId]);
+  }, [backendUrl, editableModel, loadWorkspace, workspaceId]);
 
   const build = useCallback(async () => {
     if (!workspaceId || !editableModel) return null;
@@ -155,7 +172,7 @@ export function useEditableWorkspace() {
         body: JSON.stringify({ expected_revision_id: editableModel.revision_id }),
       });
       if (response.status === 409) {
-        await refreshWorkspace(workspaceId);
+        await loadWorkspace(workspaceId);
         throw new Error("Workspace changed before export could run.");
       }
       if (!response.ok) throw new Error("Could not export the current revision.");
@@ -178,7 +195,7 @@ export function useEditableWorkspace() {
     } finally {
       setIsBusy(false);
     }
-  }, [backendUrl, editableModel, refreshWorkspace, workspaceId]);
+  }, [backendUrl, editableModel, loadWorkspace, workspaceId]);
 
   return {
     workspaceId,
@@ -188,8 +205,10 @@ export function useEditableWorkspace() {
     isBusy,
     error,
     setError,
+    hydrateWorkspace,
+    resetWorkspace,
     createWorkspace,
-    refreshWorkspace,
+    loadWorkspace,
     mutate,
     updateBody,
     selectFeature,
@@ -197,4 +216,3 @@ export function useEditableWorkspace() {
     build,
   };
 }
-
