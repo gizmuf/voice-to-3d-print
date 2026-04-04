@@ -405,11 +405,16 @@ async def route_intent_endpoint(request: RouteIntentRequest) -> RouteIntentRespo
     confirmation_required = route["mode"] == "useful"
 
     if route["mode"] == "useful":
-        structured_spec = build_useful_structured_spec(
-            request.raw_text,
-            source=request.source,
-            existing_spec=request.existing_spec,
-        )
+        if route.get("template_id") is None:
+            raise HTTPException(status_code=422, detail=route["route_reason"])
+        try:
+            structured_spec = build_useful_structured_spec(
+                request.raw_text,
+                source=request.source,
+                existing_spec=request.existing_spec,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         prompt = structured_spec["source_inputs"]["text"]
     else:
         if request.raw_text.strip():
@@ -456,7 +461,10 @@ def create_workspace_endpoint(request: WorkspaceCreateRequest) -> WorkspaceRespo
     elif request.structured_spec is not None:
         editable_model = structured_spec_to_editable(request.structured_spec)
     elif request.prompt:
-        structured_spec = build_useful_structured_spec(request.prompt, source="text")
+        try:
+            structured_spec = build_useful_structured_spec(request.prompt, source="text")
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         editable_model = structured_spec_to_editable(structured_spec)
     else:
         raise HTTPException(status_code=400, detail="Workspace create requires editable_model, structured_spec, or prompt.")

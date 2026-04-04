@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, createElement, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
-import { Bounds, Html, OrbitControls, useGLTF } from "@react-three/drei";
+import { Bounds, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import type { Material, Mesh } from "three";
 import { Color, MOUSE, Vector3 } from "three";
@@ -42,8 +42,7 @@ type ModelViewerProps = {
   onClearSelection?: () => void;
   selectionMarker?: ViewerSelectionMarker | null;
   focusTarget?: ViewerFocusTarget | null;
-  floatingEditor?: ReactNode;
-  floatingPoint?: { x: number; y: number; z: number } | null;
+  selectionChip?: ReactNode;
   annotations?: ReactNode;
 };
 
@@ -185,11 +184,6 @@ function SelectionMarker({ marker }: { marker: ViewerSelectionMarker }) {
         emissive: "#f59f3a",
         emissiveIntensity: 0.4,
       })
-    ),
-    createElement(
-      Html,
-      { center: true, distanceFactor: 14 },
-      createElement("div", { className: "viewer-selection-badge" }, marker.label)
     )
   );
 }
@@ -252,29 +246,22 @@ export default function ModelViewer({
   onClearSelection,
   selectionMarker,
   focusTarget = null,
-  floatingEditor,
-  floatingPoint = null,
+  selectionChip,
   annotations,
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
-  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [interactionMode, setInteractionMode] = useState<"orbit" | "pan">(defaultInteractionMode);
   const controlsRef = useRef<{ target: Vector3; update: () => void } | null>(null);
 
   useEffect(() => {
     setHoveredObjectId(null);
     setSelectedObjectId(null);
-    setSelectedLabel(selectionMarker?.label || null);
   }, [src, ghostModelUrl]);
 
   useEffect(() => {
     setInteractionMode(defaultInteractionMode);
   }, [defaultInteractionMode, src, ghostModelUrl]);
-
-  useEffect(() => {
-    setSelectedLabel(selectionMarker?.label || null);
-  }, [selectionMarker]);
 
   const hasGhost = Boolean(showChanges && ghostModelUrl);
   const normalizedCamera = useMemo(() => {
@@ -315,7 +302,6 @@ export default function ModelViewer({
         onPointerMissed={() => {
           setHoveredObjectId(null);
           setSelectedObjectId(null);
-          setSelectedLabel(null);
           onClearSelection?.();
         }}
       >
@@ -341,23 +327,11 @@ export default function ModelViewer({
                 onHover={setHoveredObjectId}
                 onSelect={(payload, objectId) => {
                   setSelectedObjectId(objectId);
-                  setSelectedLabel(selectionMarker?.label || payload.objectName);
                   onSelect?.(payload);
                 }}
               />
               {selectionMarker ? <SelectionMarker marker={selectionMarker} /> : null}
               {annotations}
-              {floatingPoint && floatingEditor ? (
-                createElement(
-                  "group",
-                  { position: [floatingPoint.x, floatingPoint.y, floatingPoint.z] },
-                  createElement(
-                    Html,
-                    { distanceFactor: 14, center: false, style: { pointerEvents: "none" } },
-                    floatingEditor
-                  )
-                )
-              ) : null}
             </>
           </Bounds>
         </Suspense>
@@ -379,7 +353,6 @@ export default function ModelViewer({
       </Canvas>
 
       <div className="model-overlay">
-        {label ? <div className="model-overlay-chip">{label}</div> : null}
         {hasGhost ? <div className="model-overlay-chip subtle">Showing changes</div> : null}
         <button
           type="button"
@@ -388,15 +361,9 @@ export default function ModelViewer({
         >
           {interactionMode === "orbit" ? "Mode: orbit" : "Mode: pan"}
         </button>
-        <div className="model-overlay-chip subtle">
-          {interactionMode === "orbit"
-            ? "Left drag orbit · right drag pan · scroll zoom"
-            : "Left drag pan · right drag orbit · scroll zoom"}
-        </div>
-        {selectedLabel ? (
-          <div className="model-overlay-chip accent">Selected {selectedLabel}</div>
-        ) : null}
       </div>
+
+      {selectionChip ? <div className="model-selection-chip-slot">{selectionChip}</div> : null}
 
       {isUpdating ? (
         <div className="model-loading">

@@ -14,6 +14,7 @@ type Props = {
   rootBody: BodyNode;
   selectedFeatureId: string | null;
   disabled?: boolean;
+  showParams?: boolean;
   onSelectFeature: (bodyId: string) => void;
   onParamChange: (featureId: string, key: string, value: string) => void;
 };
@@ -34,6 +35,7 @@ export default function PerforatedDiscDesigner({
   rootBody,
   selectedFeatureId,
   disabled,
+  showParams = true,
   onSelectFeature,
   onParamChange,
 }: Props) {
@@ -182,92 +184,102 @@ export default function PerforatedDiscDesigner({
         )}
       </div>
 
-      <div className="spec-grid">
-        {selectedPart === "outer" ? (
-          <>
-            <label className="field-row compact-field">
-              <span>Outer diameter mm</span>
-              <input
-                type="number"
-                value={geometry.outerDiameter}
-                onChange={(event) => onParamChange(rootBody.id, "outer_diameter", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-            <label className="field-row compact-field">
-              <span>Thickness mm</span>
-              <input
-                type="number"
-                value={geometry.thickness}
-                onChange={(event) => onParamChange(thicknessBody?.id ?? rootBody.id, thicknessBody ? "thickness_mm" : "thickness", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-            <label className="field-row compact-field">
-              <span>Edge margin mm</span>
-              <input
-                type="number"
-                value={geometry.edgeMargin}
-                onChange={(event) => onParamChange(patternId, "edge_margin_mm", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-          </>
-        ) : null}
+      {showParams ? (
+        <div className="spec-grid">
+          {selectedPart === "outer" ? (
+            <>
+              <label className="field-row compact-field">
+                <span>Outer diameter mm</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={geometry.outerDiameter}
+                  onChange={(event) => onParamChange(rootBody.id, "outer_diameter", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+              <label className="field-row compact-field">
+                <span>Thickness mm</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={geometry.thickness}
+                  onChange={(event) => onParamChange(thicknessBody?.id ?? rootBody.id, thicknessBody ? "thickness_mm" : "thickness", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+              <label className="field-row compact-field">
+                <span>Edge margin mm</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={geometry.edgeMargin}
+                  onChange={(event) => onParamChange(patternId, "edge_margin_mm", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+            </>
+          ) : null}
 
-        {selectedPart === "pattern" ? (
-          <>
-            <label className="field-row compact-field">
-              <span>Hole diameter mm</span>
-              <input
-                type="number"
-                value={geometry.holeDiameter}
-                onChange={(event) => onParamChange(patternId, "hole_diameter_mm", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-            <label className="field-row compact-field">
-              <span>Ring count</span>
-              <input
-                type="number"
-                value={geometry.ringCount}
-                onChange={(event) => onParamChange(patternId, "ring_count", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-            <label className="field-row compact-field">
-              <span>Radial spacing mm</span>
-              <input
-                type="number"
-                value={geometry.radialSpacing}
-                onChange={(event) => onParamChange(patternId, "radial_spacing_mm", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-            <label className="field-row compact-field">
-              <span>Tangential spacing mm</span>
-              <input
-                type="number"
-                value={geometry.tangentialSpacing}
-                onChange={(event) => onParamChange(patternId, "tangential_spacing_mm", event.target.value)}
-                disabled={disabled}
-              />
-            </label>
-          </>
-        ) : null}
+          {selectedPart === "pattern" ? (
+            <>
+              <label className="field-row compact-field">
+                <span>Hole diameter mm</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={geometry.holeDiameter}
+                  onChange={(event) => onParamChange(patternId, "hole_diameter_mm", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+              <label className="field-row compact-field">
+                <span>Ring count</span>
+                <input
+                  type="number"
+                  step="1"
+                  value={geometry.ringCount}
+                  onChange={(event) => onParamChange(patternId, "ring_count", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+              <label className="field-row compact-field">
+                <span>Radial spacing mm</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={geometry.radialSpacing}
+                  onChange={(event) => onParamChange(patternId, "radial_spacing_mm", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+              <label className="field-row compact-field">
+                <span>Tangential spacing mm</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={geometry.tangentialSpacing}
+                  onChange={(event) => onParamChange(patternId, "tangential_spacing_mm", event.target.value)}
+                  disabled={disabled}
+                />
+              </label>
+            </>
+          ) : null}
 
-        {selectedPart === "center" ? (
-          <label className="field-row compact-field">
-            <span>Center hole mm</span>
-            <input
-              type="number"
-              value={geometry.centerHoleDiameter}
-              onChange={(event) => onParamChange(centerHoleId, "diameter_mm", event.target.value)}
-              disabled={disabled}
-            />
-          </label>
-        ) : null}
-      </div>
+          {selectedPart === "center" ? (
+            <label className="field-row compact-field">
+              <span>Center hole mm</span>
+              <input
+                type="number"
+                step="0.01"
+                value={geometry.centerHoleDiameter}
+                onChange={(event) => onParamChange(centerHoleId, "diameter_mm", event.target.value)}
+                disabled={disabled}
+              />
+            </label>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,34 +1,67 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import Link from "next/link";
 
 import BodyTreeInspector from "../components/BodyTreeInspector";
+import CanvasTabBar, { type CanvasTab } from "../components/CanvasTabBar";
 import ElementAiInput from "../components/ElementAiInput";
-import FloatingQuickEditor from "../components/FloatingQuickEditor";
 import ExistingModelPanel, {
   type WorkspaceImportContext,
 } from "../components/ExistingModelPanel";
-import ModelViewer, { type SelectionPayload, type ViewerFocusTarget } from "../components/ModelViewer";
+import ModelViewer, {
+  type SelectionPayload,
+  type ViewerFocusTarget,
+} from "../components/ModelViewer";
 import PerforatedDiscDesigner from "../components/PerforatedDiscDesigner";
 import PlanarFaceEditor from "../components/PlanarFaceEditor";
+import SelectionChip from "../components/SelectionChip";
 import SemanticAnnotations from "../components/SemanticAnnotations";
 import VoicePanel from "../components/VoicePanel";
 import { resolveBackendUrl, resolveUrl } from "../lib/backend";
 import {
   classifyPerforatedDiscClick,
+  DISC_PICK_CONFIDENCE,
   getPerforatedDiscAnnotations,
   getPerforatedDiscFocusTarget,
   type SemanticAnnotation,
 } from "../lib/perforated-disc-geometry";
+import {
+  formatParamDisplayValue,
+  getEditableParamEntries,
+} from "../lib/param-editor-utils";
 import { useEditableWorkspace } from "../lib/use-editable-workspace";
-import type { BodyNode, EditableModel, WorkspacePresentationMode, WorkspaceResponse } from "../types/editable-model";
+import type {
+  BodyNode,
+  EditableModel,
+  WorkspacePresentationMode,
+} from "../types/editable-model";
 
 const STORAGE_KEY = "3dprint:workspace-shell";
+const HISTORY_LIMIT = 40;
 
 type StoredWorkspaceShell = {
   workspaceId?: string;
-  context?: Pick<WorkspaceImportContext, "mode" | "sourceModelUrl" | "sourceStlUrl" | "message"> | null;
+  context?: Pick<
+    WorkspaceImportContext,
+    "mode" | "sourceModelUrl" | "sourceStlUrl" | "message"
+  > | null;
+};
+
+type HistoryEntry = {
+  model: EditableModel;
+  selectedFeatureId: string | null;
+};
+
+type MutationPayload = {
+  body_updates?: Array<{
+    body_id: string;
+    params: Record<string, number | string | boolean>;
+  }>;
+  selection?: {
+    feature_id: string;
+    scope: "one" | "all_similar" | "body";
+  } | null;
 };
 
 const flattenBodies = (bodies: BodyNode[]): BodyNode[] =>
@@ -40,7 +73,10 @@ const findBodyById = (bodies: BodyNode[], bodyId: string | null) =>
 const firstEditableFeatureId = (model: EditableModel | null) =>
   model ? flattenBodies(model.bodies).find((body) => body.editable)?.id ?? null : null;
 
-const coerceParamValue = (current: number | string | boolean | undefined, nextRaw: string) => {
+const coerceParamValue = (
+  current: number | string | boolean | undefined,
+  nextRaw: string
+) => {
   if (typeof current === "boolean") {
     return nextRaw === "true";
   }
@@ -51,7 +87,9 @@ const coerceParamValue = (current: number | string | boolean | undefined, nextRa
   return nextRaw;
 };
 
-const inferPresentationMode = (model: EditableModel | null): WorkspacePresentationMode => {
+const inferPresentationMode = (
+  model: EditableModel | null
+): WorkspacePresentationMode => {
   if (!model) return "native";
   if (model.source === "step_import") return "step_reference";
   if (model.source === "stl_reconstructed") return "stl_reconstruction";
@@ -64,14 +102,104 @@ const isEditablePresentation = (mode: WorkspacePresentationMode | null) =>
 const isPerforatedDiscModel = (model: EditableModel | null) =>
   Boolean(model?.bodies[0]?.params?._template_id === "perforated_disc");
 
-const toAbsolute = (backendUrl: string, value?: string | null) => resolveUrl(backendUrl, value);
+const toAbsolute = (backendUrl: string, value?: string | null) =>
+  resolveUrl(backendUrl, value);
 
-type FloatingEditorContext = {
-  point: { x: number; y: number; z: number };
-  mode: "floating" | "docked";
-} | null;
+const cloneEditableModel = (model: EditableModel): EditableModel =>
+  JSON.parse(JSON.stringify(model)) as EditableModel;
 
-function WorkspaceEditor({
+const pushHistoryEntry = (history: HistoryEntry[], entry: HistoryEntry) => {
+  const next = [...history, entry];
+  return next.slice(Math.max(0, next.length - HISTORY_LIMIT));
+};
+
+const buildHistoryMutation = (
+  currentModel: EditableModel,
+  targetModel: EditableModel,
+  targetSelectedFeatureId: string | null
+): MutationPayload | null => {
+  const currentBodies = flattenBodies(currentModel.bodies);
+  const targetBodies = flattenBodies(targetModel.bodies);
+  if (currentBodies.length !== targetBodies.length) return null;
+
+  const currentMap = new Map(currentBodies.map((body) => [body.id, body]));
+  const updates = targetBodies.flatMap((targetBody) => {
+    const currentBody = currentMap.get(targetBody.id);
+    if (!currentBody) {
+      return [];
+    }
+    return JSON.stringify(currentBody.params) === JSON.stringify(targetBody.params)
+      ? []
+      : [{ body_id: targetBody.id, params: targetBody.params }];
+  });
+
+  const currentSelection = currentModel.selection?.feature_id ?? null;
+  const selection =
+    targetSelectedFeatureId && findBodyById(targetModel.bodies, targetSelectedFeatureId)
+      ? { feature_id: targetSelectedFeatureId, scope: "one" as const }
+      : null;
+
+  if (!updates.length && currentSelection === (selection?.feature_id ?? null)) {
+    return null;
+  }
+
+  return {
+    body_updates: updates,
+    selection,
+  };
+};
+
+const getDefaultCanvasTab = ({
+  workflowMode,
+  workspaceMode,
+  editableModel,
+  compareEnabled,
+  selectedFeatureId,
+  importContext,
+}: {
+  workflowMode: "workspace" | "creative";
+  workspaceMode: WorkspacePresentationMode;
+  editableModel: EditableModel | null;
+  compareEnabled: boolean;
+  selectedFeatureId: string | null;
+  importContext: WorkspaceImportContext | null;
+}): CanvasTab => {
+  if (workflowMode === "creative") return "3d";
+  if (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) return "2d";
+  if (
+    workspaceMode === "stl_reconstruction" &&
+    selectedFeatureId &&
+    importContext?.analysis?.targets?.some(
+      (target) => target.id === selectedFeatureId && target.type !== "unsupported" && Boolean(target.editable)
+    )
+  ) {
+    return "2d";
+  }
+  if (compareEnabled) return "3d";
+  return "3d";
+};
+
+const selectionChipValue = (body: BodyNode | null) => {
+  if (!body) return null;
+  const [entry] = getEditableParamEntries(body, 1);
+  if (!entry) return null;
+  return formatParamDisplayValue(entry.key, entry.value);
+};
+
+const hasEditablePlanarTarget = (
+  context: WorkspaceImportContext | null,
+  featureId: string
+) =>
+  Boolean(
+    context?.analysis?.targets?.some(
+      (target) =>
+        target.id === featureId &&
+        target.type !== "unsupported" &&
+        Boolean(target.editable)
+    )
+  );
+
+function WorkspaceInspectorPanel({
   editableModel,
   presentationMode,
   importContext,
@@ -80,7 +208,8 @@ function WorkspaceEditor({
   referenceImageUrl,
   onSelectFeature,
   onBodyParamChange,
-  onPlanarSelection,
+  onAiEdit,
+  inspectorRef,
 }: {
   editableModel: EditableModel | null;
   presentationMode: WorkspacePresentationMode | null;
@@ -90,249 +219,96 @@ function WorkspaceEditor({
   referenceImageUrl: string | null;
   onSelectFeature: (featureId: string, source?: "tree" | "designer" | "planar" | "viewer") => void;
   onBodyParamChange: (featureId: string, key: string, value: string) => void;
-  onPlanarSelection: (selection: { kind: "pattern" } | { kind: "feature"; featureId: string } | { kind: "center_hole"; featureId?: string }) => void;
+  onAiEdit: (featureId: string, prompt: string) => Promise<void>;
+  inspectorRef: RefObject<HTMLDivElement | null>;
 }) {
-  const selectedBody = editableModel ? findBodyById(editableModel.bodies, selectedFeatureId) : null;
-  const flattenedBodies = useMemo(
-    () => (editableModel ? flattenBodies(editableModel.bodies) : []),
-    [editableModel]
-  );
-  const stlTarget = useMemo(() => {
-    if (presentationMode !== "stl_reconstruction" || !importContext?.analysis?.targets || !selectedBody) {
-      return null;
-    }
-    return (
-      importContext.analysis.targets.find(
-        (target) =>
-          target.id === selectedBody.id &&
-          target.type !== "unsupported" &&
-          Boolean(target.editable)
-      ) ?? null
-    );
-  }, [editableModel, importContext?.analysis?.targets, presentationMode, selectedBody]);
-
-  const planarParams = useMemo(() => {
-    if (!stlTarget || !selectedBody) return null;
-    if (stlTarget.type === "planar_pattern_face") {
-      return {
-        hole_diameter: String(selectedBody.params.hole_diameter_mm ?? ""),
-        width: String(selectedBody.params.width_mm ?? ""),
-        height: String(selectedBody.params.height_mm ?? ""),
-        spacing_x: String(selectedBody.params.tangential_spacing_mm ?? ""),
-        spacing_y: String(selectedBody.params.spacing_y_mm ?? ""),
-        count_x: String(selectedBody.params.count_x ?? ""),
-        count_y: String(selectedBody.params.count_y ?? ""),
-        radial_spacing: String(selectedBody.params.radial_spacing_mm ?? ""),
-        ring_count: String(selectedBody.params.ring_count ?? ""),
-        margin: String(selectedBody.params.edge_margin_mm ?? ""),
-        center_hole_diameter: "",
-      };
-    }
-    return {
-      hole_diameter: String(selectedBody.params.diameter_mm ?? selectedBody.params.hole_diameter_mm ?? ""),
-      width: String(selectedBody.params.width_mm ?? ""),
-      height: String(selectedBody.params.height_mm ?? ""),
-      spacing_x: "",
-      spacing_y: "",
-      count_x: "",
-      count_y: "",
-      radial_spacing: "",
-      ring_count: "",
-      margin: "",
-      center_hole_diameter: "",
-    };
-  }, [selectedBody, stlTarget]);
+  const selectedBody = editableModel
+    ? findBodyById(editableModel.bodies, selectedFeatureId)
+    : null;
+  const isEditable = isEditablePresentation(presentationMode);
+  const aiEditingEnabled =
+    Boolean(selectedBody?.editable) &&
+    presentationMode === "native" &&
+    isPerforatedDiscModel(editableModel);
 
   if (!editableModel) {
-    if (!importContext) return null;
     return (
-      <section className="panel workspace-editor-panel">
+      <section ref={inspectorRef} className="panel rail-panel">
         <div className="panel-header">
-          <p className="eyebrow">Workspace State</p>
-          <h2>{importContext.mode === "stl_locked" ? "Locked mesh" : "Reference model"}</h2>
-          <p className="panel-subtitle">{importContext.message || "This model is view-only in the current mode."}</p>
-        </div>
-        {importContext.analysis?.unsupported_reasons?.length ? (
-          <div className="warning-list">
-            {importContext.analysis.unsupported_reasons.map((reason) => (
-              <span key={reason} className="warning-chip">{reason}</span>
-            ))}
-          </div>
-        ) : null}
-      </section>
-    );
-  }
-
-  if (!isEditablePresentation(presentationMode)) {
-    return (
-      <section className="panel workspace-editor-panel">
-        <div className="panel-header">
-          <p className="eyebrow">Workspace State</p>
-          <h2>Reference-only model</h2>
+          <p className="eyebrow">Inspector</p>
+          <h2>No workspace loaded</h2>
           <p className="panel-subtitle">
-            {importContext?.message || "This imported model is available for inspection only. The current workspace intentionally does not expose editable controls."}
+            Create a semantic model or import a file to unlock selection and precise editing.
           </p>
         </div>
-
-        <div className="project-summary">
-          <div className="status-label">Detected structure</div>
-          <div className="muted">
-            The semantic tree is preserved for labeling and future recognition work, but no parameters are editable in this mode.
-          </div>
-        </div>
-
-        <div className="target-group-list">
-          {flattenedBodies.map((body) => (
-            <div key={body.id} className="target-group-card disabled-card">
-              <strong>{body.label}</strong>
-              <span>{body.kind.replace(/_/g, " ")}</span>
-              {!body.editable ? <span>Locked</span> : null}
-              {body.unsupported_reason ? <span>{body.unsupported_reason}</span> : null}
-            </div>
-          ))}
-        </div>
-
-        <div className="warning-list">
-          {editableModel.manufacturability.messages.map((message) => (
-            <span key={message} className="warning-chip">
-              {message}
-            </span>
-          ))}
-        </div>
       </section>
     );
   }
 
-  const selectedBodyId = selectedBody?.id ?? null;
-  const showDiscDesigner = presentationMode === "native" && isPerforatedDiscModel(editableModel);
-
   return (
-    <section className="panel workspace-editor-panel">
+    <section ref={inspectorRef} className="panel rail-panel rail-inspector-panel">
       <div className="panel-header">
-        <p className="eyebrow">Semantic Workspace</p>
-        <h2>Inspector, constraints, and precision editing</h2>
+        <p className="eyebrow">
+          {isEditable ? "Precision editor" : "Inspect-only workspace"}
+        </p>
+        <h2>
+          {selectedBody ? selectedBody.label : "Select a feature"}
+        </h2>
         <p className="panel-subtitle">
-          All edits mutate the canonical workspace model. Preview and export operate on the current revision only.
+          {isEditable
+            ? "The left rail is the only full editor. Canvas interaction only selects and orients."
+            : importContext?.message ||
+              "This mode is intentionally inspect-only. No editable controls or AI commands are exposed here."}
         </p>
       </div>
-
-      {importContext?.message ? (
-        <div className="warning-list">
-          <span className="warning-chip subtle">{importContext.message}</span>
-        </div>
-      ) : null}
 
       {referenceImageUrl ? (
         <div className="reference-image-card">
           <div className="status-label">Reference image</div>
-          <img src={referenceImageUrl} alt="Workspace reference" className="reference-image-preview" />
+          <img
+            src={referenceImageUrl}
+            alt="Workspace reference"
+            className="reference-image-preview"
+          />
         </div>
       ) : null}
 
       <BodyTreeInspector
         model={editableModel}
-        selectedFeatureId={selectedBodyId}
+        selectedFeatureId={selectedFeatureId}
         onSelect={(featureId) => onSelectFeature(featureId, "tree")}
         onParamChange={onBodyParamChange}
-        disabled={isBusy || !isEditablePresentation(presentationMode)}
+        disabled={isBusy || !isEditable}
+        showParamEditor={isEditable}
       />
 
-      {showDiscDesigner && editableModel.bodies[0] ? (
-        <PerforatedDiscDesigner
-          rootBody={editableModel.bodies[0]}
-          selectedFeatureId={selectedBodyId}
-          disabled={isBusy}
-          onSelectFeature={(featureId) => onSelectFeature(featureId, "designer")}
-          onParamChange={onBodyParamChange}
-        />
+      {aiEditingEnabled && selectedBody ? (
+        <div className="project-summary">
+          <div className="status-label">Prompt edit</div>
+          <div className="muted">
+            Commands are scoped to the current feature. Unsupported edits fail closed.
+          </div>
+          <ElementAiInput
+            disabled={isBusy}
+            onSubmit={(prompt) => onAiEdit(selectedBody.id, prompt)}
+          />
+        </div>
       ) : null}
 
-      {presentationMode === "stl_reconstruction" && stlTarget && planarParams ? (
-        <PlanarFaceEditor
-          target={stlTarget as Parameters<typeof PlanarFaceEditor>[0]["target"]}
-          params={planarParams}
-          disabled={isBusy}
-          onParamChange={(key, value) => {
-            if (!selectedBody) return;
-            const bodyId = selectedBody.id;
-            const mapping: Record<string, { bodyId: string; paramKey: string }> = {
-              hole_diameter: { bodyId, paramKey: selectedBody.kind === "hole" ? "diameter_mm" : "hole_diameter_mm" },
-              width: { bodyId, paramKey: "width_mm" },
-              height: { bodyId, paramKey: "height_mm" },
-              spacing_x: { bodyId, paramKey: "tangential_spacing_mm" },
-              spacing_y: { bodyId, paramKey: "spacing_y_mm" },
-              count_x: { bodyId, paramKey: "count_x" },
-              count_y: { bodyId, paramKey: "count_y" },
-              radial_spacing: { bodyId, paramKey: "radial_spacing_mm" },
-              ring_count: { bodyId, paramKey: "ring_count" },
-              margin: { bodyId, paramKey: "edge_margin_mm" },
-            };
-            const targetMapping = mapping[key];
-            if (targetMapping) {
-              onBodyParamChange(targetMapping.bodyId, targetMapping.paramKey, value);
-            }
-          }}
-          onParamReset={(key) => {
-            if (!stlTarget || !selectedBody) return;
-            const defaults: Record<string, string> = {
-              hole_diameter:
-                stlTarget.type === "single_planar_feature"
-                  ? String(stlTarget.measured?.diameter ?? "")
-                  : typeof stlTarget.measured?.feature_size === "number"
-                    ? String(stlTarget.measured.feature_size)
-                    : "",
-              width:
-                stlTarget.type === "single_planar_feature"
-                  ? String(stlTarget.measured?.width ?? "")
-                  : typeof stlTarget.measured?.feature_size === "object"
-                    ? String(stlTarget.measured.feature_size.width)
-                    : "",
-              height:
-                stlTarget.type === "single_planar_feature"
-                  ? String(stlTarget.measured?.height ?? "")
-                  : typeof stlTarget.measured?.feature_size === "object"
-                    ? String(stlTarget.measured.feature_size.height)
-                    : "",
-              spacing_x: String(stlTarget.measured?.spacing_x ?? ""),
-              spacing_y: String(stlTarget.measured?.spacing_y ?? ""),
-              count_x: String(stlTarget.measured?.count_x ?? ""),
-              count_y: String(stlTarget.measured?.count_y ?? ""),
-              radial_spacing: String(stlTarget.measured?.radial_spacing ?? ""),
-              ring_count: String(stlTarget.measured?.ring_count ?? ""),
-              margin: String(stlTarget.measured?.margin ?? ""),
-            };
-            if (defaults[key] != null) {
-              onBodyParamChange(selectedBody.id, key === "hole_diameter"
-                ? selectedBody.kind === "hole" ? "diameter_mm" : "hole_diameter_mm"
-                : key === "width"
-                  ? "width_mm"
-                  : key === "height"
-                    ? "height_mm"
-                    : key === "spacing_x"
-                      ? "tangential_spacing_mm"
-                      : key === "spacing_y"
-                        ? "spacing_y_mm"
-                        : key === "count_x"
-                          ? "count_x"
-                          : key === "count_y"
-                            ? "count_y"
-                            : key === "radial_spacing"
-                              ? "radial_spacing_mm"
-                              : key === "ring_count"
-                                ? "ring_count"
-                                : "edge_margin_mm", defaults[key]);
-            }
-          }}
-          onSelectElement={onPlanarSelection}
-        />
-      ) : null}
-
-      <div className="warning-list">
-        {editableModel.manufacturability.messages.map((message) => (
-          <span key={message} className={`warning-chip ${editableModel.manufacturability.status === "safe" ? "subtle" : ""}`}>
-            {message}
-          </span>
-        ))}
+      <div className="project-summary">
+        <div className="status-label">Manufacturability</div>
+        <div className="warning-list">
+          {editableModel.manufacturability.messages.map((message) => (
+            <span
+              key={message}
+              className={`warning-chip ${
+                editableModel.manufacturability.status === "safe" ? "subtle" : ""
+              }`}
+            >
+              {message}
+            </span>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -341,17 +317,37 @@ function WorkspaceEditor({
 export default function Home() {
   const backendUrl = resolveBackendUrl();
   const workspace = useEditableWorkspace();
-  const [workflowMode, setWorkflowMode] = useState<"workspace" | "creative">("workspace");
-  const [workspaceEntryMode, setWorkspaceEntryMode] = useState<"native" | "import">("native");
-  const [presentationContext, setPresentationContext] = useState<WorkspaceImportContext | null>(null);
+  const [workflowMode, setWorkflowMode] = useState<"workspace" | "creative">(
+    "workspace"
+  );
+  const [workspaceEntryMode, setWorkspaceEntryMode] = useState<"native" | "import">(
+    "native"
+  );
+  const [presentationContext, setPresentationContext] =
+    useState<WorkspaceImportContext | null>(null);
   const [creativeModelUrl, setCreativeModelUrl] = useState<string | null>(null);
   const [creativeStlUrl, setCreativeStlUrl] = useState<string | null>(null);
-  const [creativeGcodeUrl, setCreativeGcodeUrl] = useState<string | null>(null);
+  const [, setCreativeGcodeUrl] = useState<string | null>(null);
   const [creativeBundleUrl, setCreativeBundleUrl] = useState<string | null>(null);
-  const [showOriginalReference, setShowOriginalReference] = useState(false);
+  const [canvasTab, setCanvasTab] = useState<CanvasTab>("3d");
+  const [entryPanelCollapsed, setEntryPanelCollapsed] = useState(false);
+  const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
+  const [selectionAnchorPoint, setSelectionAnchorPoint] = useState<{
+    x: number;
+    y: number;
+    z: number;
+  } | null>(null);
+  const [selectionChipVisible, setSelectionChipVisible] = useState(false);
+  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
+  const [undoStack, setUndoStack] = useState<HistoryEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<HistoryEntry[]>([]);
+
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoredRef = useRef(false);
   const selectionWorkspaceRef = useRef<string | null>(null);
+  const canvasKeyRef = useRef<string | null>(null);
+  const inspectorRef = useRef<HTMLDivElement | null>(null);
+
   const {
     workspaceId,
     editableModel,
@@ -364,14 +360,18 @@ export default function Home() {
     loadWorkspace,
     hydrateWorkspace,
     resetWorkspace,
+    mutate,
     updateBody,
     preview,
     build,
     aiEdit,
   } = workspace;
-  const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
-  const [floatingEditorContext, setFloatingEditorContext] = useState<FloatingEditorContext>(null);
-  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (workflowMode !== "workspace") {
+      setWorkflowMode("workspace");
+    }
+  }, [workflowMode]);
 
   useEffect(() => {
     if (restoredRef.current || typeof window === "undefined") return;
@@ -381,13 +381,13 @@ export default function Home() {
     let parsed: StoredWorkspaceShell | null = null;
     try {
       const fromStorage = window.localStorage.getItem(STORAGE_KEY);
-      parsed = fromStorage ? JSON.parse(fromStorage) as StoredWorkspaceShell : null;
+      parsed = fromStorage ? (JSON.parse(fromStorage) as StoredWorkspaceShell) : null;
     } catch {
       parsed = null;
     }
-    const workspaceId = fromQuery || parsed?.workspaceId;
-    if (!workspaceId) return;
-    void loadWorkspace(workspaceId)
+    const restoredWorkspaceId = fromQuery || parsed?.workspaceId;
+    if (!restoredWorkspaceId) return;
+    void loadWorkspace(restoredWorkspaceId)
       .then((loaded) => {
         if (!loaded) return;
         const restoredContext =
@@ -398,8 +398,14 @@ export default function Home() {
             sourceStlUrl: null,
           } satisfies WorkspaceImportContext);
         setPresentationContext(restoredContext);
-        setWorkspaceEntryMode(restoredContext.mode.startsWith("stl") || restoredContext.mode.startsWith("step") ? "import" : "native");
+        setWorkspaceEntryMode(
+          restoredContext.mode.startsWith("stl") ||
+            restoredContext.mode.startsWith("step")
+            ? "import"
+            : "native"
+        );
         setWorkflowMode("workspace");
+        setEntryPanelCollapsed(true);
       })
       .catch(() => {
         window.localStorage.removeItem(STORAGE_KEY);
@@ -410,7 +416,8 @@ export default function Home() {
     if (!editableModel) {
       selectionWorkspaceRef.current = null;
       setSelectedFeatureId(null);
-      setFloatingEditorContext(null);
+      setSelectionAnchorPoint(null);
+      setSelectionChipVisible(false);
       return;
     }
 
@@ -418,24 +425,21 @@ export default function Home() {
     if (selectionWorkspaceRef.current !== workspaceId) {
       selectionWorkspaceRef.current = workspaceId;
       const restoredSelection =
-        editableModel.selection?.feature_id && allBodies.some((body) => body.id === editableModel.selection?.feature_id)
+        editableModel.selection?.feature_id &&
+        allBodies.some((body) => body.id === editableModel.selection?.feature_id)
           ? editableModel.selection.feature_id
           : firstEditableFeatureId(editableModel);
       setSelectedFeatureId(restoredSelection);
-      if (!restoredSelection) {
-        setFloatingEditorContext(null);
-      }
+      setSelectionChipVisible(false);
       return;
     }
 
-    if (!selectedFeatureId) {
-      return;
-    }
-
+    if (!selectedFeatureId) return;
     const currentStillExists = allBodies.some((body) => body.id === selectedFeatureId);
     if (!currentStillExists) {
       setSelectedFeatureId(null);
-      setFloatingEditorContext(null);
+      setSelectionAnchorPoint(null);
+      setSelectionChipVisible(false);
     }
   }, [editableModel, selectedFeatureId, workspaceId]);
 
@@ -460,7 +464,7 @@ export default function Home() {
           } satisfies StoredWorkspaceShell)
         );
       } catch {
-        // Storage quota should not break the active workspace session.
+        // Ignore storage quota issues; they should not break the active workspace.
       }
     } else {
       params.delete("workspace");
@@ -471,11 +475,21 @@ export default function Home() {
       }
     }
     const query = params.toString();
-    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${query ? `?${query}` : ""}`
+    );
   }, [presentationContext, workspaceId]);
 
   useEffect(() => {
-    if (workflowMode !== "workspace" || !editableModel || !isEditablePresentation(presentationContext?.mode ?? inferPresentationMode(editableModel))) {
+    if (
+      workflowMode !== "workspace" ||
+      !editableModel ||
+      !isEditablePresentation(
+        presentationContext?.mode ?? inferPresentationMode(editableModel)
+      )
+    ) {
       if (previewTimerRef.current) {
         clearTimeout(previewTimerRef.current);
         previewTimerRef.current = null;
@@ -505,7 +519,6 @@ export default function Home() {
   }, [
     presentationContext?.mode,
     workflowMode,
-    build,
     editableModel,
     latestBuild?.revision_id,
     latestPreview?.revision_id,
@@ -513,9 +526,25 @@ export default function Home() {
     setError,
   ]);
 
-  const selectedFeature =
-    editableModel ? findBodyById(editableModel.bodies, selectedFeatureId) : null;
-  const workspaceMode = presentationContext?.mode ?? inferPresentationMode(editableModel);
+  useEffect(() => {
+    if (!workspaceId) {
+      setUndoStack([]);
+      setRedoStack([]);
+      return;
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!editableModel) {
+      setEntryPanelCollapsed(false);
+    }
+  }, [editableModel]);
+
+  const selectedFeature = editableModel
+    ? findBodyById(editableModel.bodies, selectedFeatureId)
+    : null;
+  const workspaceMode =
+    presentationContext?.mode ?? inferPresentationMode(editableModel);
   const isPreviewStale =
     workflowMode === "workspace" &&
     Boolean(editableModel && editableModel.revision_id !== latestPreview?.revision_id);
@@ -533,97 +562,102 @@ export default function Home() {
   const creativeModelVisible = workflowMode === "creative";
   const visibleModelUrl = creativeModelVisible ? creativeModelUrl : workspaceModelUrl;
   const visibleStlUrl = creativeModelVisible ? creativeStlUrl : workspaceStlUrl;
-  const visibleBundleUrl = creativeModelVisible ? creativeBundleUrl : workspaceBundleUrl;
-  const currentHint =
-    creativeModelVisible
-      ? creativeStlUrl
-        ? "Creative STL ready for export."
-        : "Generate a creative preview to unlock exports."
-      : visibleStlUrl
-        ? "Workspace revision is available for download."
-        : "Create or import a workspace revision to unlock exports.";
+  const visibleBundleUrl = creativeModelVisible
+    ? creativeBundleUrl
+    : workspaceBundleUrl;
+  const compareEnabled =
+    workflowMode === "workspace" &&
+    workspaceMode === "stl_reconstruction" &&
+    Boolean(
+      presentationContext?.sourceModelUrl &&
+        workspaceModelUrl &&
+        presentationContext.sourceModelUrl !== workspaceModelUrl
+    );
 
-  const handleCreateNativeWorkspace = async (payload: { structured_spec: Record<string, unknown>; source: "native" }) => {
-    setWorkflowMode("workspace");
-    setWorkspaceEntryMode("native");
-    setShowOriginalReference(false);
-    setPresentationContext({
-      mode: "native",
-      sourceModelUrl: null,
-      sourceStlUrl: null,
-      message: null,
-    });
-    const created = await createWorkspace(payload);
-    if (created) {
-      const nextSelection =
-        created.editable_model.selection?.feature_id && findBodyById(created.editable_model.bodies, created.editable_model.selection.feature_id)
-          ? created.editable_model.selection.feature_id
-          : firstEditableFeatureId(created.editable_model);
-      setSelectedFeatureId(nextSelection);
+  const defaultCanvasTab = useMemo(
+    () =>
+      getDefaultCanvasTab({
+        workflowMode,
+        workspaceMode,
+        editableModel,
+        compareEnabled,
+        selectedFeatureId,
+        importContext: presentationContext,
+      }),
+    [compareEnabled, editableModel, presentationContext, selectedFeatureId, workflowMode, workspaceMode]
+  );
+
+  useEffect(() => {
+    setSelectionChipVisible(false);
+  }, [canvasTab]);
+
+  const stlTarget = useMemo(() => {
+    if (
+      workspaceMode !== "stl_reconstruction" ||
+      !presentationContext?.analysis?.targets ||
+      !selectedFeature
+    ) {
+      return null;
     }
-    return created;
-  };
-
-  const handleFeatureSelect = (featureId: string, source: "tree" | "designer" | "planar" | "viewer" = "tree") => {
-    setSelectedFeatureId(featureId);
-    if (source !== "viewer") {
-      const rootBody = editableModel?.bodies[0];
-      if (rootBody && isPerforatedDiscModel(editableModel)) {
-        const focus = getPerforatedDiscFocusTarget(rootBody, featureId);
-        if (focus) {
-          setFloatingEditorContext({
-            point: focus.anchorPoint,
-            mode: source === "tree" ? "docked" : "floating",
-          });
-        }
-      }
-    }
-  };
-
-  const handleBodyParamChange = async (bodyId: string, key: string, value: string) => {
-    if (!editableModel) return;
-    const body = findBodyById(editableModel.bodies, bodyId);
-    if (!body) return;
-    const nextValue = coerceParamValue(body.params[key], value);
-    try {
-      await updateBody(bodyId, { [key]: nextValue });
-    } catch (error) {
-      setError((error as Error).message || "Could not update the selected feature.");
-    }
-  };
-
-  const handlePlanarSelection = (selection: { kind: "pattern" } | { kind: "feature"; featureId: string } | { kind: "center_hole"; featureId?: string }) => {
-    if (!editableModel) return;
-    const targets = presentationContext?.analysis?.targets ?? [];
-    if (selection.kind === "pattern") {
-      const patternTarget = targets.find((target) => target.type === "planar_pattern_face" && target.editable);
-      if (patternTarget) {
-        handleFeatureSelect(patternTarget.id, "planar");
-      }
-      return;
-    }
-
-    if (!selection.featureId) {
-      return;
-    }
-
-    const targetId =
-      targets.find(
+    return (
+      presentationContext.analysis.targets.find(
         (target) =>
-          target.type === "single_planar_feature" &&
-          (target.id === selection.featureId || (target as { feature_id?: string }).feature_id === selection.featureId)
-      )?.id ?? selection.featureId;
-    handleFeatureSelect(targetId, "planar");
-  };
+          target.id === selectedFeature.id &&
+          target.type !== "unsupported" &&
+          Boolean(target.editable)
+      ) ?? null
+    );
+  }, [presentationContext?.analysis?.targets, selectedFeature, workspaceMode]);
+
+  const planarParams = useMemo(() => {
+    if (!stlTarget || !selectedFeature) return null;
+    if (stlTarget.type === "planar_pattern_face") {
+      return {
+        hole_diameter: String(selectedFeature.params.hole_diameter_mm ?? ""),
+        width: String(selectedFeature.params.width_mm ?? ""),
+        height: String(selectedFeature.params.height_mm ?? ""),
+        spacing_x: String(selectedFeature.params.tangential_spacing_mm ?? ""),
+        spacing_y: String(selectedFeature.params.spacing_y_mm ?? ""),
+        count_x: String(selectedFeature.params.count_x ?? ""),
+        count_y: String(selectedFeature.params.count_y ?? ""),
+        radial_spacing: String(selectedFeature.params.radial_spacing_mm ?? ""),
+        ring_count: String(selectedFeature.params.ring_count ?? ""),
+        margin: String(selectedFeature.params.edge_margin_mm ?? ""),
+        center_hole_diameter: "",
+      };
+    }
+    return {
+      hole_diameter: String(
+        selectedFeature.params.diameter_mm ?? selectedFeature.params.hole_diameter_mm ?? ""
+      ),
+      width: String(selectedFeature.params.width_mm ?? ""),
+      height: String(selectedFeature.params.height_mm ?? ""),
+      spacing_x: "",
+      spacing_y: "",
+      count_x: "",
+      count_y: "",
+      radial_spacing: "",
+      ring_count: "",
+      margin: "",
+      center_hole_diameter: "",
+    };
+  }, [selectedFeature, stlTarget]);
 
   const focusTarget = useMemo<ViewerFocusTarget | null>(() => {
-    if (!editableModel || !selectedFeature || !isEditablePresentation(workspaceMode)) return null;
-    if (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) {
-      const focus = getPerforatedDiscFocusTarget(editableModel.bodies[0], selectedFeature.id);
-      return focus ? { point: focus.anchorPoint, distance: focus.focusDistance } : null;
+    if (!editableModel || !selectedFeature || !isEditablePresentation(workspaceMode)) {
+      return null;
     }
-    return floatingEditorContext ? { point: floatingEditorContext.point, distance: 42 } : null;
-  }, [editableModel, floatingEditorContext, selectedFeature, workspaceMode]);
+    if (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) {
+      const focus = getPerforatedDiscFocusTarget(
+        editableModel.bodies[0],
+        selectedFeature.id
+      );
+      return focus
+        ? { point: focus.anchorPoint, distance: focus.focusDistance }
+        : null;
+    }
+    return selectionAnchorPoint ? { point: selectionAnchorPoint, distance: 42 } : null;
+  }, [editableModel, selectedFeature, selectionAnchorPoint, workspaceMode]);
 
   const selectionMarker = useMemo(() => {
     if (selectedFeature && focusTarget) {
@@ -633,34 +667,188 @@ export default function Home() {
   }, [focusTarget, selectedFeature]);
 
   const semanticAnnotations = useMemo<SemanticAnnotation[]>(() => {
-    if (!editableModel || !selectedFeature || workspaceMode !== "native" || !isPerforatedDiscModel(editableModel)) {
+    if (
+      !editableModel ||
+      !selectedFeature ||
+      workspaceMode !== "native" ||
+      !isPerforatedDiscModel(editableModel)
+    ) {
       return [];
     }
     return getPerforatedDiscAnnotations(editableModel.bodies[0], selectedFeature.id);
   }, [editableModel, selectedFeature, workspaceMode]);
 
-  const floatingEditor =
-    selectedFeature && isEditablePresentation(workspaceMode) ? (
-      <FloatingQuickEditor
-        body={selectedFeature}
-        disabled={isBusy}
-        mode={floatingEditorContext?.mode ?? "docked"}
-        onParamChange={handleBodyParamChange}
-        onDismiss={() => setFloatingEditorContext(null)}
-        aiInput={
-          workspaceMode === "native" && isPerforatedDiscModel(editableModel) ? (
-            <ElementAiInput
-              disabled={isBusy}
-              onSubmit={async (prompt) => {
-                await aiEdit(selectedFeature.id, prompt);
-              }}
-            />
-          ) : undefined
-        }
-      />
-    ) : null;
-  const floatingCanvasEditor = floatingEditorContext?.mode === "floating" ? floatingEditor : null;
-  const dockedFloatingEditor = floatingEditorContext?.mode === "docked" ? floatingEditor : null;
+  const recordMutationHistory = (
+    previousModel: EditableModel,
+    previousSelectedFeatureId: string | null
+  ) => {
+    setUndoStack((current) =>
+      pushHistoryEntry(current, {
+        model: cloneEditableModel(previousModel),
+        selectedFeatureId: previousSelectedFeatureId,
+      })
+    );
+    setRedoStack([]);
+  };
+
+  const applyHistoryEntry = async (
+    entry: HistoryEntry,
+    direction: "undo" | "redo"
+  ) => {
+    if (!editableModel) return;
+    const payload = buildHistoryMutation(
+      editableModel,
+      entry.model,
+      entry.selectedFeatureId
+    );
+    if (!payload) {
+      setError(
+        "Undo history is no longer compatible with the current feature structure."
+      );
+      return;
+    }
+
+    const currentEntry: HistoryEntry = {
+      model: cloneEditableModel(editableModel),
+      selectedFeatureId,
+    };
+
+    try {
+      await mutate(payload);
+      setSelectedFeatureId(
+        entry.selectedFeatureId && findBodyById(entry.model.bodies, entry.selectedFeatureId)
+          ? entry.selectedFeatureId
+          : firstEditableFeatureId(entry.model)
+      );
+      setSelectionChipVisible(false);
+      if (direction === "undo") {
+        setUndoStack((current) => current.slice(0, -1));
+        setRedoStack((current) => pushHistoryEntry(current, currentEntry));
+      } else {
+        setRedoStack((current) => current.slice(0, -1));
+        setUndoStack((current) => pushHistoryEntry(current, currentEntry));
+      }
+    } catch (mutationError) {
+      setError((mutationError as Error).message || "Could not restore that revision.");
+    }
+  };
+
+  const handleCreateNativeWorkspace = async (payload: {
+    structured_spec: Record<string, unknown>;
+    source: "native";
+  }) => {
+    setWorkflowMode("workspace");
+    setWorkspaceEntryMode("native");
+    setPresentationContext({
+      mode: "native",
+      sourceModelUrl: null,
+      sourceStlUrl: null,
+      message: null,
+    });
+    setSelectionAnchorPoint(null);
+    setSelectionChipVisible(false);
+    const created = await createWorkspace(payload);
+    if (created) {
+      const nextSelection =
+        created.editable_model.selection?.feature_id &&
+        findBodyById(
+          created.editable_model.bodies,
+          created.editable_model.selection.feature_id
+        )
+          ? created.editable_model.selection.feature_id
+          : firstEditableFeatureId(created.editable_model);
+      setSelectedFeatureId(nextSelection);
+      setUndoStack([]);
+      setRedoStack([]);
+      setEntryPanelCollapsed(true);
+    }
+    return created;
+  };
+
+  const handleFeatureSelect = (
+    featureId: string,
+    source: "tree" | "designer" | "planar" | "viewer" = "tree"
+  ) => {
+    setSelectedFeatureId(featureId);
+    if (editableModel && workspaceMode === "native" && isPerforatedDiscModel(editableModel)) {
+      const focus = getPerforatedDiscFocusTarget(editableModel.bodies[0], featureId);
+      setSelectionAnchorPoint(focus?.anchorPoint ?? null);
+    } else if (source !== "viewer") {
+      setSelectionAnchorPoint(null);
+    }
+    if (
+      workspaceMode === "native" &&
+      isPerforatedDiscModel(editableModel) &&
+      source !== "designer"
+    ) {
+      setCanvasTab("2d");
+    } else if (
+      workspaceMode === "stl_reconstruction" &&
+      hasEditablePlanarTarget(presentationContext, featureId)
+    ) {
+      setCanvasTab("2d");
+    }
+    setSelectionChipVisible(source === "viewer" || source === "designer" || source === "planar");
+  };
+
+  const handleBodyParamChange = async (bodyId: string, key: string, value: string) => {
+    if (!editableModel) return;
+    const body = findBodyById(editableModel.bodies, bodyId);
+    if (!body) return;
+    const nextValue = coerceParamValue(body.params[key], value);
+    const previousModel = cloneEditableModel(editableModel);
+    const previousSelection = selectedFeatureId;
+    try {
+      const result = await updateBody(bodyId, { [key]: nextValue });
+      if (result?.editable_model.revision_id !== previousModel.revision_id) {
+        recordMutationHistory(previousModel, previousSelection);
+      }
+    } catch (mutationError) {
+      setError(
+        (mutationError as Error).message ||
+          "Could not update the selected feature."
+      );
+    }
+  };
+
+  const handleAiEdit = async (featureId: string, prompt: string) => {
+    if (!editableModel) return;
+    const previousModel = cloneEditableModel(editableModel);
+    const previousSelection = selectedFeatureId;
+    const result = await aiEdit(featureId, prompt);
+    if (result?.editable_model.revision_id !== previousModel.revision_id) {
+      recordMutationHistory(previousModel, previousSelection);
+    }
+  };
+
+  const handlePlanarSelection = (
+    selection:
+      | { kind: "pattern" }
+      | { kind: "feature"; featureId: string }
+      | { kind: "center_hole"; featureId?: string }
+  ) => {
+    if (!editableModel) return;
+    const targets = presentationContext?.analysis?.targets ?? [];
+    if (selection.kind === "pattern") {
+      const patternTarget = targets.find(
+        (target) => target.type === "planar_pattern_face" && target.editable
+      );
+      if (patternTarget) {
+        handleFeatureSelect(patternTarget.id, "planar");
+      }
+      return;
+    }
+
+    if (!selection.featureId) return;
+    const targetId =
+      targets.find(
+        (target) =>
+          target.type === "single_planar_feature" &&
+          (target.id === selection.featureId ||
+            (target as { feature_id?: string }).feature_id === selection.featureId)
+      )?.id ?? selection.featureId;
+    handleFeatureSelect(targetId, "planar");
+  };
 
   const handleViewerSelect = (payload: SelectionPayload) => {
     if (!editableModel) return;
@@ -668,107 +856,195 @@ export default function Home() {
       const hit = classifyPerforatedDiscClick(payload.point, editableModel.bodies[0]);
       if (!hit) return;
       const nextFeatureId =
-        hit.confidence < 0.88 && !hit.fallbackToOuter ? editableModel.bodies[0].id : hit.featureId;
+        hit.confidence < DISC_PICK_CONFIDENCE.minNarrowFeature && !hit.fallbackToOuter
+          ? editableModel.bodies[0].id
+          : hit.featureId;
       setSelectedFeatureId(nextFeatureId);
-      setFloatingEditorContext({
-        point: hit.anchorPoint,
-        mode: typeof window !== "undefined" && window.innerWidth < 1280 ? "docked" : hit.fallbackToOuter ? "docked" : "floating",
-      });
+      setSelectionAnchorPoint(hit.anchorPoint);
+      setSelectionChipVisible(true);
       return;
     }
     if (!isEditablePresentation(workspaceMode)) {
-      setFloatingEditorContext({
-        point: payload.point,
-        mode: "docked",
-      });
+      setSelectionChipVisible(false);
+      return;
     }
+    setSelectionAnchorPoint(payload.point);
   };
 
-  const isCompareMode =
-    workflowMode === "workspace" &&
-    workspaceMode === "stl_reconstruction" &&
-    Boolean(presentationContext?.sourceModelUrl && workspaceModelUrl && presentationContext.sourceModelUrl !== workspaceModelUrl);
-
-  const heroCopy =
-    workflowMode === "creative"
-      ? {
-          eyebrow: "Prompt → Generate → Repair → Export",
-          title: "Build imaginative prints from",
-          highlight: " creative prompts",
-          body: "Creative mode remains separate from the semantic workspace. Use it for decorative objects and mesh-first concepts.",
+  const selectionChip =
+    selectionChipVisible && selectedFeature ? (
+      <SelectionChip
+        eyebrow={workspaceMode === "native" ? "Selected feature" : "Selected target"}
+        title={selectedFeature.label}
+        value={selectionChipValue(selectedFeature)}
+        actionLabel={
+          (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) ||
+          (workspaceMode === "stl_reconstruction" &&
+            hasEditablePlanarTarget(presentationContext, selectedFeature.id))
+            ? "Open edit"
+            : "Edit"
         }
-      : {
-          eyebrow: "Prompt / Import → Semantic Model → Preview → Export",
-          title: "Edit one",
-          highlight: " semantic workspace",
-          body: "Native authoring, STEP import, and supported STL reconstruction now share one canonical workspace state and one preview/export path.",
-        };
+        onDismiss={() => setSelectionChipVisible(false)}
+        onAction={() => {
+          if (
+            (workspaceMode === "native" && isPerforatedDiscModel(editableModel)) ||
+            (workspaceMode === "stl_reconstruction" &&
+              hasEditablePlanarTarget(presentationContext, selectedFeature.id))
+          ) {
+            setCanvasTab("2d");
+          }
+          inspectorRef.current?.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+          });
+        }}
+      />
+    ) : null;
+
+  const canvasTabs = useMemo(() => {
+    const tabs: Array<{ id: CanvasTab; label: string }> = [];
+    if (
+      workflowMode === "workspace" &&
+      workspaceMode === "native" &&
+      isPerforatedDiscModel(editableModel)
+    ) {
+      tabs.push({ id: "2d", label: "2D" });
+    }
+    if (
+      workflowMode === "workspace" &&
+      workspaceMode === "stl_reconstruction" &&
+      stlTarget &&
+      planarParams
+    ) {
+      tabs.push({ id: "2d", label: "2D" });
+    }
+    tabs.push({ id: "3d", label: "3D" });
+    if (compareEnabled) {
+      tabs.push({ id: "compare", label: "Compare" });
+    }
+    return tabs;
+  }, [compareEnabled, editableModel, planarParams, stlTarget, workflowMode, workspaceMode]);
+
+  useEffect(() => {
+    const nextKey = `${workflowMode}:${workspaceId ?? "none"}:${workspaceMode}`;
+    if (canvasKeyRef.current !== nextKey) {
+      canvasKeyRef.current = nextKey;
+      setCanvasTab(defaultCanvasTab);
+      setSelectionChipVisible(false);
+      return;
+    }
+    if (canvasTab === "compare" && !compareEnabled) {
+      setCanvasTab(defaultCanvasTab);
+      return;
+    }
+    if (!canvasTabs.some((tab) => tab.id === canvasTab)) {
+      setCanvasTab(defaultCanvasTab);
+    }
+  }, [canvasTab, canvasTabs, compareEnabled, defaultCanvasTab, workflowMode, workspaceId, workspaceMode]);
+
+  const currentHint = creativeModelVisible
+    ? creativeStlUrl
+      ? "Creative STL is ready for download."
+      : "Generate a creative preview to unlock exports."
+    : visibleStlUrl
+    ? isPreviewStale
+      ? "Draft changed. Exact preview is rebuilding in the background."
+      : "Exact preview and export are in sync."
+    : "Create or import a workspace revision to unlock preview and export.";
+  const compactWorkspaceEntry = workflowMode === "workspace" && entryPanelCollapsed && Boolean(workspaceId);
 
   return (
-    <main className="page">
-      <nav className="topbar">
-        <div className="brand">3dprint</div>
-        <div className="topbar-links">
-          <Link className="topbar-link" href="/projects">Projects</Link>
-        </div>
-      </nav>
-
-      <header className="hero">
-        <div>
-          <p className="eyebrow">{heroCopy.eyebrow}</p>
-          <div className="mode-switch hero-switch" role="tablist" aria-label="Workflow mode">
-            <button
-              type="button"
-              className={`mode-chip ${workflowMode === "workspace" ? "active" : ""}`}
-              onClick={() => setWorkflowMode("workspace")}
-            >
-              Workspace
-            </button>
-            <button
-              type="button"
-              className={`mode-chip ${workflowMode === "creative" ? "active" : ""}`}
-              onClick={() => setWorkflowMode("creative")}
-            >
-              Creative
-            </button>
+    <main className="cad-page">
+      <header className="cad-shell-header">
+        <div className="cad-header-main">
+          <div>
+            <div className="brand">3dprint</div>
+            <div className="cad-header-meta">
+              <span className="cad-header-mode">
+                {workflowMode === "creative" ? "Creative workspace" : "Semantic CAD workspace"}
+              </span>
+              {workspaceId ? (
+                <span className="cad-header-revision">
+                  Workspace {workspaceId.slice(0, 8)}
+                </span>
+              ) : null}
+              {selectedFeature ? (
+                <span className="cad-header-revision">
+                  Selected {selectedFeature.label}
+                </span>
+              ) : null}
+            </div>
           </div>
-          <h1>
-            {heroCopy.title}
-            <span className="highlight"> {heroCopy.highlight}</span>.
-          </h1>
-          <p className="hero-body">{heroCopy.body}</p>
+        </div>
+        <div className="cad-header-actions">
+          <Link className="topbar-link" href="/projects">
+            Projects
+          </Link>
         </div>
       </header>
 
-      <div className="grid workspace-grid workspace-grid-design">
-        <div className="workspace-column workspace-column-editor">
+      <div className="cad-shell-body">
+        <aside className="cad-left-rail">
           {workflowMode === "workspace" ? (
             <>
-              <section className="panel">
+              <section
+                className={`panel rail-panel rail-mode-panel ${
+                  compactWorkspaceEntry ? "compact-entry-panel" : ""
+                }`}
+              >
                 <div className="panel-header">
-                  <p className="eyebrow">Workspace Mode</p>
-                  <h2>Select how to enter the semantic workspace</h2>
-                  <p className="panel-subtitle">Both native creation and model import feed the same workspace state.</p>
+                  <p className="eyebrow">Workspace entry</p>
+                  <h2>{compactWorkspaceEntry ? "Entry mode" : "Create or import"}</h2>
+                  <p className="panel-subtitle">
+                    {compactWorkspaceEntry
+                      ? "Entry controls are collapsed while you edit."
+                      : "Both entry paths feed the same semantic workspace shell."}
+                  </p>
                 </div>
-                <div className="mode-switch" role="tablist" aria-label="Workspace entry mode">
+                <div
+                  className="mode-switch"
+                  role="tablist"
+                  aria-label="Workspace entry mode"
+                >
                   <button
                     type="button"
-                    className={`mode-chip ${workspaceEntryMode === "native" ? "active" : ""}`}
-                    onClick={() => setWorkspaceEntryMode("native")}
+                    className={`mode-chip ${
+                      workspaceEntryMode === "native" ? "active" : ""
+                    }`}
+                    onClick={() => {
+                      setWorkspaceEntryMode("native");
+                      setEntryPanelCollapsed(false);
+                    }}
                   >
                     Design
                   </button>
                   <button
                     type="button"
-                    className={`mode-chip ${workspaceEntryMode === "import" ? "active" : ""}`}
-                    onClick={() => setWorkspaceEntryMode("import")}
+                    className={`mode-chip ${
+                      workspaceEntryMode === "import" ? "active" : ""
+                    }`}
+                    onClick={() => {
+                      setWorkspaceEntryMode("import");
+                      setEntryPanelCollapsed(false);
+                    }}
                   >
                     Import
                   </button>
                 </div>
+                {compactWorkspaceEntry ? (
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="mode-chip"
+                      onClick={() => setEntryPanelCollapsed(false)}
+                    >
+                      Reopen controls
+                    </button>
+                  </div>
+                ) : null}
               </section>
 
-              {workspaceEntryMode === "native" ? (
+              {entryPanelCollapsed && workspaceId ? null : workspaceEntryMode === "native" ? (
                 <VoicePanel
                   workflowMode="workspace"
                   onCreateNativeWorkspace={handleCreateNativeWorkspace}
@@ -784,15 +1060,18 @@ export default function Home() {
                     setPresentationContext(context);
                     setWorkflowMode("workspace");
                     setWorkspaceEntryMode("import");
-                    setShowOriginalReference(false);
                     setReferenceImageUrl(null);
                     setSelectedFeatureId(null);
-                    setFloatingEditorContext(null);
+                    setSelectionAnchorPoint(null);
+                    setSelectionChipVisible(false);
+                    setUndoStack([]);
+                    setRedoStack([]);
+                    setEntryPanelCollapsed(Boolean(context));
                   }}
                 />
               )}
 
-              <WorkspaceEditor
+              <WorkspaceInspectorPanel
                 editableModel={editableModel}
                 presentationMode={workspaceMode}
                 importContext={presentationContext}
@@ -801,42 +1080,9 @@ export default function Home() {
                 referenceImageUrl={referenceImageUrl}
                 onSelectFeature={handleFeatureSelect}
                 onBodyParamChange={handleBodyParamChange}
-                onPlanarSelection={handlePlanarSelection}
+                onAiEdit={handleAiEdit}
+                inspectorRef={inspectorRef}
               />
-
-              {editableModel && isEditablePresentation(workspaceMode) ? (
-                <section className="panel">
-                  <div className="panel-header">
-                    <p className="eyebrow">Revision Controls</p>
-                    <h2>Preview and export the active workspace revision</h2>
-                    <p className="panel-subtitle">
-                      Preview runs automatically after edits. Export remains explicit and revision-guarded.
-                    </p>
-                  </div>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="download-button action-button"
-                      onClick={() => void preview()}
-                      disabled={isBusy}
-                    >
-                      Preview revision
-                    </button>
-                    <button
-                      type="button"
-                      className="download-button action-button"
-                      onClick={() => void build()}
-                      disabled={isBusy}
-                    >
-                      Export STL
-                    </button>
-                    <span className="hint">
-                      Active revision: {editableModel.revision_id.slice(0, 8)}
-                    </span>
-                  </div>
-                  {error ? <div className="warning-chip">{error}</div> : null}
-                </section>
-              ) : null}
             </>
           ) : (
             <VoicePanel
@@ -848,50 +1094,137 @@ export default function Home() {
               onCreativeBundleUrl={setCreativeBundleUrl}
             />
           )}
-        </div>
+        </aside>
 
-        <div className="workspace-column workspace-column-preview">
-          <section className="panel model-panel">
-            <div className="panel-header">
-              <p className="eyebrow">3D Preview</p>
+        <section className="cad-canvas-area">
+          <div className="cad-canvas-header">
+            <div>
+              <p className="eyebrow">
+                {creativeModelVisible ? "Creative canvas" : "Working canvas"}
+              </p>
               <h2>
-                {workflowMode === "creative"
-                  ? "Inspect the creative revision"
-                  : isCompareMode && showOriginalReference
-                    ? "Inspect the original and rebuilt revision"
-                    : "Inspect the current workspace revision"}
+                {creativeModelVisible
+                  ? "Inspect the current creative object"
+                  : "Select in canvas, edit in rail"}
               </h2>
               <p className="panel-subtitle">
-                {workflowMode === "creative"
-                  ? "Creative mode remains mesh-first."
-                  : "The preview reflects the active workspace state. 3D stays for context and comparison; precise edits happen in the semantic inspector and 2D editor."}
+                {creativeModelVisible
+                  ? "Creative mode remains mesh-first. It does not participate in the semantic editing contract."
+                  : "Canvas interaction selects and frames features. Exact numeric editing stays in the left rail."}
               </p>
             </div>
-
-            {isCompareMode ? (
-              <div className="model-toolbar">
-              {isPreviewStale ? <span className="warning-chip subtle">Rebuilding exact preview…</span> : null}
-              <button
-                type="button"
-                className="mode-chip"
-                  onClick={() => setShowOriginalReference((value) => !value)}
-                >
-                  {showOriginalReference ? "Hide original reference" : "Show original reference"}
-                </button>
-              </div>
-            ) : null}
-
-            {!isCompareMode && isPreviewStale ? (
-              <div className="model-toolbar">
+            <div className="cad-canvas-toolbar">
+              {canvasTabs.length > 1 ? (
+                <CanvasTabBar
+                  tabs={canvasTabs}
+                  activeTab={canvasTab}
+                  onChange={setCanvasTab}
+                />
+              ) : null}
+              {isPreviewStale && workflowMode === "workspace" ? (
                 <span className="warning-chip subtle">Rebuilding exact preview…</span>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
+          </div>
 
-            {isCompareMode && showOriginalReference && presentationContext?.sourceModelUrl ? (
-              <div className="compare-grid">
+          <div className="canvas-stage">
+            {creativeModelVisible ? (
+              <div className="canvas-surface model-shell cad-model-shell">
+                <ModelViewer
+                  src={visibleModelUrl}
+                  label="Creative object"
+                  defaultInteractionMode="orbit"
+                  defaultCameraPreset="iso"
+                />
+              </div>
+            ) : canvasTab === "2d" &&
+              editableModel &&
+              workspaceMode === "native" &&
+              isPerforatedDiscModel(editableModel) ? (
+              <div className="canvas-surface canvas-surface-2d">
+                {selectionChip}
+                <PerforatedDiscDesigner
+                  rootBody={editableModel.bodies[0]}
+                  selectedFeatureId={selectedFeatureId}
+                  disabled={isBusy}
+                  showParams={false}
+                  onSelectFeature={(featureId) =>
+                    handleFeatureSelect(featureId, "designer")
+                  }
+                  onParamChange={handleBodyParamChange}
+                />
+              </div>
+            ) : canvasTab === "2d" &&
+              workspaceMode === "stl_reconstruction" &&
+              stlTarget &&
+              planarParams ? (
+              <div className="canvas-surface canvas-surface-2d">
+                {selectionChip}
+                <PlanarFaceEditor
+                  target={stlTarget as Parameters<typeof PlanarFaceEditor>[0]["target"]}
+                  params={planarParams}
+                  disabled={isBusy}
+                  showControls={false}
+                  onParamChange={(key, value) => {
+                    if (!selectedFeature) return;
+                    const mapping: Record<
+                      string,
+                      { bodyId: string; paramKey: string }
+                    > = {
+                      hole_diameter: {
+                        bodyId: selectedFeature.id,
+                        paramKey:
+                          selectedFeature.kind === "hole"
+                            ? "diameter_mm"
+                            : "hole_diameter_mm",
+                      },
+                      width: { bodyId: selectedFeature.id, paramKey: "width_mm" },
+                      height: { bodyId: selectedFeature.id, paramKey: "height_mm" },
+                      spacing_x: {
+                        bodyId: selectedFeature.id,
+                        paramKey: "tangential_spacing_mm",
+                      },
+                      spacing_y: {
+                        bodyId: selectedFeature.id,
+                        paramKey: "spacing_y_mm",
+                      },
+                      count_x: { bodyId: selectedFeature.id, paramKey: "count_x" },
+                      count_y: { bodyId: selectedFeature.id, paramKey: "count_y" },
+                      radial_spacing: {
+                        bodyId: selectedFeature.id,
+                        paramKey: "radial_spacing_mm",
+                      },
+                      ring_count: {
+                        bodyId: selectedFeature.id,
+                        paramKey: "ring_count",
+                      },
+                      margin: {
+                        bodyId: selectedFeature.id,
+                        paramKey: "edge_margin_mm",
+                      },
+                    };
+                    const targetMapping = mapping[key];
+                    if (targetMapping) {
+                      void handleBodyParamChange(
+                        targetMapping.bodyId,
+                        targetMapping.paramKey,
+                        value
+                      );
+                    }
+                  }}
+                  onParamReset={() => {
+                    // Reset is intentionally disabled in the 2D shell surface.
+                  }}
+                  onSelectElement={handlePlanarSelection}
+                />
+              </div>
+            ) : canvasTab === "compare" &&
+              compareEnabled &&
+              presentationContext?.sourceModelUrl ? (
+              <div className="compare-grid cad-compare-grid">
                 <div className="model-stack">
                   <div className="status-label">Original import</div>
-                  <div className="model-shell">
+                  <div className="model-shell cad-model-shell">
                     <ModelViewer
                       src={presentationContext.sourceModelUrl}
                       label="Imported STL"
@@ -902,7 +1235,7 @@ export default function Home() {
                 </div>
                 <div className="model-stack">
                   <div className="status-label">Current revision</div>
-                  <div className="model-shell">
+                  <div className="model-shell cad-model-shell">
                     <ModelViewer
                       src={workspaceModelUrl || presentationContext.sourceModelUrl}
                       label="Workspace revision"
@@ -913,50 +1246,103 @@ export default function Home() {
                 </div>
               </div>
             ) : (
-              <div className="model-shell">
+              <div className="canvas-surface model-shell cad-model-shell">
                 <ModelViewer
                   src={visibleModelUrl}
-                  label={workflowMode === "creative" ? "Creative object" : "Workspace revision"}
-                  defaultInteractionMode={workflowMode === "creative" ? "orbit" : "pan"}
-                  defaultCameraPreset={workflowMode === "creative" ? "iso" : "front"}
+                  label={creativeModelVisible ? "Creative object" : "Workspace revision"}
+                  defaultInteractionMode={creativeModelVisible ? "orbit" : "pan"}
+                  defaultCameraPreset={creativeModelVisible ? "iso" : "front"}
                   onSelect={workflowMode === "workspace" ? handleViewerSelect : undefined}
                   onClearSelection={() => {
-                    setSelectedFeatureId(null);
-                    setFloatingEditorContext(null);
+                    setSelectionChipVisible(false);
                   }}
                   selectionMarker={selectionMarker}
                   focusTarget={focusTarget}
-                  floatingPoint={floatingEditorContext?.mode === "floating" ? floatingEditorContext.point : null}
-                  floatingEditor={floatingCanvasEditor}
-                  annotations={semanticAnnotations.length ? <SemanticAnnotations items={semanticAnnotations} /> : null}
+                  selectionChip={selectionChip}
+                  annotations={
+                    semanticAnnotations.length ? (
+                      <SemanticAnnotations items={semanticAnnotations} />
+                    ) : null
+                  }
                 />
               </div>
             )}
-
-            {dockedFloatingEditor}
-
-            <div className="actions">
-              <a
-                className={`download-button ${visibleStlUrl ? "" : "disabled"}`}
-                href={visibleStlUrl || "#"}
-                download
-                aria-disabled={!visibleStlUrl}
-              >
-                Download STL
-              </a>
-              <a
-                className={`download-button ${visibleBundleUrl ? "" : "disabled"}`}
-                href={visibleBundleUrl || "#"}
-                download
-                aria-disabled={!visibleBundleUrl}
-              >
-                Download bundle
-              </a>
-              <span className="hint">{currentHint}</span>
-            </div>
-          </section>
-        </div>
+          </div>
+        </section>
       </div>
+
+      <footer className="cad-bottom-bar">
+        <div className="cad-bottom-status">
+          <span className="cad-status-label">
+            {creativeModelVisible
+              ? creativeStlUrl
+                ? "Creative output ready"
+                : "Awaiting creative generation"
+              : isPreviewStale
+              ? "Rebuilding exact preview…"
+              : editableModel
+              ? "Draft updated"
+              : "No active workspace"}
+          </span>
+          <span className="hint">{currentHint}</span>
+          {editableModel ? (
+            <span className="cad-revision-chip">
+              Revision {editableModel.revision_id.slice(0, 8)}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="cad-bottom-actions">
+          {workflowMode === "workspace" && editableModel ? (
+            <>
+              <button
+                type="button"
+                className="mode-chip"
+                onClick={() => void applyHistoryEntry(undoStack[undoStack.length - 1], "undo")}
+                disabled={!undoStack.length || isBusy}
+              >
+                Undo
+              </button>
+              <button
+                type="button"
+                className="mode-chip"
+                onClick={() => void applyHistoryEntry(redoStack[redoStack.length - 1], "redo")}
+                disabled={!redoStack.length || isBusy}
+              >
+                Redo
+              </button>
+              <button
+                type="button"
+                className="mode-chip"
+                onClick={() => void preview()}
+                disabled={isBusy}
+              >
+                Preview current
+              </button>
+              <button
+                type="button"
+                className="download-button action-button"
+                onClick={() => void build()}
+                disabled={isBusy}
+              >
+                Export STL
+              </button>
+            </>
+          ) : null}
+          {visibleStlUrl ? (
+            <a className="mode-chip" href={visibleStlUrl} download>
+              Download STL
+            </a>
+          ) : null}
+          {visibleBundleUrl ? (
+            <a className="mode-chip" href={visibleBundleUrl} download>
+              Download bundle
+            </a>
+          ) : null}
+        </div>
+      </footer>
+
+      {error ? <div className="cad-global-error warning-chip">{error}</div> : null}
     </main>
   );
 }

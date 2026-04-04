@@ -68,6 +68,7 @@ type PlanarFaceEditorProps = {
   target: PatternTarget | SingleTarget;
   params: Record<string, string>;
   disabled?: boolean;
+  showControls?: boolean;
   onParamChange: (key: string, value: string) => void;
   onParamReset: (key: string) => void;
   onSelectElement?: (selection: { kind: "pattern" } | { kind: "feature"; featureId: string } | { kind: "center_hole"; featureId?: string }) => void;
@@ -312,6 +313,7 @@ export default function PlanarFaceEditor({
   target,
   params,
   disabled,
+  showControls = true,
   onParamChange,
   onParamReset,
   onSelectElement,
@@ -484,6 +486,7 @@ export default function PlanarFaceEditor({
         ))}
       </div>
 
+      {showControls ? (
       <div className="planar-controls">
         {target.type === "planar_pattern_face" && target.feature_kind === "circular_hole" ? (
           <label className="field-row compact-field">
@@ -616,6 +619,7 @@ export default function PlanarFaceEditor({
           </>
         ) : null}
       </div>
+      ) : null}
     </div>
   );
 }

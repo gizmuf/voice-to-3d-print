@@ -840,12 +840,13 @@ code {
 .model-overlay {
   position: absolute;
   top: 12px;
-  left: 12px;
+  right: 12px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
   z-index: 2;
-  max-width: calc(100% - 24px);
+  max-width: min(220px, calc(100% - 24px));
 }
 
 .model-overlay-chip {
@@ -1235,6 +1236,303 @@ code {
   cursor: not-allowed;
 }
 
+.cad-page {
+  min-height: 100vh;
+  padding: 18px;
+  display: grid;
+  gap: 18px;
+}
+
+.cad-shell-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 22px;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(25, 22, 20, 0.08);
+  border-radius: 24px;
+  box-shadow: 0 18px 40px rgba(20, 16, 13, 0.08);
+  backdrop-filter: blur(18px);
+}
+
+.cad-header-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1;
+}
+
+.cad-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cad-header-mode,
+.cad-header-revision,
+.cad-revision-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(25, 22, 20, 0.08);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.cad-shell-body {
+  display: grid;
+  grid-template-columns: clamp(360px, 22vw, 420px) minmax(0, 1fr);
+  gap: 18px;
+  min-height: calc(100vh - 220px);
+}
+
+.cad-left-rail {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.cad-canvas-area {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(25, 22, 20, 0.08);
+  border-radius: 28px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  padding: 18px;
+}
+
+.cad-canvas-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.cad-canvas-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.canvas-tab-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(25, 22, 20, 0.08);
+}
+
+.canvas-tab {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.canvas-tab.active {
+  background: rgba(43, 140, 122, 0.14);
+  color: #1f5c50;
+}
+
+.canvas-stage {
+  min-height: 0;
+  position: relative;
+}
+
+.canvas-surface {
+  height: 100%;
+  min-height: 0;
+  position: relative;
+}
+
+.canvas-surface-2d {
+  display: grid;
+  align-content: stretch;
+}
+
+.cad-model-shell {
+  height: 100%;
+  min-height: 620px;
+}
+
+.cad-compare-grid {
+  height: 100%;
+}
+
+.cad-compare-grid .model-shell {
+  height: 100%;
+  min-height: 620px;
+}
+
+.rail-panel {
+  gap: 18px;
+}
+
+.rail-mode-panel {
+  padding-bottom: 18px;
+}
+
+.compact-entry-panel {
+  gap: 14px;
+}
+
+.compact-entry-panel .panel-header h2 {
+  margin-bottom: 8px;
+}
+
+.rail-entry-summary .project-summary,
+.rail-inspector-panel .project-summary {
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.inspector-spec-grid {
+  grid-template-columns: 1fr;
+}
+
+.field-value-hint {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.selection-chip {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: min(340px, calc(100vw - 48px));
+  max-width: 420px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.96);
+  border: 1px solid rgba(25, 22, 20, 0.1);
+  box-shadow: 0 22px 46px rgba(20, 16, 13, 0.18);
+  backdrop-filter: blur(18px);
+}
+
+.selection-chip-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.selection-chip-copy strong {
+  font-size: 1rem;
+}
+
+.selection-chip-copy span {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.selection-chip-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.selection-chip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.selection-chip-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.model-selection-chip-slot {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 4;
+}
+
+.canvas-surface-2d > .selection-chip {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 3;
+}
+
+.perforated-disc-designer,
+.planar-editor {
+  height: 100%;
+  min-height: 0;
+}
+
+.perforated-disc-designer .face-editor-stage,
+.planar-editor .face-editor-stage {
+  flex: 1;
+  min-height: 0;
+}
+
+.cad-bottom-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(25, 22, 20, 0.08);
+  border-radius: 24px;
+  box-shadow: 0 18px 40px rgba(20, 16, 13, 0.1);
+  backdrop-filter: blur(18px);
+}
+
+.cad-bottom-status {
+  display: grid;
+  gap: 8px;
+}
+
+.cad-status-label {
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #1f5c50;
+}
+
+.cad-bottom-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cad-global-error {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 30;
+}
+
 @media (min-width: 1080px) {
   .workspace-grid {
     grid-template-columns: minmax(420px, 1.05fr) minmax(420px, 0.95fr);
@@ -1254,6 +1552,50 @@ code {
 }
 
 @media (max-width: 720px) {
+  .cad-page {
+    padding: 12px;
+  }
+
+  .cad-shell-header,
+  .cad-canvas-area,
+  .cad-bottom-bar {
+    border-radius: 20px;
+    padding: 14px;
+  }
+
+  .cad-shell-body {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .cad-left-rail {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .cad-canvas-header,
+  .cad-bottom-bar,
+  .cad-header-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cad-model-shell,
+  .cad-compare-grid .model-shell {
+    min-height: 420px;
+  }
+
+  .selection-chip {
+    min-width: 0;
+    width: min(100%, 360px);
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .selection-chip-actions {
+    justify-content: space-between;
+  }
+
   .page {
     padding: 32px 6vw 64px;
   }

@@ -251,7 +251,18 @@ export default function VoicePanel({
         },
         25000
       );
-      if (!response.ok) throw new Error("Could not understand your idea.");
+      if (!response.ok) {
+        let detail = "Could not understand your idea.";
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload?.detail) {
+            detail = payload.detail;
+          }
+        } catch {
+          // Fall back to generic text when the backend does not return structured JSON.
+        }
+        throw new Error(detail);
+      }
       const routed = (await response.json()) as RouteIntentResponse;
       if (routed.mode !== "useful" || !routed.structured_spec) {
         throw new Error("This prompt was routed away from Design Workspace. Use Creative mode for non-semantic prompts.");

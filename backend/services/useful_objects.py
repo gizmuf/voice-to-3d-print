@@ -153,6 +153,15 @@ CREATIVE_KEYWORDS = (
     "sculpture",
 )
 
+UNSUPPORTED_SEMANTIC_SHAPES = (
+    "triangle",
+    "triangular",
+    "pentagon",
+    "pentagonal",
+    "hexagon",
+    "hexagonal",
+)
+
 
 @dataclass
 class UsefulPreview:
@@ -210,7 +219,7 @@ def _keyword_score(text: str, keywords: Iterable[str]) -> int:
     return sum(1 for keyword in keywords if keyword in lowered)
 
 
-def _detect_template(text: str, existing_template: str | None = None) -> str:
+def _detect_template(text: str, existing_template: str | None = None) -> str | None:
     lowered = text.lower()
     if "perforated" in lowered and any(word in lowered for word in ("disc", "plate", "panel", "filter", "strainer")):
         return "perforated_disc"
@@ -220,7 +229,9 @@ def _detect_template(text: str, existing_template: str | None = None) -> str:
         return "phone_stand"
     if any(word in lowered for word in ("cylindrical holder", "pen holder", "cup holder")):
         return "cylindrical_holder"
-    best_template = existing_template or "phone_stand"
+    if any(word in lowered for word in UNSUPPORTED_SEMANTIC_SHAPES):
+        return None
+    best_template = existing_template
     best_score = 0
     for template_id, keywords in USEFUL_KEYWORDS.items():
         score = _keyword_score(lowered, keywords)
@@ -243,6 +254,8 @@ def _detect_template(text: str, existing_template: str | None = None) -> str:
         return "wall_mount"
     if " mount" in lowered or lowered.startswith("mount "):
         return "wall_mount"
+    if "hole" in lowered or "holes" in lowered:
+        return None
     return best_template
 
 
@@ -272,11 +285,14 @@ def route_mode(
 
     template_id = _detect_template(lowered) if mode == "useful" else None
     provider = "useful-cad" if mode == "useful" else "meshy"
-    reason = (
-        f"Detected measurable utility language for {TEMPLATE_LABELS.get(template_id or '', 'object')}."
-        if mode == "useful"
-        else "Detected creative language; routed to mesh generation."
-    )
+    if mode == "useful" and template_id is None:
+        reason = "The prompt looks like a precise CAD request, but it does not match a supported semantic template yet. Rephrase using a supported object type or import a reference model."
+    else:
+        reason = (
+            f"Detected measurable utility language for {TEMPLATE_LABELS.get(template_id or '', 'object')}."
+            if mode == "useful"
+            else "Detected creative language; routed to mesh generation."
+        )
     confidence = 0.95 if mode_hint == mode else (0.88 if mode == "useful" else 0.82)
     return {
         "mode": mode,
@@ -400,6 +416,11 @@ def build_useful_structured_spec(
         else None
     )
     template_id = _detect_template(prompt, base_template)
+    if template_id is None:
+        raise ValueError(
+            "This prompt asks for a precise semantic shape that is not supported yet. "
+            "Right now the semantic workspace supports specific native templates such as perforated disc, phone stand, box, tray, hook, cable organizer, bracket, cylindrical holder, and wall mount."
+        )
     template_defaults = _deep_copy(DEFAULT_SPECS[template_id])
     if existing_spec:
         template_defaults = _merge_dict(template_defaults, existing_spec)
