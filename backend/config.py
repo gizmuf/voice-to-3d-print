@@ -6,7 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+# override=True so values in backend/.env take precedence over a parent shell
+# that may have stale or empty exports for the same keys (e.g. an empty
+# ANTHROPIC_API_KEY left over from a prior login shell).
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 
 def _resolve_path(value: str | None, default: Path) -> Path:
@@ -37,6 +40,21 @@ class Settings:
         "https://gut-feeling-api-242245666842.us-central1.run.app/generate",
     )
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    # Anthropic / Claude config — used by the new chat agent loop.
+    # Verify model IDs against https://docs.anthropic.com/en/docs/about-claude/models
+    # at deploy time. Pinned from a single constant so we never scatter version
+    # strings across the codebase.
+    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    anthropic_chat_model: str = os.getenv("ANTHROPIC_CHAT_MODEL", "claude-sonnet-4-6")
+    anthropic_classify_model: str = os.getenv(
+        "ANTHROPIC_CLASSIFY_MODEL", "claude-haiku-4-5-20251001"
+    )
+    anthropic_max_output_tokens: int = int(
+        os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "1500")
+    )
+    default_printer_profile_id: str = os.getenv(
+        "DEFAULT_PRINTER_PROFILE_ID", "prusa_mk4_default"
+    )
     firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "")
     firebase_storage_bucket: str = os.getenv("FIREBASE_STORAGE_BUCKET", "")
     storage_public_base_url: str = os.getenv("STORAGE_PUBLIC_BASE_URL", "")

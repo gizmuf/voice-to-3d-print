@@ -1,0 +1,171 @@
+[
+  {
+    "name": "perforated_disc_make_holes_smaller",
+    "category": "param_edit",
+    "initial_template": "perforated_disc",
+    "user_message": "make the holes 5mm",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"node_kind": "circular_pattern", "param_name": "hole_diameter_mm", "approx_new_value": 5}
+    ]
+  },
+  {
+    "name": "perforated_disc_make_disc_bigger",
+    "category": "param_edit",
+    "initial_template": "perforated_disc",
+    "user_message": "make the disc 350mm across",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"node_kind": "body", "param_name": "outer_diameter", "approx_new_value": 350}
+    ]
+  },
+  {
+    "name": "perforated_disc_more_rings",
+    "category": "param_edit",
+    "initial_template": "perforated_disc",
+    "user_message": "give me twice as many rings",
+    "expected_tools_called": ["mutate_parameter", "run_preview"]
+  },
+  {
+    "name": "perforated_disc_thicker",
+    "category": "param_edit",
+    "initial_template": "perforated_disc",
+    "user_message": "make it 2mm thicker",
+    "expected_tools_called": ["mutate_parameter", "run_preview"]
+  },
+  {
+    "name": "phone_stand_cable_hole_to_12",
+    "category": "param_edit",
+    "initial_template": "phone_stand",
+    "user_message": "the cable hole should be 12mm",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"param_name": "cable_hole_diameter_mm", "approx_new_value": 12}
+    ]
+  },
+  {
+    "name": "phone_stand_steeper_angle",
+    "category": "param_edit",
+    "initial_template": "phone_stand",
+    "user_message": "make the angle steeper, like 75 degrees",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"param_name": "angle_deg", "approx_new_value": 75}
+    ]
+  },
+  {
+    "name": "simple_box_thicker_walls",
+    "category": "param_edit",
+    "initial_template": "simple_box",
+    "user_message": "thicker walls — 4mm please",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"param_name": "wall_thickness_mm", "approx_new_value": 4}
+    ]
+  },
+  {
+    "name": "tray_round_the_corners",
+    "category": "param_edit",
+    "initial_template": "tray",
+    "user_message": "round the outside corners with a 5mm fillet",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"param_name": "fillet_mm", "approx_new_value": 5}
+    ]
+  },
+  {
+    "name": "bracket_bigger_hole",
+    "category": "param_edit",
+    "initial_template": "bracket",
+    "user_message": "the mounting hole should be 8mm wide",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"param_name": "hole_diameter_mm", "approx_new_value": 8}
+    ]
+  },
+  {
+    "name": "cable_organizer_more_slots",
+    "category": "param_edit",
+    "initial_template": "cable_organizer",
+    "user_message": "I need 8 slots instead",
+    "expected_tools_called": ["mutate_parameter", "run_preview"],
+    "expected_param_changes": [
+      {"param_name": "slot_count", "approx_new_value": 8}
+    ]
+  },
+
+  {
+    "name": "refuse_add_feature_in_phase1",
+    "category": "refusal",
+    "initial_template": "perforated_disc",
+    "user_message": "add a small chamfer around the outer edge",
+    "expected_no_successful_tool": "add_feature",
+    "expected_assistant_mentions_any": ["not yet supported", "phase 2", "not supported", "cannot add"]
+  },
+  {
+    "name": "refuse_remove_feature_in_phase1",
+    "category": "refusal",
+    "initial_template": "perforated_disc",
+    "user_message": "remove the center hole entirely",
+    "expected_no_successful_tool": "remove_feature",
+    "expected_assistant_mentions_any": ["not yet supported", "set", "diameter to 0"]
+  },
+  {
+    "name": "refuse_unsupported_param",
+    "category": "refusal",
+    "initial_template": "perforated_disc",
+    "user_message": "change the hole shape to a hexagon",
+    "expected_no_param_change": true
+  },
+  {
+    "name": "refuse_unrelated_template_param",
+    "category": "refusal",
+    "initial_template": "perforated_disc",
+    "user_message": "make the cable_hole_diameter_mm 6",
+    "expected_no_param_change": true
+  },
+
+  {
+    "name": "ambiguous_make_it_bigger",
+    "category": "ambiguity",
+    "initial_template": "perforated_disc",
+    "user_message": "make it bigger",
+    "expected_clarifying_question": true
+  },
+  {
+    "name": "ambiguous_stronger",
+    "category": "ambiguity",
+    "initial_template": "phone_stand",
+    "user_message": "make it stronger",
+    "expected_clarifying_question": true
+  },
+  {
+    "name": "ambiguous_better_for_printing",
+    "category": "ambiguity",
+    "initial_template": "tray",
+    "user_message": "make it better for printing",
+    "expected_clarifying_question": true
+  },
+
+  {
+    "name": "query_then_edit",
+    "category": "query",
+    "initial_template": "perforated_disc",
+    "user_message": "what features can I edit on this disc?",
+    "expected_tools_called_any": ["query_tree"]
+  },
+  {
+    "name": "list_holes",
+    "category": "query",
+    "initial_template": "bracket",
+    "user_message": "list the holes you see",
+    "expected_tools_called_any": ["query_tree"]
+  },
+  {
+    "name": "no_op_refused",
+    "category": "refusal",
+    "initial_template": "perforated_disc",
+    "user_message": "set the outer_diameter to whatever it currently is",
+    "expected_no_param_change": true
+  }
+]

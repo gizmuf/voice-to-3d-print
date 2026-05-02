@@ -121,21 +121,25 @@ def validate_mesh_file(stl_path: Path) -> dict:
     }
 
 
-def _slice_mesh(stl_path: Path, gcode_path: Path) -> bool:
+def _slice_mesh(stl_path: Path, gcode_path: Path, profile_id: str | None = None) -> bool:
+    from services.printer_profiles import get_profile, profile_config_path
+
     slicer_path = Path(settings.prusaslicer_path)
     if not slicer_path.exists():
         return False
 
+    profile = get_profile(profile_id)
     cmd = [
         str(slicer_path),
         "--export-gcode",
     ]
-    config_path = Path(settings.prusaslicer_config)
-    if config_path.is_file():
+    config_path = profile_config_path(profile)
+    if config_path is not None:
         cmd.extend(["--load", str(config_path)])
+    if profile.supports_material:
+        cmd.append("--support-material")
     cmd.extend(
         [
-            "--support-material",
             "--output",
             str(gcode_path),
             str(stl_path),

@@ -69,10 +69,173 @@ Open http://localhost:3000
    - Note: wrap paths with spaces in quotes in your shell/env files.
 
 ## Endpoints
-- `POST /generate` → calls the selected provider and returns `glb_url`
-- `POST /process-model` → downloads GLB, repairs, slices, returns artifact URLs
-- `POST /generate-image?provider=meshy|tripo|trellis2|triposr` → image-to-3D task
-- `GET /artifacts/{job_id}/output.gcode` → G-code download
+
+**Code-driven CAD engine (powerful path):**
+- `GET /design/templates` → list seed scripts
+- `POST /design/create` → create a new design from `prompt` / `template_id` / `script` (audits + sandbox-builds an initial STL+GLB)
+- `GET /design/{id}` → get the design (script, parameters, named features, latest build)
+- `GET /design` → list saved designs
+- `POST /design/{id}/chat` → SSE chat with Pulsai (powerful tool set, no capability matrix)
+- `GET /design/{id}/conversation` → persisted chat history
+- `POST /design/{id}/build` → re-run with optional STL/STEP/DXF/GLB targets, optional G-code slice
+
+**Legacy template path (kept for compat, scheduled for removal):**
+- `POST /generate`, `POST /process-model`, `POST /generate-image?provider=…` → legacy generation
+- `POST /workspace/{id}/chat` (legacy capability-matrix agent), `GET /workspace/{id}/conversation`,
+  `GET /workspace/{id}/editability`, `POST /workspace/{id}/export-bundle`,
+  `GET /workspace/{id}/export-bundle/dry-run` — narrowed to numeric param tweaks on fixed templates.
+
+**Common:**
+- `GET /artifacts/...` → static artifact serving
+- `GET /printer-profiles` → list available printer profiles
+
+## The Pulsai Design Studio (powerful)
+
+Frontend route: **`/design`** (open `http://localhost:3000/design`).
+
+Each "design" *is* a [build123d](https://github.com/gumyr/build123d) Python
+script. Parameters are declared via the runner-provided `pulsai.param()`
+helper; named feature blocks delimited by `# @feature: name` ... `# @end`
+are independently editable by the agent. The script is the source of truth;
+the inspector (parameters / features / manufacturability) is a derived view.
+
+### Chat tools (no capability matrix, no per-template gating)
+
+| Tool | Purpose |
+| --- | --- |
+| `read_design` | Return current script, parameters, features, and last-build summary. |
+| `query_library` | Search the snippet library (holes, polygons, patterns, fillets, shells, …). |
+| `update_parameter` | Fast path for numeric tweaks — re-run the script with one override. |
+| `replace_feature` | Surgically swap the body of a `# @feature: name` block. |
+| `append_feature` | Add a new feature block. |
+| `rewrite_design` | Full script replacement (escape hatch). |
+| `run_build` | Execute and emit STL/STEP/DXF/GLB; optional G-code slice. |
+| `check_manufacturability` | Process-aware (`fdm` or `cnc`) report. |
+
+Refusals come from the **AST audit** (security: no `os`, `subprocess`, network,
+`exec`/`eval`, `__class__.__mro__`, etc.) and from real **sandbox build
+failures** — not from a hand-coded matrix.
+
+### Sandboxing
+
+Every script runs in a separate Python subprocess:
+
+- **AST audit** (`services/codegen/ast_audit.py`) parses the script and
+  rejects unsafe imports, dunder access, exec/eval, file/network APIs.
+- **Subprocess** (`services/codegen/sandbox.py`) launches with a stripped
+  environment (no `ANTHROPIC_API_KEY` etc.), `cwd=/tmp/job_id`, no
+  `PYTHONPATH` injection, `python -I` (isolated mode).
+- **Resource limits** (`services/codegen/runner/host.py`) apply
+  `RLIMIT_CPU = 90s`, `RLIMIT_AS = 4 GiB` before importing build123d.
+- **Wall-clock timeout** = 120 s, after which the subprocess is hard-killed
+  by `subprocess.run`.
+- **Cloud Run** already uses gVisor; on macOS dev the above + the runner's
+  isolated mode are the layers.
+
+### Manufacturability — process-aware
+
+`check_mesh(mesh, profile, process)` produces a `ManufacturabilityReport`:
+
+- **FDM**: overhangs > 45°, sampled inward-ray min wall thickness, watertight
+  + winding consistency, bed-size fit (per printer profile).
+- **CNC**: undercuts (faces with `n.z < -0.1`), sharp internal corners
+  (heuristic on adjacent face angles), watertightness, stock-size fit.
+
+### Outputs
+
+STL, GLB, **STEP** (CNC handoff), **DXF** (2D / waterjet / laser), G-code (FDM
+via PrusaSlicer when `slice_gcode=true`).
+
+### Snippet library
+
+Pre-baked build123d idioms in `services/codegen/library/__init__.py`:
+circular hole, **polygon hole** (triangle, hex, …), slot, circular pattern,
+grid pattern, **hex grid**, fillet, chamfer, shell open-top, counterbore,
+boss with hole, rounded box. Searchable via `query_library(intent)`.
+
+## Phase 1: Pulsai chat agent
+
+The new agent loop replaces the legacy single-prompt `/workspace/{id}/ai-edit`
+path. It uses the Anthropic SDK directly (no proxy), calls a fixed set of
+tools, and is gated by a per-template/source capability matrix.
+
+### Required env vars
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6              # verify against current Anthropic docs
+ANTHROPIC_CLASSIFY_MODEL=claude-haiku-4-5-20251001  # used in Phase 2 routing
+ANTHROPIC_MAX_OUTPUT_TOKENS=1500
+DEFAULT_PRINTER_PROFILE_ID=prusa_mk4_default
+```
+
+`GEMINI_PROXY_URL` remains supported but is *legacy-only*; it is read solely by
+the deprecated `/workspace/{id}/ai-edit` endpoint, which is scheduled for
+deletion in Phase 2.
+
+### Tools available to the agent
+
+| Tool | Purpose |
+| --- | --- |
+| `mutate_parameter` | Change one parameter on one feature. Validated against the capability matrix; refuses silent no-ops. |
+| `add_feature` / `remove_feature` | Always refused in Phase 1; refusals carry a clear suggestion. Phase 2 will lift this. |
+| `run_preview` | Rebuild GLB/STL, return revision id + mesh hash. |
+| `check_manufacturability` | Mesh-based: min wall, overhangs, watertightness, bed fit. |
+| `query_tree` | Read-only feature lookup. |
+
+### Editability levels
+
+Every workspace ships with a backend-enforced `EditabilityAssessment`
+(`GET /workspace/{id}/editability`). The four levels are:
+
+- **editable** — full parametric tree, all tools available.
+- **partially_editable** — recognized features editable, opaque parts move with the model.
+- **reference_only** — STEP imports and unrecognized STLs; export is `as_is`, no geometry edits.
+- **locked_unsafe** — manufacturability flagged the model invalid; export blocked until repair.
+
+The same assessment populates the `EditabilityBadge` shown next to the model
+name in the inspector.
+
+### Printer profiles
+
+Phase 1 ships one profile, `prusa_mk4_default` (mirrors prior hardcoded
+behavior). Add new ones by extending `backend/services/printer_profiles.py`
+and dropping a PrusaSlicer config file into `PRUSASLICER_CONFIG`. Phase 2 will
+add Bambu X1, Ender 3, and Prusa MINI as drop-in additions.
+
+### ZIP export bundle
+
+`POST /workspace/{id}/export-bundle` returns a manifest URL pointing at
+`bundle.zip` containing:
+
+- `model.stl` (or `preview.stl` for reference-only exports)
+- `model.glb`
+- `output.gcode` (skipped for reference-only)
+- `manifest.json` — `{ model_name, revision_id, exported_at, source, editability_level, export_mode, printer_profile, parameter_values, manufacturability_report, mesh_hash, validation, software_version }`
+
+The endpoint requires `expected_revision_id` and rejects with HTTP 409 if the
+caller's expected revision is stale. This is the revision-truth guarantee:
+exports always match what the user just saw in the viewer, never an older
+preview.
+
+## Tests
+
+```
+backend/tests/contracts/test_editability.py            # fast unit, no heavy deps
+backend/tests/contracts/test_capability_matrix.py      # needs trimesh + cadquery
+backend/tests/contracts/test_mesh_hash_changes.py      # opt-in: RUN_MESH_HASH_CONTRACTS=1
+backend/tests/ai/evals/                                # ANTHROPIC_API_KEY required
+frontend/tests/e2e/killer-flow.spec.ts                 # Playwright E2E
+```
+
+Frontend Playwright setup:
+
+```
+cd frontend
+npm install              # picks up @playwright/test
+npm run test:e2e:install # one-time browser install
+npm run test:e2e
+```
 
 ## Repo Structure
 ```

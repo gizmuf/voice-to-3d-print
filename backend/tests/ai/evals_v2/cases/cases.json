@@ -1,0 +1,97 @@
+[
+  {
+    "name": "wall_hook_thicken",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "wall_hook"},
+    "user_message": "make the plate 2mm thicker",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_no_destructive_calls": false,
+    "max_input_tokens": 30000,
+    "max_output_tokens": 2500
+  },
+  {
+    "name": "phone_stand_steeper",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "phone_stand"},
+    "user_message": "make the angle 75 degrees",
+    "expected_tools_called_any": ["update_parameter"]
+  },
+  {
+    "name": "knob_more_knurls",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "knob"},
+    "user_message": "give me twice as many knurls",
+    "expected_tools_called_any": ["update_parameter"]
+  },
+  {
+    "name": "stl_shrink_holes_macro",
+    "category": "macro_call",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "make all holes 1mm smaller",
+    "expected_tools_called_any": ["mesh_modify_holes"],
+    "expected_mesh_hash_changes": true
+  },
+  {
+    "name": "stl_drill_hole_macro",
+    "category": "macro_call",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "drill a 5mm hole at the center of the plate",
+    "expected_tools_called_any": ["mesh_subtract_primitive"],
+    "expected_mesh_hash_changes": true
+  },
+  {
+    "name": "stl_inflate_macro",
+    "category": "macro_call",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "make it 0.2mm bigger everywhere — I need a press fit",
+    "expected_tools_called_any": ["mesh_offset_surface"],
+    "expected_mesh_hash_changes": true
+  },
+  {
+    "name": "stl_split_in_half_macro",
+    "category": "macro_call",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "split this in half along Z so I can print both halves",
+    "expected_tools_called_any": ["mesh_split_at_plane"],
+    "expected_mesh_hash_changes": true
+  },
+  {
+    "name": "stl_mirror_macro",
+    "category": "macro_call",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "mirror it across the X axis to make a symmetric pair",
+    "expected_tools_called_any": ["mesh_mirror"],
+    "expected_mesh_hash_changes": true
+  },
+  {
+    "name": "stl_detect_holes_macro",
+    "category": "query",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "how many holes are in this part?",
+    "expected_tools_called_any": ["detect_features"],
+    "expected_no_destructive_calls": true
+  },
+  {
+    "name": "stl_repair_macro",
+    "category": "macro_call",
+    "fixture": {"kind": "stl_grid_plate"},
+    "user_message": "repair this mesh — looks like there might be holes in it",
+    "expected_tools_called_any": ["mesh_repair"]
+  },
+  {
+    "name": "ambiguous_make_it_bigger",
+    "category": "ambiguity",
+    "fixture": {"kind": "flagship", "id": "wall_hook"},
+    "user_message": "make it bigger",
+    "expected_clarifying_question": true,
+    "expected_no_destructive_calls": true
+  },
+  {
+    "name": "ambiguous_print_better",
+    "category": "ambiguity",
+    "fixture": {"kind": "flagship", "id": "enclosure"},
+    "user_message": "make it print better",
+    "expected_clarifying_question": true,
+    "expected_no_destructive_calls": true
+  }
+]

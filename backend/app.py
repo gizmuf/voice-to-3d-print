@@ -8,8 +8,38 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from services.ai.agent import load_conversation, stream_turn
+from services.ai.agent_v2 import stream_turn as stream_design_turn
+from services.editability import assess as assess_editability
+from services.export_bundle import export_bundle as export_bundle_service
+from services.export_bundle import export_dry_run as export_bundle_dry_run
+from services.printer_profiles import list_profiles as list_printer_profiles
+from services.codegen.engine import (
+    DesignBuildError,
+    audit_then_run,
+    build_design,
+    build_from_sandbox_result,
+    derive_named_features,
+    derive_parameters,
+)
+from services.codegen.projection import design_to_editable_model
+from services.codegen.store import (
+    create_design,
+    get_design,
+    get_record,
+    list_designs,
+    load_conversation as load_design_conversation,
+    save_build,
+)
+from services.codegen.templates import (
+    get_seed_script as get_template_seed,
+    list_template_ids,
+    seed_for as seed_template_for,
+)
 
 from config import settings
 from services.ai_edit import ai_edit_workspace_model
@@ -1435,3 +1465,878 @@ async def library_resolve(uid: str, provider: str = "local") -> dict:
     if not glb_url:
         raise HTTPException(status_code=404, detail="No downloadable GLB found.")
     return {"glb_url": glb_url}
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 additions: chat agent loop, editability, export-bundle, profiles.
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    printer_profile_id: str | None = None
+
+
+@app.post("/workspace/{workspace_id}/chat")
+async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatRequest):
+    """Stream one chat turn as Server-Sent Events.
+
+    Routes to the powerful code-driven agent (services/ai/agent_v2.py) when a
+    Design exists for ``workspace_id`` — or can be auto-seeded from the
+    workspace's template. Falls back to the legacy capability-matrix agent
+    only when the workspace has no build123d seeder available.
+    """
+    from services.codegen.store import get_design_or_none
+
+    design = get_design_or_none(workspace_id)
+
+    if design is None:
+        # Try to auto-seed a Design at the same id, using the workspace's
+        # template. The user keeps their URL; the chat just gets smarter.
+        try:
+            workspace_record = get_workspace(workspace_id)
+        except HTTPException:
+            workspace_record = None
+
+        if workspace_record is not None and workspace_record.editable_model.bodies:
+            template_id = str(
+                workspace_record.editable_model.bodies[0].params.get("_template_id", "")
+            )
+            if template_id in list_template_ids():
+                seed_name, seed_script = get_template_seed(template_id)
+                # Carry over the workspace's current parameter values so the new
+                # script renders the same shape the user already sees.
+                root_params = workspace_record.editable_model.bodies[0].params
+                overrides_for_seed: dict = {}
+                for body in workspace_record.editable_model.bodies:
+                    for k, v in body.params.items():
+                        if k.startswith("_"):
+                            continue
+                        if isinstance(v, (int, float, bool, str)):
+                            overrides_for_seed[k] = v
+                    for child in body.children:
+                        for k, v in child.params.items():
+                            if k.startswith("_"):
+                                continue
+                            if isinstance(v, (int, float, bool, str)):
+                                overrides_for_seed[k] = v
+
+                try:
+                    sandbox_seed = audit_then_run(
+                        script=seed_script,
+                        parameter_overrides=overrides_for_seed,
+                        targets=["stl", "glb"],
+                    )
+                except DesignBuildError:
+                    sandbox_seed = None
+
+                if sandbox_seed is not None and sandbox_seed.ok:
+                    parameters = derive_parameters(sandbox_seed.payload)
+                    features = derive_named_features(sandbox_seed.payload, seed_script)
+                    design = create_design(
+                        name=str(root_params.get("_object_label") or seed_name),
+                        script=seed_script,
+                        parameters=parameters,
+                        features=features,
+                        process="fdm",
+                        metadata={"template_id": template_id, "bridged_from_workspace": True},
+                        design_id=workspace_id,  # same id so the URL doesn't change
+                    )
+                    # Relocate the audit artifacts to the design's persistent dir
+                    # so /artifacts/designs/{id}/... URLs work.
+                    from pathlib import Path
+                    import shutil
+
+                    persistent = settings.output_dir / "designs" / design.id
+                    persistent.mkdir(parents=True, exist_ok=True)
+                    relocated: dict[str, str] = {}
+                    for kind, src in (sandbox_seed.payload.get("artifacts") or {}).items():
+                        src_path = Path(src)
+                        if not src_path.exists():
+                            continue
+                        dst_path = persistent / src_path.name
+                        try:
+                            shutil.copy2(src_path, dst_path)
+                            relocated[kind] = str(dst_path)
+                        except Exception:
+                            continue
+                    sandbox_seed.payload["artifacts"] = relocated
+                    initial_build = build_from_sandbox_result(
+                        design, sandbox_seed, process="fdm"
+                    )
+                    save_build(design.id, initial_build)
+
+    if design is not None:
+        generator = stream_design_turn(
+            workspace_id,
+            request.message,
+            printer_profile_id=request.printer_profile_id,
+        )
+        return StreamingResponse(generator, media_type="text/event-stream")
+
+    # Legacy fallback (no build123d seeder for this template — e.g. STEP imports).
+    generator = stream_turn(
+        workspace_id,
+        request.message,
+        printer_profile_id=request.printer_profile_id,
+    )
+    return StreamingResponse(generator, media_type="text/event-stream")
+
+
+@app.get("/workspace/{workspace_id}/conversation")
+def workspace_conversation_endpoint(workspace_id: str) -> dict:
+    return {"workspace_id": workspace_id, "messages": load_conversation(workspace_id)}
+
+
+@app.get("/workspace/{workspace_id}/editability")
+def workspace_editability_endpoint(workspace_id: str) -> dict:
+    record = get_workspace(workspace_id)
+    assessment = assess_editability(record.editable_model)
+    return {
+        "workspace_id": workspace_id,
+        "revision_id": record.editable_model.revision_id,
+        "assessment": assessment.model_dump(),
+    }
+
+
+class WorkspaceExportBundleRequest(BaseModel):
+    expected_revision_id: str
+    printer_profile_id: str | None = None
+    model_name: str | None = None
+
+
+class WorkspaceExportBundleResponse(BaseModel):
+    workspace_id: str
+    revision_id: str
+    bundle_url: str
+    glb_url: str
+    stl_url: str | None
+    gcode_url: str | None
+    manifest: dict
+
+
+@app.post(
+    "/workspace/{workspace_id}/export-bundle",
+    response_model=WorkspaceExportBundleResponse,
+)
+def workspace_export_bundle_endpoint(
+    workspace_id: str, request: WorkspaceExportBundleRequest
+) -> WorkspaceExportBundleResponse:
+    result = export_bundle_service(
+        workspace_id,
+        request.expected_revision_id,
+        printer_profile_id=request.printer_profile_id,
+        model_name=request.model_name,
+    )
+    return WorkspaceExportBundleResponse(
+        workspace_id=result.workspace_id,
+        revision_id=result.revision_id,
+        bundle_url=result.bundle_url,
+        glb_url=result.glb_url,
+        stl_url=result.stl_url,
+        gcode_url=result.gcode_url,
+        manifest=result.manifest,
+    )
+
+
+@app.get("/workspace/{workspace_id}/export-bundle/dry-run")
+def workspace_export_bundle_dry_run_endpoint(workspace_id: str) -> dict:
+    return export_bundle_dry_run(workspace_id)
+
+
+@app.get("/printer-profiles")
+def printer_profiles_endpoint() -> dict:
+    return {
+        "default": settings.default_printer_profile_id,
+        "profiles": [p.model_dump() for p in list_printer_profiles()],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Code-driven CAD engine — Design + powerful agent loop.
+# ---------------------------------------------------------------------------
+
+
+class DesignCreateRequest(BaseModel):
+    prompt: str | None = None
+    template_id: str | None = None
+    name: str | None = None
+    script: str | None = None
+    process: str = "either"
+
+
+class DesignCreateResponse(BaseModel):
+    design_id: str
+    revision_id: str
+    name: str
+    template_id: str | None
+    script: str
+    parameters: list[dict]
+    features: list[dict]
+    initial_build: dict | None
+    editable_model: dict
+
+
+def _seed_design_record(request: DesignCreateRequest):
+    if request.script:
+        name = request.name or "Custom design"
+        return None, name, request.script
+    if request.template_id:
+        if request.template_id not in list_template_ids():
+            raise HTTPException(status_code=400, detail=f"Unknown template_id: {request.template_id}")
+        display, script = get_template_seed(request.template_id)
+        return request.template_id, request.name or display, script
+    if request.prompt:
+        tid, display, script = seed_template_for(request.prompt)
+        return tid, request.name or display, script
+    raise HTTPException(
+        status_code=400,
+        detail="Provide one of: prompt, template_id, or script.",
+    )
+
+
+@app.post("/design/create", response_model=DesignCreateResponse)
+def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse:
+    template_id, name, script = _seed_design_record(request)
+
+    try:
+        # Initial seed only needs STL + GLB so the user sees the model fast.
+        # STEP export is heavy (OCCT serializer on hundreds of holes); request
+        # it explicitly via /design/{id}/build when needed for CNC handoff.
+        sandbox_result = audit_then_run(script=script, targets=["stl", "glb"])
+    except DesignBuildError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Seed script failed AST audit.", "errors": exc.audit_errors},
+        ) from exc
+    if not sandbox_result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Seed script failed to build.",
+                "error": sandbox_result.payload.get("error"),
+                "traceback": sandbox_result.payload.get("traceback"),
+            },
+        )
+
+    parameters = derive_parameters(sandbox_result.payload)
+    features = derive_named_features(sandbox_result.payload, script)
+
+    design = create_design(
+        name=name,
+        script=script,
+        parameters=parameters,
+        features=features,
+        process=request.process,
+        metadata={"template_id": template_id} if template_id else {},
+    )
+
+    # Reuse the sandbox payload from the audit run instead of re-executing the
+    # script. Move artifacts from the throwaway /tmp dir into the design's
+    # persistent workdir so URLs stay stable.
+    from pathlib import Path
+    import shutil
+
+    persistent = settings.output_dir / "designs" / design.id
+    persistent.mkdir(parents=True, exist_ok=True)
+    relocated_artifacts: dict[str, str] = {}
+    for kind, src in (sandbox_result.payload.get("artifacts") or {}).items():
+        src_path = Path(src)
+        if not src_path.exists():
+            continue
+        dst_path = persistent / src_path.name
+        try:
+            shutil.copy2(src_path, dst_path)
+            relocated_artifacts[kind] = str(dst_path)
+        except Exception:
+            continue
+    sandbox_result.payload["artifacts"] = relocated_artifacts
+
+    build = build_from_sandbox_result(design, sandbox_result, process="fdm")
+    save_build(design.id, build)
+
+    editable_model = design_to_editable_model(design, build)
+    return DesignCreateResponse(
+        design_id=design.id,
+        revision_id=design.revision_id,
+        name=design.name,
+        template_id=template_id,
+        script=design.script,
+        parameters=[p.model_dump() for p in design.parameters],
+        features=[f.model_dump() for f in design.features],
+        initial_build={
+            "revision_id": build.revision_id,
+            "mesh_hash": build.mesh_hash,
+            "bounding_box_mm": build.bounding_box_mm,
+            "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+            "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        },
+        editable_model=editable_model.model_dump(mode="json"),
+    )
+
+
+class DesignImportSTLResponse(BaseModel):
+    design_id: str
+    revision_id: str
+    name: str
+    script: str
+    parameters: list[dict]
+    features: list[dict]
+    initial_build: dict | None
+
+
+@app.post("/design/import-stl", response_model=DesignImportSTLResponse)
+async def design_import_stl_endpoint(
+    model: UploadFile = File(...),
+    name: str | None = Form(None),
+    process: str = Form("fdm"),
+) -> DesignImportSTLResponse:
+    """Upload an STL or STEP file and seed an editable design.
+
+    - ``.stl`` → loaded as ``imported_mesh`` (trimesh.Trimesh) for mesh-level ops.
+    - ``.step`` / ``.stp`` → loaded as ``imported_part`` (build123d Compound) for B-rep ops.
+
+    The endpoint name is kept as ``import-stl`` for backward compatibility;
+    both file types are accepted.
+    """
+    filename = (model.filename or "imported.stl").strip() or "imported.stl"
+    lower = filename.lower()
+    if lower.endswith((".step", ".stp")):
+        ext = ".step"
+        template_id = "imported_step"
+        scope_var = "imported_part"
+    elif lower.endswith(".stl"):
+        ext = ".stl"
+        template_id = "imported_stl"
+        scope_var = "imported_mesh"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Only .stl, .step, and .stp files are supported here.",
+        )
+
+    content = await model.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    from services.codegen.store import new_design_id
+    design_id = new_design_id()
+    persistent = settings.output_dir / "designs" / design_id
+    persistent.mkdir(parents=True, exist_ok=True)
+    source_dest = persistent / f"source{ext}"
+    source_dest.write_bytes(content)
+
+    seed_name, seed_script = get_template_seed(template_id)
+    display_name = name or filename or seed_name
+
+    sandbox_result = audit_then_run(
+        script=seed_script,
+        targets=["stl", "glb"],
+        imported_files={scope_var: str(source_dest)},
+    )
+    if not sandbox_result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "STL seed build failed.",
+                "error": sandbox_result.payload.get("error"),
+                "traceback": sandbox_result.payload.get("traceback"),
+            },
+        )
+
+    parameters = derive_parameters(sandbox_result.payload)
+    features = derive_named_features(sandbox_result.payload, seed_script)
+
+    design = create_design(
+        name=display_name,
+        script=seed_script,
+        parameters=parameters,
+        features=features,
+        process=process,
+        metadata={
+            "template_id": template_id,
+            "imported_files": {scope_var: str(source_dest)},
+            "source_filename": filename,
+            "source_format": ext.lstrip("."),
+        },
+        design_id=design_id,
+    )
+
+    # Move artifacts from the throwaway sandbox tmp dir into the design's
+    # persistent dir (same pattern as /design/create).
+    from pathlib import Path
+    import shutil
+
+    relocated: dict[str, str] = {}
+    for kind, src in (sandbox_result.payload.get("artifacts") or {}).items():
+        src_path = Path(src)
+        if not src_path.exists():
+            continue
+        dst_path = persistent / src_path.name
+        try:
+            shutil.copy2(src_path, dst_path)
+            relocated[kind] = str(dst_path)
+        except Exception:
+            continue
+    sandbox_result.payload["artifacts"] = relocated
+
+    build = build_from_sandbox_result(design, sandbox_result, process="fdm")
+    save_build(design.id, build)
+
+    return DesignImportSTLResponse(
+        design_id=design.id,
+        revision_id=design.revision_id,
+        name=design.name,
+        script=design.script,
+        parameters=[p.model_dump() for p in design.parameters],
+        features=[f.model_dump() for f in design.features],
+        initial_build={
+            "revision_id": build.revision_id,
+            "mesh_hash": build.mesh_hash,
+            "bounding_box_mm": build.bounding_box_mm,
+            "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+            "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        },
+    )
+
+
+@app.get("/design/flagship")
+def design_flagship_list() -> dict:
+    """List the 5 flagship workflows.
+
+    These are the integration test fixtures. They double as the starter cards
+    on the studio empty state from Phase 2 onward.
+    """
+    from services.codegen.flagship import list_flagships
+
+    return {"flagships": list_flagships()}
+
+
+class DesignFlagshipForkRequest(BaseModel):
+    flagship_id: str
+    name: str | None = None
+
+
+@app.post("/design/flagship/fork", response_model=DesignCreateResponse)
+def design_flagship_fork(request: DesignFlagshipForkRequest) -> DesignCreateResponse:
+    """Fork a flagship into a new editable design — same shape as /design/create."""
+    from services.codegen.flagship import get_flagship
+
+    try:
+        spec = get_flagship(request.flagship_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    script = spec["script"]
+    name = request.name or spec["name"]
+
+    try:
+        sandbox_result = audit_then_run(script=script, targets=["stl", "glb"])
+    except DesignBuildError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Flagship audit failed.", "errors": exc.audit_errors},
+        ) from exc
+    if not sandbox_result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Flagship build failed.",
+                "error": sandbox_result.payload.get("error"),
+            },
+        )
+
+    parameters = derive_parameters(sandbox_result.payload)
+    features = derive_named_features(sandbox_result.payload, script)
+    design = create_design(
+        name=name,
+        script=script,
+        parameters=parameters,
+        features=features,
+        process="either",
+        metadata={"flagship_id": request.flagship_id, "source": "flagship"},
+    )
+
+    from pathlib import Path
+    import shutil
+
+    persistent = settings.output_dir / "designs" / design.id
+    persistent.mkdir(parents=True, exist_ok=True)
+    relocated = {}
+    for kind, src in (sandbox_result.payload.get("artifacts") or {}).items():
+        src_path = Path(src)
+        if not src_path.exists():
+            continue
+        dst_path = persistent / src_path.name
+        try:
+            shutil.copy2(src_path, dst_path)
+            relocated[kind] = str(dst_path)
+        except Exception:
+            continue
+    sandbox_result.payload["artifacts"] = relocated
+
+    build = build_from_sandbox_result(design, sandbox_result, process="fdm")
+    save_build(design.id, build)
+
+    editable_model = design_to_editable_model(design, build)
+    return DesignCreateResponse(
+        design_id=design.id,
+        revision_id=design.revision_id,
+        name=design.name,
+        template_id=request.flagship_id,
+        script=design.script,
+        parameters=[p.model_dump() for p in design.parameters],
+        features=[f.model_dump() for f in design.features],
+        initial_build={
+            "revision_id": build.revision_id,
+            "mesh_hash": build.mesh_hash,
+            "bounding_box_mm": build.bounding_box_mm,
+            "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+            "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        },
+        editable_model=editable_model.model_dump(mode="json"),
+    )
+
+
+@app.get("/design/templates")
+def design_templates_endpoint_aliased() -> dict:
+    out: list[dict] = []
+    for tid in list_template_ids():
+        name, _ = get_template_seed(tid)
+        out.append({"template_id": tid, "name": name})
+    return {"templates": out}
+
+
+@app.get("/design/{design_id}")
+def design_get_endpoint(design_id: str) -> dict:
+    record = get_record(design_id)
+    editable = design_to_editable_model(record.design, record.latest_build)
+    return {
+        "design_id": record.design.id,
+        "revision_id": record.design.revision_id,
+        "name": record.design.name,
+        "process": record.design.process,
+        "script": record.design.script,
+        "parameters": [p.model_dump() for p in record.design.parameters],
+        "features": [f.model_dump() for f in record.design.features],
+        "latest_build": (
+            {
+                "revision_id": record.latest_build.revision_id,
+                "mesh_hash": record.latest_build.mesh_hash,
+                "bounding_box_mm": record.latest_build.bounding_box_mm,
+                "artifacts": {k: a.model_dump() for k, a in record.latest_build.artifacts.items()},
+                "manufacturability": (
+                    record.latest_build.manufacturability.model_dump()
+                    if record.latest_build.manufacturability
+                    else None
+                ),
+                "print_estimate": (
+                    record.latest_build.print_estimate.model_dump()
+                    if record.latest_build.print_estimate
+                    else None
+                ),
+                "duration_ms": record.latest_build.duration_ms,
+            }
+            if record.latest_build
+            else None
+        ),
+        "editable_model": editable.model_dump(mode="json"),
+    }
+
+
+@app.get("/design")
+def design_list_endpoint() -> dict:
+    return {
+        "designs": [
+            {
+                "design_id": d.id,
+                "revision_id": d.revision_id,
+                "name": d.name,
+                "process": d.process,
+                "parameter_count": len(d.parameters),
+                "feature_count": len(d.features),
+            }
+            for d in list_designs()
+        ]
+    }
+
+
+@app.delete("/design/{design_id}")
+def design_delete_endpoint(design_id: str) -> dict:
+    """Permanently delete a design — the design.json, all revisions, all
+    artifacts, and the conversation. The user has to confirm in the UI; we
+    don't ask twice on the backend."""
+    import shutil
+
+    target = settings.output_dir / "designs" / design_id
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Design not found.")
+    try:
+        shutil.rmtree(target)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"deleted_design_id": design_id}
+
+
+@app.get("/design/templates")
+def design_templates_endpoint() -> dict:
+    out: list[dict] = []
+    for tid in list_template_ids():
+        name, _ = get_template_seed(tid)
+        out.append({"template_id": tid, "name": name})
+    return {"templates": out}
+
+
+class DesignChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+    printer_profile_id: str | None = None
+
+
+@app.post("/design/{design_id}/chat")
+async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
+    generator = stream_design_turn(
+        design_id,
+        request.message,
+        printer_profile_id=request.printer_profile_id,
+    )
+    return StreamingResponse(generator, media_type="text/event-stream")
+
+
+@app.get("/design/{design_id}/conversation")
+def design_conversation_endpoint(design_id: str) -> dict:
+    return {
+        "design_id": design_id,
+        "messages": load_design_conversation(design_id),
+    }
+
+
+class DesignExportRequest(BaseModel):
+    preset: str = "fdm"
+    expected_revision_id: str | None = None
+    printer_profile_id: str | None = None
+
+
+@app.post("/design/{design_id}/export")
+def design_export_endpoint(design_id: str, request: DesignExportRequest) -> dict:
+    """Multi-process bundle export. Pick a goal (fdm/cnc/docs/all) → get a ZIP.
+
+    Hides the file-format zoo behind the user's actual question — what are
+    they going to do with the part?
+    """
+    from services.codegen.design_export import export_preset_bundle
+    from services.codegen.store import get_design
+
+    if request.preset not in ("fdm", "cnc", "docs", "all"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown preset: {request.preset}. Use one of fdm/cnc/docs/all.",
+        )
+
+    design = get_design(design_id)
+    return export_preset_bundle(
+        design,
+        preset=request.preset,  # type: ignore[arg-type]
+        expected_revision_id=request.expected_revision_id,
+        printer_profile_id=request.printer_profile_id,
+    )
+
+
+@app.get("/design/{design_id}/revisions")
+def design_revisions_endpoint(design_id: str) -> dict:
+    """Timeline of past revisions (newest first).
+
+    Each revision summary has the GLB url for thumbnail rendering, mesh hash,
+    bounding box, manufacturability status, and build duration.
+    """
+    from services.codegen.store import list_revisions
+
+    return {
+        "design_id": design_id,
+        "revisions": list_revisions(design_id),
+    }
+
+
+class DesignRevisionRestoreRequest(BaseModel):
+    revision_id: str
+
+
+@app.delete("/design/{design_id}/revisions/{revision_id}")
+def design_revisions_delete_endpoint(design_id: str, revision_id: str) -> dict:
+    """Remove a past revision's snapshot from disk. Refuses the current head."""
+    from services.codegen.store import delete_revision
+
+    try:
+        removed = delete_revision(design_id, revision_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Revision not found.")
+    return {"design_id": design_id, "deleted_revision_id": revision_id}
+
+
+@app.post("/design/{design_id}/revisions/restore")
+def design_revisions_restore_endpoint(
+    design_id: str, request: DesignRevisionRestoreRequest
+) -> dict:
+    """Roll the design back to a past revision (script + parameters + build).
+
+    The current head becomes the parent of the restored revision — subsequent
+    edits branch from here. Original revisions remain on disk untouched.
+    """
+    from services.codegen.store import restore_revision
+
+    try:
+        build_payload = restore_revision(design_id, request.revision_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "design_id": design_id,
+        "restored_revision_id": request.revision_id,
+        "build": build_payload,
+    }
+
+
+class DesignBuildRequest(BaseModel):
+    targets: list[str] = ["stl", "step", "glb"]
+    process: str = "fdm"
+    slice_gcode: bool = False
+    printer_profile_id: str | None = None
+
+
+class DesignParameterUpdate(BaseModel):
+    name: str
+    value: float | int | bool | str
+
+
+@app.post("/design/{design_id}/parameter")
+def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) -> dict:
+    """Set one parameter and rebuild — no AI, no token spend.
+
+    This is the slider / number-input path. The same validation as
+    update_parameter (sandbox-build the script with the new value to confirm
+    it doesn't crash) but no Anthropic round trip. Subsecond latency for
+    simple parametric designs.
+    """
+    from services.codegen.store import get_design, save_design, new_revision_id, save_build
+    from services.codegen.engine import build_design
+
+    design = get_design(design_id)
+    target = next((p for p in design.parameters if p.name == request.name), None)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No parameter named '{request.name}'.",
+        )
+
+    # Coerce string inputs (sliders / number inputs send strings) to the
+    # parameter's existing runtime type — same logic as the agent's tool.
+    existing = target.value
+    new_value = request.value
+    try:
+        if isinstance(existing, bool):
+            new_value = bool(new_value) if not isinstance(new_value, str) else (
+                new_value.lower() in ("1", "true", "yes", "on")
+            )
+        elif isinstance(existing, int) and not isinstance(existing, bool):
+            new_value = int(float(new_value))
+        elif isinstance(existing, float):
+            new_value = float(new_value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Bad value for '{request.name}': {exc}") from exc
+
+    if existing == new_value:
+        return {
+            "ok": True,
+            "noop": True,
+            "design_id": design_id,
+            "revision_id": design.revision_id,
+            "name": request.name,
+            "value": new_value,
+        }
+
+    # Mutate, persist, build, save build.
+    target.value = new_value
+    design.parent_revision_id = design.revision_id
+    design.revision_id = new_revision_id()
+    save_design(design)
+
+    try:
+        build = build_design(design, targets=["stl", "glb"], process="fdm")
+    except DesignBuildError as exc:
+        # Roll back the parameter change.
+        target.value = existing
+        design.revision_id = design.parent_revision_id or design.revision_id
+        save_design(design)
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Parameter change rejected by build.", "error": str(exc)},
+        ) from exc
+
+    save_build(design.id, build)
+    return {
+        "ok": True,
+        "design_id": design_id,
+        "revision_id": design.revision_id,
+        "name": request.name,
+        "value": new_value,
+        "build": {
+            "revision_id": build.revision_id,
+            "mesh_hash": build.mesh_hash,
+            "bounding_box_mm": build.bounding_box_mm,
+            "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+            "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+            "duration_ms": build.duration_ms,
+        },
+    }
+
+
+@app.post("/design/{design_id}/build")
+def design_build_endpoint(design_id: str, request: DesignBuildRequest) -> dict:
+    design = get_design(design_id)
+    try:
+        build = build_design(
+            design,
+            targets=request.targets,
+            printer_profile_id=request.printer_profile_id,
+            process=request.process,
+        )
+    except DesignBuildError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Build failed.", "error": str(exc), "audit_errors": exc.audit_errors},
+        ) from exc
+
+    if request.slice_gcode and request.process == "fdm" and "stl" in build.artifacts:
+        from pathlib import Path
+
+        from services.codegen.estimate import parse_gcode_estimate
+        from slicer_service import _slice_mesh
+
+        stl_path = Path(build.artifacts["stl"].path)
+        gcode_path = stl_path.parent / "model.gcode"
+        if _slice_mesh(stl_path, gcode_path, profile_id=request.printer_profile_id):
+            from services.codegen.models import BuildArtifact
+
+            build.artifacts["gcode"] = BuildArtifact(
+                kind="gcode",
+                url=f"/artifacts/designs/{design.id}/{gcode_path.name}",
+                path=str(gcode_path),
+                bytes=gcode_path.stat().st_size,
+            )
+            estimate = parse_gcode_estimate(gcode_path)
+            if estimate is not None:
+                build.print_estimate = estimate
+
+    save_build(design_id, build)
+    return {
+        "design_id": design_id,
+        "revision_id": build.revision_id,
+        "mesh_hash": build.mesh_hash,
+        "bounding_box_mm": build.bounding_box_mm,
+        "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+        "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        "print_estimate": build.print_estimate.model_dump() if build.print_estimate else None,
+        "duration_ms": build.duration_ms,
+    }

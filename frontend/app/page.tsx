@@ -5,7 +5,8 @@ import Link from "next/link";
 
 import BodyTreeInspector from "../components/BodyTreeInspector";
 import CanvasTabBar, { type CanvasTab } from "../components/CanvasTabBar";
-import ElementAiInput from "../components/ElementAiInput";
+import ChatPanel from "../components/Chat/ChatPanel";
+import EditabilityBadge from "../components/EditabilityBadge";
 import ExistingModelPanel, {
   type WorkspaceImportContext,
 } from "../components/ExistingModelPanel";
@@ -204,17 +205,19 @@ function WorkspaceInspectorPanel({
   presentationMode,
   importContext,
   isBusy,
+  workspaceId,
   selectedFeatureId,
   referenceImageUrl,
   onSelectFeature,
   onBodyParamChange,
-  onAiEdit,
+  onAiEdit: _onAiEdit,
   inspectorRef,
 }: {
   editableModel: EditableModel | null;
   presentationMode: WorkspacePresentationMode | null;
   importContext: WorkspaceImportContext | null;
   isBusy: boolean;
+  workspaceId: string | null;
   selectedFeatureId: string | null;
   referenceImageUrl: string | null;
   onSelectFeature: (featureId: string, source?: "tree" | "designer" | "planar" | "viewer") => void;
@@ -226,10 +229,6 @@ function WorkspaceInspectorPanel({
     ? findBodyById(editableModel.bodies, selectedFeatureId)
     : null;
   const isEditable = isEditablePresentation(presentationMode);
-  const aiEditingEnabled =
-    Boolean(selectedBody?.editable) &&
-    presentationMode === "native" &&
-    isPerforatedDiscModel(editableModel);
 
   if (!editableModel) {
     return (
@@ -251,8 +250,12 @@ function WorkspaceInspectorPanel({
         <p className="eyebrow">
           {isEditable ? "Precision editor" : "Inspect-only workspace"}
         </p>
-        <h2>
-          {selectedBody ? selectedBody.label : "Select a feature"}
+        <h2 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span>{selectedBody ? selectedBody.label : "Select a feature"}</span>
+          <EditabilityBadge
+            workspaceId={workspaceId}
+            revisionId={editableModel?.revision_id ?? null}
+          />
         </h2>
         <p className="panel-subtitle">
           {isEditable
@@ -282,15 +285,18 @@ function WorkspaceInspectorPanel({
         showParamEditor={isEditable}
       />
 
-      {aiEditingEnabled && selectedBody ? (
-        <div className="project-summary">
-          <div className="status-label">Prompt edit</div>
-          <div className="muted">
-            Commands are scoped to the current feature. Unsupported edits fail closed.
+      {workspaceId ? (
+        <div className="project-summary" style={{ display: "flex", flexDirection: "column" }}>
+          <div className="status-label">Pulsai chat</div>
+          <div className="muted" style={{ marginBottom: 8 }}>
+            Multi-turn editing across the whole workspace. The agent calls tools
+            scoped by the capability matrix; refused edits surface a reason.
           </div>
-          <ElementAiInput
+          <ChatPanel
+            workspaceId={workspaceId}
             disabled={isBusy}
-            onSubmit={(prompt) => onAiEdit(selectedBody.id, prompt)}
+            selectedFeatureId={selectedBody?.id ?? null}
+            selectedFeatureLabel={selectedBody?.label ?? null}
           />
         </div>
       ) : null}
@@ -1076,6 +1082,7 @@ export default function Home() {
                 presentationMode={workspaceMode}
                 importContext={presentationContext}
                 isBusy={isBusy}
+                workspaceId={workspaceId ?? null}
                 selectedFeatureId={selectedFeatureId}
                 referenceImageUrl={referenceImageUrl}
                 onSelectFeature={handleFeatureSelect}

@@ -105,6 +105,28 @@ const fetchWithTimeout = async (
   }
 };
 
+const importErrorMessage = async (response: Response, fallback: string) => {
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    if (typeof payload.detail === "string" && payload.detail.trim()) {
+      return payload.detail;
+    }
+  } catch {
+    // Keep the caller's fallback when the backend did not return JSON.
+  }
+  return fallback;
+};
+
+const normalizeImportError = (error: unknown, backendUrl: string) => {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "Import timed out. The model may be too large or the backend is still processing.";
+  }
+  if (error instanceof TypeError && /fetch/i.test(error.message)) {
+    return `Could not reach the 3D backend at ${backendUrl}. Start the FastAPI backend, then retry.`;
+  }
+  return (error as Error).message || "Import failed.";
+};
+
 export default function ExistingModelPanel({
   createWorkspace,
   loadWorkspace,
@@ -143,7 +165,7 @@ export default function ExistingModelPanel({
 
       if (isStep) {
         const response = await fetchWithTimeout(`${backendUrl}/import-step`, { method: "POST", body: formData }, 120000);
-        if (!response.ok) throw new Error("STEP import failed.");
+        if (!response.ok) throw new Error(await importErrorMessage(response, "STEP import failed."));
         const imported = (await response.json()) as ImportStepResponse;
         const workspace = await loadWorkspace(imported.workspace_id);
         if (!workspace) throw new Error("STEP import succeeded but workspace could not be loaded.");
@@ -174,7 +196,7 @@ export default function ExistingModelPanel({
       }
 
       const response = await fetchWithTimeout(`${backendUrl}/import-model`, { method: "POST", body: formData }, 120000);
-      if (!response.ok) throw new Error("STL import failed.");
+      if (!response.ok) throw new Error(await importErrorMessage(response, "STL import failed."));
       const imported = (await response.json()) as ImportModelResponse;
       const sourceModelUrl = resolveUrl(backendUrl, imported.source_glb_url);
       const sourceStlUrl = resolveUrl(backendUrl, imported.source_stl_url);
@@ -229,7 +251,7 @@ export default function ExistingModelPanel({
       resetWorkspace();
       onPresentationChange(null);
       setStatus("error");
-      setLastError((error as Error).message || "Import failed.");
+      setLastError(normalizeImportError(error, backendUrl));
     }
   };
 
