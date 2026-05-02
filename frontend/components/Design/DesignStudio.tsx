@@ -123,6 +123,20 @@ export default function DesignStudio() {
     [backendUrl],
   );
 
+  const returnToStart = useCallback(() => {
+    setDesign(null);
+    setCreateError(null);
+    setPendingFirstPrompt(null);
+    firstPromptFiredForRef.current = null;
+    reloadAfterRef.current = null;
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("design");
+      window.history.replaceState({}, "", url.toString());
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, []);
+
   const onForkFlagship = useCallback(
     async (flagshipId: string) => {
       setCreating(true);
@@ -581,8 +595,8 @@ export default function DesignStudio() {
             blocks · target: <strong>{design.process}</strong>
           </p>
         </div>
-        <button type="button" style={chipButtonStyle} onClick={() => setDesign(null)}>
-          New design
+        <button type="button" style={backButtonStyle} onClick={returnToStart}>
+          ← Back to designs
         </button>
       </header>
 
@@ -1117,6 +1131,13 @@ const chipButtonStyle: React.CSSProperties = {
   borderRadius: 999,
   cursor: "pointer",
   fontSize: 12,
+};
+
+const backButtonStyle: React.CSSProperties = {
+  ...chipButtonStyle,
+  flexShrink: 0,
+  background: "rgba(255,255,255,0.92)",
+  fontWeight: 700,
 };
 
 const downloadLinkStyle: React.CSSProperties = {
