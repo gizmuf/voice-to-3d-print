@@ -29,7 +29,20 @@ from services.codegen.store import (
 MAX_TOOL_ITERATIONS = 10
 
 
-def _system_blocks(ctx: DesignContext) -> list[dict[str, Any]]:
+def _system_blocks(
+    ctx: DesignContext,
+    *,
+    selected_feature_id: str | None = None,
+    selected_feature_label: str | None = None,
+) -> list[dict[str, Any]]:
+    selected_block = _selected_feature_context(
+        ctx,
+        selected_feature_id=selected_feature_id,
+        selected_feature_label=selected_feature_label,
+    )
+    turn_context = render_turn_context(ctx.design, ctx.last_build)
+    if selected_block:
+        turn_context = f"{turn_context}\n{selected_block}"
     return [
         {
             "type": "text",
@@ -38,9 +51,46 @@ def _system_blocks(ctx: DesignContext) -> list[dict[str, Any]]:
         },
         {
             "type": "text",
-            "text": render_turn_context(ctx.design, ctx.last_build),
+            "text": turn_context,
         },
     ]
+
+
+def _selected_feature_context(
+    ctx: DesignContext,
+    *,
+    selected_feature_id: str | None,
+    selected_feature_label: str | None,
+) -> str:
+    if not selected_feature_id and not selected_feature_label:
+        return ""
+    match = next(
+        (
+            f
+            for f in ctx.design.features
+            if f.id == selected_feature_id or f.name == selected_feature_label
+        ),
+        None,
+    )
+    if match:
+        words = f" user_words={match.user_words}" if match.user_words else ""
+        parents = (
+            f" parent_feature_ids={match.parent_feature_ids}"
+            if match.parent_feature_ids
+            else ""
+        )
+        return (
+            "## Selected feature context\n"
+            f"User has selected feature `{match.id}` ({match.name}, {match.kind})."
+            f"{parents}{words}\n"
+            "Prefer editing this feature unless the user explicitly asks for a different target.\n"
+        )
+    label = selected_feature_label or selected_feature_id
+    return (
+        "## Selected feature context\n"
+        f"User selected feature `{label}`, but it was not found in the current feature graph. "
+        "Ask one short clarification before making a targeted edit.\n"
+    )
 
 
 def _sse(event: str, payload: dict[str, Any]) -> str:
@@ -52,6 +102,8 @@ def stream_turn(
     user_message: str,
     *,
     printer_profile_id: str | None = None,
+    selected_feature_id: str | None = None,
+    selected_feature_label: str | None = None,
 ) -> Iterator[str]:
     started = time.perf_counter()
 
@@ -70,6 +122,7 @@ def stream_turn(
         output_dir=settings.output_dir,
         printer_profile_id=printer_profile_id or settings.default_printer_profile_id,
         last_build=last_build,
+        current_user_message=user_message,
     )
 
     history = load_conversation(design_id)
@@ -92,7 +145,11 @@ def stream_turn(
             response = client.messages.create(
                 model=settings.anthropic_chat_model,
                 max_tokens=settings.anthropic_max_output_tokens,
-                system=_system_blocks(ctx),
+                system=_system_blocks(
+                    ctx,
+                    selected_feature_id=selected_feature_id,
+                    selected_feature_label=selected_feature_label,
+                ),
                 tools=TOOL_DEFINITIONS,
                 messages=history,
             )

@@ -12,6 +12,11 @@ type StreamState = {
   errorMessage?: string;
 };
 
+type SendOptions = {
+  selectedFeatureId?: string | null;
+  selectedFeatureLabel?: string | null;
+};
+
 const parseSSEStream = async function* (
   response: Response,
 ): AsyncGenerator<SSEvent> {
@@ -72,7 +77,7 @@ export function useDesignStream(designId: string | null) {
   }, [backendUrl, designId]);
 
   const send = useCallback(
-    async (message: string) => {
+    async (message: string, options: SendOptions = {}) => {
       if (!designId || !message.trim()) return;
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -104,7 +109,11 @@ export function useDesignStream(designId: string | null) {
         const response = await fetch(`${backendUrl}/design/${designId}/chat`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message }),
+          body: JSON.stringify({
+            message,
+            selected_feature_id: options.selectedFeatureId || null,
+            selected_feature_label: options.selectedFeatureLabel || null,
+          }),
           signal: controller.signal,
         });
         if (!response.ok) {

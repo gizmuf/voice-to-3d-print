@@ -7,13 +7,20 @@ export type DesignParameter = {
   step?: number | null;
   choices?: string[] | null;
   doc?: string | null;
+  locked?: boolean;
 };
 
 export type NamedFeature = {
+  id: string;
   name: string;
   kind: string;
   source: string;
   parameters_used?: string[];
+  parent_feature_ids?: string[];
+  created_by?: "user_prompt" | "slider" | "macro" | "import" | "system";
+  source_prompt?: string | null;
+  revision_id?: string;
+  user_words?: string[];
 };
 
 export type ManufacturabilityIssue = {

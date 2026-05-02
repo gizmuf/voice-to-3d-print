@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from .checks import run_geometry_checks
+
 
 CASES_PATH = Path(__file__).parent / "cases" / "cases.json"
 
@@ -130,6 +132,7 @@ def _stream_one_turn(design_id: str, message: str) -> dict:
         "events": events,
         "before_mesh_hash": before_hash,
         "after_mesh_hash": after_hash,
+        "after_build": after.get("latest_build") or {},
     }
 
 
@@ -175,6 +178,10 @@ def test_eval_v2_case(case: dict, grid_plate_stl: Path) -> None:
             f"Expected the agent to ask a clarifying question (no '?' in reply): "
             f"{assistant_text[:200]!r}"
         )
+
+    if case.get("checks"):
+        failures = run_geometry_checks(out["after_build"], case["checks"])
+        assert not failures, "; ".join(failures)
 
     if case.get("expected_no_destructive_calls"):
         destructive = [

@@ -34,7 +34,16 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
     """
     design = ctx.design
     feature_outline = [
-        {"name": f.name, "kind": f.kind} for f in design.features
+        {
+            "id": f.id,
+            "name": f.name,
+            "kind": f.kind,
+            "parent_feature_ids": f.parent_feature_ids,
+            "created_by": f.created_by,
+            "revision_id": f.revision_id,
+            "user_words": f.user_words,
+        }
+        for f in design.features
     ]
     parameters = [
         {

@@ -82,11 +82,19 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
             "traceback": sandbox_result.payload.get("traceback") or "",
         }
 
+    previous_features = list(ctx.design.features)
     ctx.design.parent_revision_id = ctx.design.revision_id
     ctx.design.revision_id = new_revision_id()
     ctx.design.script = new_script
     ctx.design.parameters = derive_parameters(sandbox_result.payload)
-    ctx.design.features = derive_named_features(sandbox_result.payload, new_script)
+    ctx.design.features = derive_named_features(
+        sandbox_result.payload,
+        new_script,
+        previous_features=previous_features,
+        revision_id=ctx.design.revision_id,
+        created_by="user_prompt",
+        source_prompt=ctx.current_user_message,
+    )
     save_design(ctx.design)
     return {
         "ok": True,

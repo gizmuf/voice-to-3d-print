@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -27,6 +28,16 @@ class DesignParameter(BaseModel):
     step: float | None = None
     choices: list[str] | None = None
     doc: str | None = None
+    locked: bool = False
+
+
+FeatureCreatedBy = Literal["user_prompt", "slider", "macro", "import", "system"]
+
+
+def feature_id_for_name(name: str) -> str:
+    """Stable, readable ID for a named script feature."""
+    slug = re.sub(r"[^a-zA-Z0-9_]+", "_", name.strip().lower()).strip("_")
+    return slug or "feature"
 
 
 class NamedFeature(BaseModel):
@@ -37,10 +48,26 @@ class NamedFeature(BaseModel):
     without rewriting the whole script.
     """
 
+    id: str = ""
     name: str
     kind: str = "block"
     source: str
     parameters_used: list[str] = Field(default_factory=list)
+    parent_feature_ids: list[str] = Field(default_factory=list)
+    created_by: FeatureCreatedBy = "system"
+    source_prompt: str | None = None
+    revision_id: str = ""
+    user_words: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.id:
+            self.id = feature_id_for_name(self.name)
+        if not self.user_words:
+            self.user_words = [
+                part
+                for part in re.split(r"[_\W]+", self.name.lower())
+                if part
+            ][:8]
 
 
 class Design(BaseModel):

@@ -40,6 +40,10 @@ def _build_path(design_id: str) -> Path:
     return _design_dir(design_id) / "build.json"
 
 
+def _feature_graph_path(design_id: str) -> Path:
+    return _design_dir(design_id) / "feature_graph.json"
+
+
 def _conversation_path(design_id: str) -> Path:
     return _design_dir(design_id) / "conversation.json"
 
@@ -78,8 +82,21 @@ def create_design(
 
 
 def save_design(design: Design) -> Design:
+    for feature in design.features:
+        if not feature.revision_id:
+            feature.revision_id = design.revision_id
     path = _design_path(design.id)
     path.write_text(json.dumps(design.model_dump(mode="json"), indent=2))
+    _feature_graph_path(design.id).write_text(
+        json.dumps(
+            {
+                "design_id": design.id,
+                "revision_id": design.revision_id,
+                "features": [f.model_dump(mode="json") for f in design.features],
+            },
+            indent=2,
+        )
+    )
     return design
 
 
@@ -112,6 +129,16 @@ def save_build(design_id: str, build: Build) -> Build:
     if design is not None:
         (revision_dir / "design.json").write_text(
             json.dumps(design.model_dump(mode="json"), indent=2)
+        )
+        (revision_dir / "feature_graph.json").write_text(
+            json.dumps(
+                {
+                    "design_id": design.id,
+                    "revision_id": design.revision_id,
+                    "features": [f.model_dump(mode="json") for f in design.features],
+                },
+                indent=2,
+            )
         )
     _sync_to_legacy_workspace(design_id, build)
     return build

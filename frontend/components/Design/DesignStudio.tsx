@@ -33,6 +33,13 @@ export default function DesignStudio() {
   const firstPromptFiredForRef = useRef<string | null>(null);
   const [updatingParam, setUpdatingParam] = useState<string | null>(null);
   const [livePreview, setLivePreview] = useState<boolean>(false);
+  const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
+  const [makePrintable, setMakePrintable] = useState<{
+    busy: boolean;
+    summary?: string;
+    bundleUrl?: string;
+    error?: string;
+  }>({ busy: false });
   const liveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [flagships, setFlagships] = useState<{ id: string; name: string; description: string }[]>([]);
   const [recentDesigns, setRecentDesigns] = useState<
@@ -234,6 +241,18 @@ export default function DesignStudio() {
       refreshDesign(design.design_id);
     }
   }, [design, lastRevision, refreshDesign]);
+
+  const selectedFeature = useMemo(() => {
+    if (!design || !selectedFeatureId) return null;
+    return design.features.find((f) => f.id === selectedFeatureId) ?? null;
+  }, [design, selectedFeatureId]);
+
+  useEffect(() => {
+    if (!design || !selectedFeatureId) return;
+    if (!design.features.some((f) => f.id === selectedFeatureId)) {
+      setSelectedFeatureId(null);
+    }
+  }, [design, selectedFeatureId]);
 
   // Auto-fire the user's free-form prompt as the first chat turn, so Claude
   // actually shapes the seeded design to match the request (not just routes
@@ -625,8 +644,21 @@ export default function DesignStudio() {
               <ParameterControl
                 key={p.name}
                 param={p}
-                disabled={updatingParam === p.name}
+                disabled={updatingParam === p.name || Boolean(p.locked)}
                 livePreview={livePreview}
+                onToggleLock={async (locked) => {
+                  setUpdatingParam(p.name);
+                  try {
+                    const res = await fetch(`${backendUrl}/design/${design.design_id}/parameter-lock`, {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ name: p.name, locked }),
+                    });
+                    if (res.ok) await refreshDesign(design.design_id);
+                  } finally {
+                    setUpdatingParam(null);
+                  }
+                }}
                 onLiveChange={(val) => {
                   if (!livePreview) return;
                   if (liveDebounceRef.current) clearTimeout(liveDebounceRef.current);
@@ -665,10 +697,26 @@ export default function DesignStudio() {
           <h3 style={paneHeaderStyle}>Features</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {design.features.map((f) => (
-              <div key={f.name} style={paramRowStyle}>
+              <button
+                key={f.id || f.name}
+                type="button"
+                onClick={() => setSelectedFeatureId(f.id)}
+                style={{
+                  ...paramRowStyle,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  border:
+                    selectedFeatureId === f.id
+                      ? "1px solid rgba(33,150,243,0.7)"
+                      : "1px solid transparent",
+                }}
+                title={`Select ${f.name} for the next chat edit`}
+              >
                 <span style={{ fontSize: 12, fontWeight: 600 }}>{f.name}</span>
-                <span style={{ fontSize: 11, opacity: 0.55 }}>{f.kind}</span>
-              </div>
+                <span style={{ fontSize: 11, opacity: 0.55 }}>
+                  {f.kind} · {f.id}
+                </span>
+              </button>
             ))}
             {design.features.length === 0 ? (
               <span style={{ fontSize: 12, opacity: 0.55 }}>(no @feature blocks)</span>
@@ -693,6 +741,53 @@ export default function DesignStudio() {
           ) : (
             <span style={{ fontSize: 12, opacity: 0.55 }}>No build yet.</span>
           )}
+          <button
+            type="button"
+            style={primaryButtonStyle}
+            disabled={makePrintable.busy}
+            onClick={async () => {
+              setMakePrintable({ busy: true });
+              try {
+                const res = await fetch(`${backendUrl}/design/${design.design_id}/make-printable`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ expected_revision_id: design.revision_id }),
+                });
+                const payload = await res.json().catch(() => null);
+                if (!res.ok) throw new Error(payload?.detail ?? `Make printable failed: ${res.status}`);
+                setMakePrintable({
+                  busy: false,
+                  summary: payload.summary,
+                  bundleUrl: payload.bundle_url ? resolveUrl(backendUrl, payload.bundle_url) ?? undefined : undefined,
+                });
+              } catch (error) {
+                setMakePrintable({
+                  busy: false,
+                  error: error instanceof Error ? error.message : "Make printable failed.",
+                });
+              }
+            }}
+          >
+            {makePrintable.busy ? "Preparing…" : "Make printable"}
+          </button>
+          {makePrintable.summary ? (
+            <span style={makePrintableResultStyle}>
+              {makePrintable.summary}
+              {makePrintable.bundleUrl ? (
+                <>
+                  {" "}
+                  <a href={makePrintable.bundleUrl} target="_blank" rel="noopener noreferrer">
+                    Download ZIP
+                  </a>
+                </>
+              ) : null}
+            </span>
+          ) : null}
+          {makePrintable.error ? (
+            <span style={{ ...makePrintableResultStyle, color: "rgba(183,28,28,0.95)" }}>
+              {makePrintable.error}
+            </span>
+          ) : null}
 
           {design.latest_build?.print_estimate ? (
             <>
@@ -759,7 +854,15 @@ export default function DesignStudio() {
           </div>
           <DesignChatInput
             disabled={stream.state.status === "streaming"}
-            onSend={(text) => stream.send(text)}
+            backendUrl={backendUrl}
+            selectedFeature={selectedFeature}
+            parameters={design.parameters}
+            onSend={(text) =>
+              stream.send(text, {
+                selectedFeatureId: selectedFeature?.id ?? null,
+                selectedFeatureLabel: selectedFeature?.name ?? null,
+              })
+            }
             isStreaming={stream.state.status === "streaming"}
           />
           {stream.state.status === "error" ? (
@@ -786,12 +889,14 @@ function ParameterControl({
   onChange,
   livePreview = false,
   onLiveChange,
+  onToggleLock,
 }: {
   param: import("../../types/design").DesignParameter;
   disabled: boolean;
   onChange: (val: number | string | boolean) => void;
   livePreview?: boolean;
   onLiveChange?: (val: number | string | boolean) => void;
+  onToggleLock?: (locked: boolean) => void;
 }) {
   const [draft, setDraft] = useState<string>(String(param.value));
   const lastEmittedRef = useRef<string>(String(param.value));
@@ -840,7 +945,17 @@ function ParameterControl({
     <div style={paramRowStyle}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
         <span style={{ fontSize: 12, opacity: 0.85 }}>{param.name}</span>
-        <span style={paramValueStyle}>{String(param.value)}{param.type === "length_mm" ? " mm" : param.type === "angle_deg" ? "°" : ""}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={paramValueStyle}>{String(param.value)}{param.type === "length_mm" ? " mm" : param.type === "angle_deg" ? "°" : ""}</span>
+          <button
+            type="button"
+            onClick={() => onToggleLock?.(!param.locked)}
+            style={lockButtonStyle(Boolean(param.locked))}
+            title={param.locked ? "Unlock parameter" : "Lock parameter"}
+          >
+            {param.locked ? "Locked" : "Lock"}
+          </button>
+        </div>
       </div>
       {isBool ? (
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
@@ -912,12 +1027,74 @@ function DesignChatInput({
   onSend,
   disabled,
   isStreaming,
+  backendUrl,
+  selectedFeature,
+  parameters,
 }: {
   onSend: (text: string) => void;
   disabled: boolean;
   isStreaming: boolean;
+  backendUrl: string;
+  selectedFeature: Design["features"][number] | null;
+  parameters: Design["parameters"];
 }) {
   const [draft, setDraft] = useState("");
+  const [routeBadge, setRouteBadge] = useState<{
+    label: string;
+    title: string;
+    tone: "free" | "cheap" | "full";
+  } | null>(null);
+
+  useEffect(() => {
+    const text = draft.trim();
+    if (!text) {
+      setRouteBadge(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const lower = text.toLowerCase();
+      const paramHit = parameters.some((p) =>
+        lower.includes(p.name.toLowerCase().replaceAll("_", " "))) ||
+        parameters.some((p) => lower.includes(p.name.toLowerCase()));
+      fetch(`${backendUrl}/route-intent`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ raw_text: text, source: "text", preview_only: true }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((payload) => {
+          if (cancelled) return;
+          if (paramHit) {
+            setRouteBadge({
+              label: "Free edit",
+              title: "Likely direct parameter update; no agent rebuild needed.",
+              tone: "free",
+            });
+          } else if (payload?.mode === "useful" && Number(payload.confidence ?? 0) >= 0.85) {
+            setRouteBadge({
+              label: "Cheap edit",
+              title: payload.route_reason ?? "Likely routable to a targeted CAD tool.",
+              tone: "cheap",
+            });
+          } else {
+            setRouteBadge({
+              label: "Full rebuild",
+              title: payload?.route_reason ?? "Likely needs the full agent loop.",
+              tone: "full",
+            });
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setRouteBadge(null);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [backendUrl, draft, parameters]);
+
   return (
     <form
       onSubmit={(e) => {
@@ -943,7 +1120,14 @@ function DesignChatInput({
         }}
       />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: 11, opacity: 0.55 }}>⌘/Ctrl+Enter to send.</span>
+        <span style={{ fontSize: 11, opacity: 0.55 }}>
+          {selectedFeature ? `Target: ${selectedFeature.name}` : "⌘/Ctrl+Enter to send."}
+        </span>
+        {routeBadge ? (
+          <span style={routeBadgeStyle(routeBadge.tone)} title={routeBadge.title}>
+            {routeBadge.label}
+          </span>
+        ) : null}
         <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
           {isStreaming ? "…" : "Send"}
         </button>
@@ -1091,6 +1275,23 @@ const paramDocStyle: React.CSSProperties = {
   opacity: 0.6,
 };
 
+const lockButtonStyle = (locked: boolean): React.CSSProperties => ({
+  border: `1px solid ${locked ? "rgba(33,150,243,0.55)" : "rgba(0,0,0,0.12)"}`,
+  background: locked ? "rgba(33,150,243,0.12)" : "rgba(255,255,255,0.65)",
+  color: locked ? "rgba(13,71,161,0.95)" : "rgba(0,0,0,0.58)",
+  borderRadius: 999,
+  padding: "2px 6px",
+  fontSize: 10,
+  fontWeight: 700,
+  cursor: "pointer",
+});
+
+const makePrintableResultStyle: React.CSSProperties = {
+  fontSize: 11,
+  lineHeight: 1.4,
+  color: "rgba(0,0,0,0.68)",
+};
+
 const historyStyle: React.CSSProperties = {
   flex: 1,
   display: "flex",
@@ -1122,6 +1323,25 @@ const primaryButtonStyle: React.CSSProperties = {
   cursor: "pointer",
   fontSize: 13,
   fontWeight: 600,
+};
+
+const routeBadgeStyle = (
+  tone: "free" | "cheap" | "full",
+): React.CSSProperties => {
+  const colors = {
+    free: ["rgba(76,175,80,0.16)", "rgba(46,125,50,0.85)"],
+    cheap: ["rgba(255,193,7,0.20)", "rgba(126,87,0,0.9)"],
+    full: ["rgba(244,67,54,0.12)", "rgba(183,28,28,0.9)"],
+  }[tone];
+  return {
+    padding: "3px 8px",
+    borderRadius: 999,
+    background: colors[0],
+    color: colors[1],
+    fontSize: 10,
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  };
 };
 
 const chipButtonStyle: React.CSSProperties = {

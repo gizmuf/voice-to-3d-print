@@ -204,19 +204,44 @@ def build_from_sandbox_result(
     )
 
 
-def derive_named_features(sandbox_payload: dict, script: str) -> list[NamedFeature]:
+def derive_named_features(
+    sandbox_payload: dict,
+    script: str,
+    *,
+    previous_features: list[NamedFeature] | None = None,
+    revision_id: str = "",
+    created_by: str = "system",
+    source_prompt: str | None = None,
+) -> list[NamedFeature]:
     """Pull NamedFeature records from the runner's classification."""
+    previous_by_name = {f.name: f for f in previous_features or []}
     out: list[NamedFeature] = []
     for entry in sandbox_payload.get("named_features") or []:
+        name = entry.get("name", "")
+        prev = previous_by_name.get(name)
         out.append(
             NamedFeature(
-                name=entry.get("name", ""),
+                id=prev.id if prev else "",
+                name=name,
                 kind=entry.get("kind", "block"),
                 source="",
+                parent_feature_ids=prev.parent_feature_ids if prev else [],
+                created_by=prev.created_by if prev else created_by,  # type: ignore[arg-type]
+                source_prompt=prev.source_prompt if prev else source_prompt,
+                revision_id=prev.revision_id if prev else revision_id,
+                user_words=prev.user_words if prev else [],
             )
         )
     # Also extract `# @feature: name` blocks from the script.
-    out.extend(_extract_feature_blocks(script))
+    out.extend(
+        _extract_feature_blocks(
+            script,
+            previous_by_name=previous_by_name,
+            revision_id=revision_id,
+            created_by=created_by,
+            source_prompt=source_prompt,
+        )
+    )
     return out
 
 
@@ -235,13 +260,46 @@ def derive_parameters(sandbox_payload: dict) -> list[DesignParameter]:
                 step=entry.get("step"),
                 choices=entry.get("choices"),
                 doc=entry.get("doc"),
+                locked=bool(entry.get("locked", False)),
             )
         )
     return out
 
 
-def _extract_feature_blocks(script: str) -> list[NamedFeature]:
+def _feature_from_block(
+    *,
+    name: str,
+    source: str,
+    previous_by_name: dict[str, NamedFeature],
+    revision_id: str,
+    created_by: str,
+    source_prompt: str | None,
+) -> NamedFeature:
+    prev = previous_by_name.get(name)
+    return NamedFeature(
+        id=prev.id if prev else "",
+        name=name,
+        kind="block",
+        source=source,
+        parameters_used=prev.parameters_used if prev else [],
+        parent_feature_ids=prev.parent_feature_ids if prev else [],
+        created_by=prev.created_by if prev else created_by,  # type: ignore[arg-type]
+        source_prompt=prev.source_prompt if prev else source_prompt,
+        revision_id=prev.revision_id if prev else revision_id,
+        user_words=prev.user_words if prev else [],
+    )
+
+
+def _extract_feature_blocks(
+    script: str,
+    *,
+    previous_by_name: dict[str, NamedFeature] | None = None,
+    revision_id: str = "",
+    created_by: str = "system",
+    source_prompt: str | None = None,
+) -> list[NamedFeature]:
     """Parse `# @feature: name ... # @end` blocks out of a script."""
+    previous_by_name = previous_by_name or {}
     out: list[NamedFeature] = []
     lines = script.splitlines()
     current_name: str | None = None
@@ -251,18 +309,26 @@ def _extract_feature_blocks(script: str) -> list[NamedFeature]:
         if stripped.startswith("# @feature:"):
             if current_name is not None:
                 out.append(
-                    NamedFeature(
+                    _feature_from_block(
                         name=current_name,
-                        kind="block",
                         source="\n".join(current_lines),
+                        previous_by_name=previous_by_name,
+                        revision_id=revision_id,
+                        created_by=created_by,
+                        source_prompt=source_prompt,
                     )
                 )
             current_name = stripped[len("# @feature:") :].strip() or "unnamed"
             current_lines = []
         elif stripped == "# @end" and current_name is not None:
             out.append(
-                NamedFeature(
-                    name=current_name, kind="block", source="\n".join(current_lines)
+                _feature_from_block(
+                    name=current_name,
+                    source="\n".join(current_lines),
+                    previous_by_name=previous_by_name,
+                    revision_id=revision_id,
+                    created_by=created_by,
+                    source_prompt=source_prompt,
                 )
             )
             current_name = None
@@ -271,7 +337,14 @@ def _extract_feature_blocks(script: str) -> list[NamedFeature]:
             current_lines.append(line)
     if current_name is not None:
         out.append(
-            NamedFeature(name=current_name, kind="block", source="\n".join(current_lines))
+            _feature_from_block(
+                name=current_name,
+                source="\n".join(current_lines),
+                previous_by_name=previous_by_name,
+                revision_id=revision_id,
+                created_by=created_by,
+                source_prompt=source_prompt,
+            )
         )
     return out
 

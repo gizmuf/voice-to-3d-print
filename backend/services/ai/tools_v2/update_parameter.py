@@ -18,6 +18,7 @@ class UpdateParameterInput(BaseModel):
     name: str = Field(description="Parameter name as declared by `pulsai.param()`.")
     new_value: float | int | bool | str = Field(description="New value (type matches the declared type).")
     rationale: str = Field(max_length=200, description="One sentence why this change.")
+    override_locked: bool = Field(default=False, description="True only when the user explicitly asked to unlock/override a locked parameter.")
 
 
 TOOL_DEFINITION = {
@@ -48,6 +49,15 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
                 + ", ".join(p.name for p in design.parameters)
                 + "."
             ),
+        }
+    if target.locked and not params.override_locked:
+        return {
+            "error": (
+                f"Parameter '{params.name}' is locked by the user. Do not change it "
+                "unless the user explicitly asks to unlock or override the lock."
+            ),
+            "locked": True,
+            "name": params.name,
         }
 
     # Coerce the incoming value to match the existing parameter's type. Claude's

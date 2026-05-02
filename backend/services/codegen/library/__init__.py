@@ -199,6 +199,10 @@ SNIPPETS: list[Snippet] = [
     ),
 ]
 
+from services.codegen.library.hardware import HARDWARE_SNIPPETS  # noqa: E402
+
+SNIPPETS.extend(HARDWARE_SNIPPETS)
+
 
 def search(intent: str, *, process: str | None = None, limit: int = 5) -> list[Snippet]:
     """Tiny lexical scorer: counts keyword hits + name hits."""

@@ -35,6 +35,7 @@ class DesignContext:
     output_dir: Path
     printer_profile_id: str
     last_build: Build | None = None
+    current_user_message: str | None = None
 
     def reload(self, design: Design) -> None:
         self.design = design

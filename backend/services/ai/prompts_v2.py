@@ -170,11 +170,19 @@ need clarified). Do not list every tool call — the UI shows them.
 def render_turn_context(design: Design, last_build: Build | None) -> str:
     """Per-turn context appended after SYSTEM_PROMPT."""
     params = (
-        ", ".join(f"{p.name}={p.value}" for p in design.parameters)
+        ", ".join(
+            f"{p.name}={p.value}" + (" [locked]" if p.locked else "")
+            for p in design.parameters
+        )
         or "(none declared)"
     )
+    locked = [p.name for p in design.parameters if p.locked]
     features = (
-        "\n".join(f"  - {f.name} ({f.kind})" for f in design.features)
+        "\n".join(
+            f"  - id={f.id} name={f.name} ({f.kind})"
+            + (f" words={','.join(f.user_words)}" if f.user_words else "")
+            for f in design.features
+        )
         or "  (no named feature blocks)"
     )
     last = (
@@ -200,7 +208,14 @@ def render_turn_context(design: Design, last_build: Build | None) -> str:
         f"revision: {design.revision_id[:8]}\n"
         f"process_target: {design.process}\n"
         f"parameters: {params}\n"
-        f"features:\n{features}\n"
+        + (
+            "locked_parameters: "
+            + ", ".join(locked)
+            + " (must not change unless the user explicitly asks to unlock)\n"
+            if locked
+            else ""
+        )
+        + f"features:\n{features}\n"
         f"{last}\n\n"
         f"## Current script\n"
         f"```python\n{preview}\n```\n"

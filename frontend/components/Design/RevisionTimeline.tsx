@@ -14,6 +14,13 @@ type RevisionSummary = {
   stat_mtime: number;
 };
 
+type RevisionDiff = {
+  parameter_changes?: Array<{ name: string; before: unknown; after: unknown }>;
+  features_added?: Array<{ id: string; name: string; kind: string }>;
+  features_removed?: Array<{ id: string; name: string; kind: string }>;
+  duration_ms?: number | null;
+};
+
 export default function RevisionTimeline({
   designId,
   currentRevisionId,
@@ -30,6 +37,7 @@ export default function RevisionTimeline({
   const [restoring, setRestoring] = useState<string | null>(null);
   const [hovering, setHovering] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [diffs, setDiffs] = useState<Record<string, RevisionDiff | "loading" | "error">>({});
 
   useEffect(() => {
     if (!designId) {
@@ -48,6 +56,19 @@ export default function RevisionTimeline({
       cancelled = true;
     };
   }, [backendUrl, designId, refreshKey]);
+
+  useEffect(() => {
+    if (!designId || !hovering || diffs[hovering]) return;
+    setDiffs((prev) => ({ ...prev, [hovering]: "loading" }));
+    fetch(`${backendUrl}/design/${designId}/revisions/${hovering}/diff`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((payload) => {
+        setDiffs((prev) => ({ ...prev, [hovering]: payload ?? "error" }));
+      })
+      .catch(() => {
+        setDiffs((prev) => ({ ...prev, [hovering]: "error" }));
+      });
+  }, [backendUrl, designId, diffs, hovering]);
 
   if (!designId || revisions.length <= 1) return null;
 
@@ -161,10 +182,54 @@ export default function RevisionTimeline({
                   ×
                 </button>
               ) : null}
+              {isHovering ? (
+                <RevisionDiffPopover
+                  diff={diffs[r.revision_id]}
+                  fallback={tooltip}
+                />
+              ) : null}
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function RevisionDiffPopover({
+  diff,
+  fallback,
+}: {
+  diff: RevisionDiff | "loading" | "error" | undefined;
+  fallback: string;
+}) {
+  if (!diff || diff === "loading") {
+    return <div style={diffPopoverStyle}>Loading diff…</div>;
+  }
+  if (diff === "error") {
+    return <div style={diffPopoverStyle}>{fallback}</div>;
+  }
+  const params = diff.parameter_changes ?? [];
+  const added = diff.features_added ?? [];
+  const removed = diff.features_removed ?? [];
+  const empty = params.length === 0 && added.length === 0 && removed.length === 0;
+  return (
+    <div style={diffPopoverStyle}>
+      {empty ? <div>No structured changes detected.</div> : null}
+      {params.slice(0, 4).map((p) => (
+        <div key={p.name}>
+          <strong>{p.name}</strong>: {String(p.before)} → {String(p.after)}
+        </div>
+      ))}
+      {added.slice(0, 3).map((f) => (
+        <div key={`add-${f.id}`}>+ {f.name}</div>
+      ))}
+      {removed.slice(0, 3).map((f) => (
+        <div key={`remove-${f.id}`}>- {f.name}</div>
+      ))}
+      {diff.duration_ms ? (
+        <div style={{ opacity: 0.65, marginTop: 4 }}>rebuild {Math.round(diff.duration_ms)} ms</div>
+      ) : null}
     </div>
   );
 }
@@ -276,4 +341,21 @@ const deleteButtonStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   boxShadow: "0 1px 3px rgba(0,0,0,0.18)",
+};
+
+const diffPopoverStyle: React.CSSProperties = {
+  position: "absolute",
+  left: 0,
+  top: "calc(100% + 6px)",
+  zIndex: 20,
+  width: 240,
+  padding: "8px 10px",
+  background: "rgba(255,255,255,0.98)",
+  border: "1px solid rgba(0,0,0,0.14)",
+  borderRadius: 8,
+  boxShadow: "0 10px 24px rgba(0,0,0,0.16)",
+  fontSize: 11,
+  lineHeight: 1.45,
+  pointerEvents: "none",
+  whiteSpace: "normal",
 };

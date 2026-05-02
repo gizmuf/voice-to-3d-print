@@ -73,6 +73,7 @@ def _make_pulsai_module(overrides: dict[str, object]) -> ModuleType:
         step=None,
         choices=None,
         doc: str | None = None,
+        locked: bool = False,
     ):
         value = overrides.get(name, default)
         declared.append(
@@ -86,6 +87,7 @@ def _make_pulsai_module(overrides: dict[str, object]) -> ModuleType:
                 "step": step,
                 "choices": choices,
                 "doc": doc,
+                "locked": bool(locked),
             }
         )
         return value

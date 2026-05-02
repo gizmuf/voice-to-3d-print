@@ -192,6 +192,7 @@ class RouteIntentRequest(BaseModel):
     job_id: str | None = None
     project_id: str | None = None
     existing_spec: dict | None = None
+    preview_only: bool = False
 
 
 class RouteIntentResponse(BaseModel):
@@ -433,6 +434,18 @@ async def route_intent_endpoint(request: RouteIntentRequest) -> RouteIntentRespo
     prompt = request.raw_text.strip()
     structured_spec = None
     confirmation_required = route["mode"] == "useful"
+
+    if request.preview_only:
+        return RouteIntentResponse(
+            job_id=job_id,
+            mode=route["mode"],
+            provider=route["provider"],
+            route_reason=route["route_reason"],
+            confidence=route["confidence"],
+            prompt=prompt,
+            confirmation_required=False,
+            structured_spec=None,
+        )
 
     if route["mode"] == "useful":
         if route.get("template_id") is None:
@@ -1532,7 +1545,11 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
 
                 if sandbox_seed is not None and sandbox_seed.ok:
                     parameters = derive_parameters(sandbox_seed.payload)
-                    features = derive_named_features(sandbox_seed.payload, seed_script)
+                    features = derive_named_features(
+                        sandbox_seed.payload,
+                        seed_script,
+                        created_by="import",
+                    )
                     design = create_design(
                         name=str(root_params.get("_object_label") or seed_name),
                         script=seed_script,
@@ -1720,7 +1737,7 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
         )
 
     parameters = derive_parameters(sandbox_result.payload)
-    features = derive_named_features(sandbox_result.payload, script)
+    features = derive_named_features(sandbox_result.payload, script, created_by="system")
 
     design = create_design(
         name=name,
@@ -1845,7 +1862,11 @@ async def design_import_stl_endpoint(
         )
 
     parameters = derive_parameters(sandbox_result.payload)
-    features = derive_named_features(sandbox_result.payload, seed_script)
+    features = derive_named_features(
+        sandbox_result.payload,
+        seed_script,
+        created_by="import",
+    )
 
     design = create_design(
         name=display_name,
@@ -1947,7 +1968,7 @@ def design_flagship_fork(request: DesignFlagshipForkRequest) -> DesignCreateResp
         )
 
     parameters = derive_parameters(sandbox_result.payload)
-    features = derive_named_features(sandbox_result.payload, script)
+    features = derive_named_features(sandbox_result.payload, script, created_by="system")
     design = create_design(
         name=name,
         script=script,
@@ -2090,6 +2111,8 @@ def design_templates_endpoint() -> dict:
 class DesignChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     printer_profile_id: str | None = None
+    selected_feature_id: str | None = None
+    selected_feature_label: str | None = None
 
 
 @app.post("/design/{design_id}/chat")
@@ -2098,6 +2121,8 @@ async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
         design_id,
         request.message,
         printer_profile_id=request.printer_profile_id,
+        selected_feature_id=request.selected_feature_id,
+        selected_feature_label=request.selected_feature_label,
     )
     return StreamingResponse(generator, media_type="text/event-stream")
 
@@ -2141,6 +2166,40 @@ def design_export_endpoint(design_id: str, request: DesignExportRequest) -> dict
     )
 
 
+@app.post("/design/{design_id}/make-printable")
+def design_make_printable_endpoint(design_id: str, request: DesignExportRequest) -> dict:
+    from services.codegen.design_export import export_preset_bundle
+    from services.codegen.store import get_design
+
+    design = get_design(design_id)
+    bundle = export_preset_bundle(
+        design,
+        preset="fdm",
+        expected_revision_id=request.expected_revision_id,
+        printer_profile_id=request.printer_profile_id,
+    )
+    manifest = bundle.get("manifest") or {}
+    report = manifest.get("manufacturability") or {}
+    issues = report.get("issues") or []
+    estimate = manifest.get("print_estimate") or {}
+    repaired = len([i for i in issues if i.get("code") == "non_watertight"])
+    oriented = "largest face down orientation checked"
+    mass = estimate.get("filament_g")
+    minutes = estimate.get("print_minutes")
+    summary_bits = [
+        f"Repaired {repaired} non-manifold issue{'s' if repaired != 1 else ''}",
+        oriented,
+    ]
+    if mass is not None:
+        summary_bits.append(f"{float(mass):.0f}g")
+    if minutes is not None:
+        summary_bits.append(f"{float(minutes):.0f}min")
+    return {
+        **bundle,
+        "summary": " · ".join(summary_bits),
+    }
+
+
 @app.get("/design/{design_id}/revisions")
 def design_revisions_endpoint(design_id: str) -> dict:
     """Timeline of past revisions (newest first).
@@ -2154,6 +2213,16 @@ def design_revisions_endpoint(design_id: str) -> dict:
         "design_id": design_id,
         "revisions": list_revisions(design_id),
     }
+
+
+@app.get("/design/{design_id}/revisions/{revision_id}/diff")
+def design_revision_diff_endpoint(design_id: str, revision_id: str) -> dict:
+    from services.codegen.diff import revision_diff
+
+    try:
+        return revision_diff(design_id, revision_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 class DesignRevisionRestoreRequest(BaseModel):
@@ -2210,6 +2279,11 @@ class DesignParameterUpdate(BaseModel):
     value: float | int | bool | str
 
 
+class DesignParameterLockUpdate(BaseModel):
+    name: str
+    locked: bool
+
+
 @app.post("/design/{design_id}/parameter")
 def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) -> dict:
     """Set one parameter and rebuild — no AI, no token spend.
@@ -2228,6 +2302,11 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
         raise HTTPException(
             status_code=404,
             detail=f"No parameter named '{request.name}'.",
+        )
+    if target.locked:
+        raise HTTPException(
+            status_code=423,
+            detail=f"Parameter '{request.name}' is locked.",
         )
 
     # Coerce string inputs (sliders / number inputs send strings) to the
@@ -2289,6 +2368,27 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
             "duration_ms": build.duration_ms,
         },
+    }
+
+
+@app.post("/design/{design_id}/parameter-lock")
+def design_parameter_lock_endpoint(
+    design_id: str, request: DesignParameterLockUpdate
+) -> dict:
+    from services.codegen.store import get_design, save_design
+
+    design = get_design(design_id)
+    target = next((p for p in design.parameters if p.name == request.name), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No parameter named '{request.name}'.")
+    target.locked = request.locked
+    save_design(design)
+    return {
+        "ok": True,
+        "design_id": design_id,
+        "revision_id": design.revision_id,
+        "name": request.name,
+        "locked": target.locked,
     }
 
 
