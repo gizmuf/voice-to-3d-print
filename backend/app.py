@@ -2182,20 +2182,43 @@ def design_make_printable_endpoint(design_id: str, request: DesignExportRequest)
     report = manifest.get("manufacturability") or {}
     issues = report.get("issues") or []
     estimate = manifest.get("print_estimate") or {}
-    repaired = len([i for i in issues if i.get("code") == "non_watertight"])
-    oriented = "largest face down orientation checked"
+    status = report.get("status") or "warn"
+    remaining_issues = [
+        {
+            "severity": issue.get("severity"),
+            "code": issue.get("code"),
+            "message": issue.get("message"),
+            "location": issue.get("location"),
+            "suggestion": issue.get("suggestion"),
+            "process": issue.get("process"),
+        }
+        for issue in issues
+    ]
+    slicer_ready = Path(settings.prusaslicer_path).exists()
     mass = estimate.get("filament_g")
     minutes = estimate.get("print_minutes")
-    summary_bits = [
-        f"Repaired {repaired} non-manifold issue{'s' if repaired != 1 else ''}",
-        oriented,
-    ]
+    if status == "safe":
+        summary_bits = ["Prepared printable FDM bundle", "no manufacturability warnings"]
+    else:
+        issue_codes = ", ".join(
+            str(issue.get("code")) for issue in remaining_issues if issue.get("code")
+        )
+        severity = "UNPRINTABLE" if status == "unprintable" else "WARN"
+        summary_bits = [
+            "Prepared FDM bundle",
+            f"still {severity}: {issue_codes or 'manufacturability checks'}",
+        ]
+    if not slicer_ready:
+        summary_bits.append("slicer not configured, STL/GLB only")
     if mass is not None:
         summary_bits.append(f"{float(mass):.0f}g")
     if minutes is not None:
         summary_bits.append(f"{float(minutes):.0f}min")
     return {
         **bundle,
+        "status": status,
+        "remaining_issues": remaining_issues,
+        "slicer_ready": slicer_ready,
         "summary": " · ".join(summary_bits),
     }
 

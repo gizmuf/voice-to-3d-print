@@ -437,6 +437,7 @@ def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
     import math
 
     import numpy as np
+    import trimesh
 
     issues: list[ManufacturabilityIssue] = []
 
@@ -471,7 +472,15 @@ def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
         try:
             samples = 250
             threshold = max(profile.nozzle_mm * 2.0, 0.8)
-            points, face_indices = mesh.sample(samples, return_index=True)
+            seed_digest = hashlib.sha256()
+            seed_digest.update(np.ascontiguousarray(mesh.vertices).tobytes())
+            seed_digest.update(np.ascontiguousarray(mesh.faces).tobytes())
+            seed = int(seed_digest.hexdigest()[:8], 16)
+            points, face_indices = trimesh.sample.sample_surface(
+                mesh=mesh,
+                count=samples,
+                seed=seed,
+            )
             if len(points):
                 normals_sampled = mesh.face_normals[face_indices]
                 epsilon = max(profile.nozzle_mm * 0.1, 0.01)

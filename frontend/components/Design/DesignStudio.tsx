@@ -4,10 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ChatMessage from "../Chat/ChatMessage";
 import ModelViewer from "../ModelViewer";
+import SelectionChip from "../SelectionChip";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { useDesignStream } from "../../lib/useDesignStream";
-import type { Design, DesignTemplate } from "../../types/design";
+import type { Design, DesignTemplate, ManufacturabilityIssue } from "../../types/design";
+import type { SelectionPayload } from "../ModelViewer";
 
 const TEMPLATE_PROMPTS: { label: string; prompt: string }[] = [
   { label: "Speaker grill 200mm", prompt: "speaker grill 200mm with 8 rings" },
@@ -34,10 +36,15 @@ export default function DesignStudio() {
   const [updatingParam, setUpdatingParam] = useState<string | null>(null);
   const [livePreview, setLivePreview] = useState<boolean>(false);
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
+  const [selectedFeaturePoint, setSelectedFeaturePoint] = useState<{ x: number; y: number; z: number } | null>(null);
+  const [selectedManufacturabilityIssueIndex, setSelectedManufacturabilityIssueIndex] = useState<number | null>(null);
   const [makePrintable, setMakePrintable] = useState<{
     busy: boolean;
     summary?: string;
     bundleUrl?: string;
+    status?: "safe" | "warn" | "unprintable";
+    remainingIssues?: ManufacturabilityIssue[];
+    slicerReady?: boolean;
     error?: string;
   }>({ busy: false });
   const liveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -251,8 +258,19 @@ export default function DesignStudio() {
     if (!design || !selectedFeatureId) return;
     if (!design.features.some((f) => f.id === selectedFeatureId)) {
       setSelectedFeatureId(null);
+      setSelectedFeaturePoint(null);
     }
   }, [design, selectedFeatureId]);
+
+  const selectFeature = useCallback(
+    (featureId: string, point?: { x: number; y: number; z: number } | null) => {
+      if (!design) return;
+      setSelectedFeatureId(featureId);
+      setSelectedFeaturePoint(point ?? featureAnchorForDesign(design, featureId));
+      setSelectedManufacturabilityIssueIndex(null);
+    },
+    [design]
+  );
 
   // Auto-fire the user's free-form prompt as the first chat turn, so Claude
   // actually shapes the seeded design to match the request (not just routes
@@ -396,6 +414,36 @@ export default function DesignStudio() {
 
   const issues = design?.latest_build?.manufacturability?.issues ?? [];
   const status = design?.latest_build?.manufacturability?.status;
+  const selectedManufacturabilityIssue =
+    selectedManufacturabilityIssueIndex === null ? null : issues[selectedManufacturabilityIssueIndex] ?? null;
+  const selectedManufacturabilityPoint = selectedManufacturabilityIssue?.location
+    ? {
+        x: selectedManufacturabilityIssue.location[0],
+        y: selectedManufacturabilityIssue.location[1],
+        z: selectedManufacturabilityIssue.location[2],
+      }
+    : null;
+
+  useEffect(() => {
+    setSelectedManufacturabilityIssueIndex(null);
+  }, [design?.revision_id]);
+
+  const activeMarkerPoint = selectedManufacturabilityPoint ?? selectedFeaturePoint;
+  const activeMarkerLabel = selectedManufacturabilityIssue?.code ?? selectedFeature?.name ?? "selection";
+
+  const handleViewerSelect = useCallback(
+    (payload: SelectionPayload) => {
+      if (!design) return;
+      const featureId = inferFeatureFromPoint(design, payload.point);
+      if (featureId) {
+        selectFeature(featureId, payload.point);
+      } else {
+        setSelectedFeaturePoint(payload.point);
+        setSelectedManufacturabilityIssueIndex(null);
+      }
+    },
+    [design, selectFeature]
+  );
 
   if (!design) {
     return (
@@ -700,7 +748,7 @@ export default function DesignStudio() {
               <button
                 key={f.id || f.name}
                 type="button"
-                onClick={() => setSelectedFeatureId(f.id)}
+                onClick={() => selectFeature(f.id)}
                 style={{
                   ...paramRowStyle,
                   cursor: "pointer",
@@ -728,14 +776,32 @@ export default function DesignStudio() {
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <span style={statusBadgeStyle(status)}>{status}</span>
               {issues.map((issue, i) => (
-                <span key={i} style={issueStyle(issue.severity)}>
+                <div key={i} style={issueStyle(issue.severity)}>
                   <strong>{issue.code}</strong>: {issue.message}
                   {issue.suggestion ? (
                     <em style={{ display: "block", opacity: 0.7 }}>
                       → {issue.suggestion}
                     </em>
                   ) : null}
-                </span>
+                  {issue.location ? (
+                    <div style={issueMetaRowStyle}>
+                      <span>
+                        x {issue.location[0].toFixed(1)} · y {issue.location[1].toFixed(1)} · z{" "}
+                        {issue.location[2].toFixed(1)}
+                      </span>
+                      <button
+                        type="button"
+                        style={issueLocateButtonStyle}
+                        onClick={() => {
+                          setSelectedManufacturabilityIssueIndex(i);
+                          setSelectedFeaturePoint(null);
+                        }}
+                      >
+                        Locate
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               ))}
             </div>
           ) : (
@@ -759,6 +825,9 @@ export default function DesignStudio() {
                   busy: false,
                   summary: payload.summary,
                   bundleUrl: payload.bundle_url ? resolveUrl(backendUrl, payload.bundle_url) ?? undefined : undefined,
+                  status: payload.status,
+                  remainingIssues: payload.remaining_issues ?? [],
+                  slicerReady: payload.slicer_ready,
                 });
               } catch (error) {
                 setMakePrintable({
@@ -768,10 +837,10 @@ export default function DesignStudio() {
               }
             }}
           >
-            {makePrintable.busy ? "Preparing…" : "Make printable"}
+            {makePrintable.busy ? "Preparing…" : "Prepare print bundle"}
           </button>
           {makePrintable.summary ? (
-            <span style={makePrintableResultStyle}>
+            <span style={makePrintableResultStyle(makePrintable.status)}>
               {makePrintable.summary}
               {makePrintable.bundleUrl ? (
                 <>
@@ -783,8 +852,18 @@ export default function DesignStudio() {
               ) : null}
             </span>
           ) : null}
+          {makePrintable.remainingIssues?.length ? (
+            <div style={makePrintableIssueListStyle}>
+              {makePrintable.remainingIssues.slice(0, 2).map((issue, index) => (
+                <span key={`${issue.code}-${index}`}>
+                  <strong>{issue.code}</strong>
+                  {issue.suggestion ? ` — ${issue.suggestion}` : issue.message ? ` — ${issue.message}` : null}
+                </span>
+              ))}
+            </div>
+          ) : null}
           {makePrintable.error ? (
-            <span style={{ ...makePrintableResultStyle, color: "rgba(183,28,28,0.95)" }}>
+            <span style={{ ...makePrintableResultStyle("unprintable"), color: "rgba(183,28,28,0.95)" }}>
               {makePrintable.error}
             </span>
           ) : null}
@@ -803,6 +882,41 @@ export default function DesignStudio() {
               src={buildArtifactUrl}
               label={design.name}
               defaultCameraPreset="iso"
+              onSelect={handleViewerSelect}
+              onClearSelection={() => {
+                setSelectedFeatureId(null);
+                setSelectedFeaturePoint(null);
+                setSelectedManufacturabilityIssueIndex(null);
+              }}
+              selectionMarker={
+                activeMarkerPoint
+                  ? {
+                      point: activeMarkerPoint,
+                      label: activeMarkerLabel,
+                    }
+                  : null
+              }
+              focusTarget={
+                activeMarkerPoint
+                  ? {
+                      point: activeMarkerPoint,
+                      distance: 42,
+                    }
+                  : null
+              }
+              selectionChip={
+                selectedFeature ? (
+                  <SelectionChip
+                    eyebrow="Selected feature"
+                    title={selectedFeature.name}
+                    value={`Next chat edit targets ${selectedFeature.id}`}
+                    onDismiss={() => {
+                      setSelectedFeatureId(null);
+                      setSelectedFeaturePoint(null);
+                    }}
+                  />
+                ) : null
+              }
             />
           ) : (
             <div style={emptyCanvasStyle}>Build artifact missing.</div>
@@ -1136,6 +1250,61 @@ function DesignChatInput({
   );
 }
 
+function paramNumber(design: Design, name: string, fallback: number): number {
+  const value = design.parameters.find((p) => p.name === name)?.value;
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function featureAnchorForDesign(design: Design, featureId: string): { x: number; y: number; z: number } | null {
+  const id = featureId.toLowerCase();
+  const bbox = design.latest_build?.bounding_box_mm;
+  const outerRadius = paramNumber(design, "outer_diameter", bbox?.[0] ?? 40) / 2;
+  const height = paramNumber(design, "knob_height", bbox?.[2] ?? 10);
+  const insertRadius = paramNumber(design, "insert_diameter", 0) / 2;
+
+  if (id.includes("knurl")) {
+    return { x: outerRadius, y: 0, z: height / 2 };
+  }
+  if (id.includes("hole")) {
+    return { x: outerRadius * 0.5, y: 0, z: height };
+  }
+  if (id.includes("insert") || id.includes("pocket")) {
+    return { x: Math.max(insertRadius * 0.4, 0), y: 0, z: 0 };
+  }
+  if (id.includes("cylinder") || id.includes("body")) {
+    return { x: 0, y: 0, z: height };
+  }
+  return bbox ? { x: 0, y: 0, z: bbox[2] / 2 } : null;
+}
+
+function inferFeatureFromPoint(design: Design, point: { x: number; y: number; z: number }): string | null {
+  const features = design.features;
+  if (!features.length) return null;
+
+  const findFeature = (...needles: string[]) =>
+    features.find((feature) => {
+      const haystack = `${feature.id} ${feature.name}`.toLowerCase();
+      return needles.some((needle) => haystack.includes(needle));
+    })?.id ?? null;
+
+  const outerRadius = paramNumber(design, "outer_diameter", design.latest_build?.bounding_box_mm?.[0] ?? 40) / 2;
+  const height = paramNumber(design, "knob_height", design.latest_build?.bounding_box_mm?.[2] ?? 10);
+  const insertRadius = paramNumber(design, "insert_diameter", 0) / 2;
+  const knurlDepth = paramNumber(design, "knurl_depth", 1);
+  const radialDistance = Math.hypot(point.x, point.y);
+
+  if (insertRadius > 0 && radialDistance <= insertRadius + 1 && point.z <= height * 0.55) {
+    return findFeature("insert", "pocket");
+  }
+  if (radialDistance >= Math.max(0, outerRadius - Math.max(knurlDepth * 2, 2))) {
+    return findFeature("knurl");
+  }
+  if (point.z >= height * 0.75 && radialDistance > insertRadius + 1 && radialDistance < outerRadius * 0.82) {
+    return findFeature("hole");
+  }
+  return findFeature("cylinder", "body") ?? features[0]?.id ?? null;
+}
+
 const shellStyle: React.CSSProperties = {
   minHeight: "100vh",
   padding: "24px 32px",
@@ -1286,10 +1455,28 @@ const lockButtonStyle = (locked: boolean): React.CSSProperties => ({
   cursor: "pointer",
 });
 
-const makePrintableResultStyle: React.CSSProperties = {
+const makePrintableResultStyle = (status?: string): React.CSSProperties => ({
   fontSize: 11,
   lineHeight: 1.4,
-  color: "rgba(0,0,0,0.68)",
+  color:
+    status === "safe"
+      ? "rgba(27,94,32,0.95)"
+      : status === "unprintable"
+        ? "rgba(183,28,28,0.95)"
+        : "rgba(158,105,0,0.95)",
+});
+
+const makePrintableIssueListStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  fontSize: 11,
+  lineHeight: 1.35,
+  color: "rgba(114,74,0,0.95)",
+  background: "rgba(255,193,7,0.12)",
+  border: "1px solid rgba(255,193,7,0.32)",
+  borderRadius: 8,
+  padding: "6px 8px",
 };
 
 const historyStyle: React.CSSProperties = {
@@ -1701,3 +1888,24 @@ function issueStyle(severity: "info" | "warn" | "error"): React.CSSProperties {
     borderRadius: 6,
   };
 }
+
+const issueMetaRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  marginTop: 4,
+  fontSize: 11,
+  opacity: 0.78,
+};
+
+const issueLocateButtonStyle: React.CSSProperties = {
+  border: "1px solid rgba(199,150,0,0.35)",
+  background: "rgba(255,255,255,0.7)",
+  color: "rgba(120,78,0,0.95)",
+  borderRadius: 999,
+  padding: "2px 8px",
+  fontSize: 10,
+  fontWeight: 700,
+  cursor: "pointer",
+};
