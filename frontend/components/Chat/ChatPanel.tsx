@@ -49,11 +49,10 @@ export default function ChatPanel({
     if (!canSubmit) return;
     const message = draft.trim();
     setDraft("");
-    let body = message;
-    if (selectedFeatureId && selectedFeatureLabel) {
-      body = `${message}\n\n[Selected feature: ${selectedFeatureLabel} (id=${selectedFeatureId})]`;
-    }
-    await send(body);
+    await send(message, {
+      selectedFeatureId: selectedFeatureId ?? null,
+      selectedFeatureLabel: selectedFeatureLabel ?? null,
+    });
   };
 
   return (

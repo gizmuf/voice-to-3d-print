@@ -1488,6 +1488,8 @@ async def library_resolve(uid: str, provider: str = "local") -> dict:
 class WorkspaceChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     printer_profile_id: str | None = None
+    selected_feature_id: str | None = None
+    selected_feature_label: str | None = None
 
 
 @app.post("/workspace/{workspace_id}/chat")
@@ -1588,6 +1590,8 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
             workspace_id,
             request.message,
             printer_profile_id=request.printer_profile_id,
+            selected_feature_id=request.selected_feature_id,
+            selected_feature_label=request.selected_feature_label,
         )
         return StreamingResponse(generator, media_type="text/event-stream")
 
@@ -2141,6 +2145,11 @@ class DesignExportRequest(BaseModel):
     printer_profile_id: str | None = None
 
 
+class PrintBundleRequest(BaseModel):
+    expected_revision_id: str | None = None
+    printer_profile_id: str | None = None
+
+
 @app.post("/design/{design_id}/export")
 def design_export_endpoint(design_id: str, request: DesignExportRequest) -> dict:
     """Multi-process bundle export. Pick a goal (fdm/cnc/docs/all) → get a ZIP.
@@ -2166,8 +2175,9 @@ def design_export_endpoint(design_id: str, request: DesignExportRequest) -> dict
     )
 
 
+@app.post("/design/{design_id}/print-bundle")
 @app.post("/design/{design_id}/make-printable")
-def design_make_printable_endpoint(design_id: str, request: DesignExportRequest) -> dict:
+def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) -> dict:
     from services.codegen.design_export import export_preset_bundle
     from services.codegen.store import get_design
 
@@ -2198,14 +2208,14 @@ def design_make_printable_endpoint(design_id: str, request: DesignExportRequest)
     mass = estimate.get("filament_g")
     minutes = estimate.get("print_minutes")
     if status == "safe":
-        summary_bits = ["Prepared printable FDM bundle", "no manufacturability warnings"]
+        summary_bits = ["Exported FDM bundle", "no manufacturability warnings"]
     else:
         issue_codes = ", ".join(
             str(issue.get("code")) for issue in remaining_issues if issue.get("code")
         )
         severity = "UNPRINTABLE" if status == "unprintable" else "WARN"
         summary_bits = [
-            "Prepared FDM bundle",
+            "Exported FDM bundle",
             f"still {severity}: {issue_codes or 'manufacturability checks'}",
         ]
     if not slicer_ready:

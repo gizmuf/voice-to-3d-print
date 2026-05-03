@@ -242,7 +242,32 @@ def derive_named_features(
             source_prompt=source_prompt,
         )
     )
-    return out
+    return _dedupe_named_features(out)
+
+
+def _dedupe_named_features(features: list[NamedFeature]) -> list[NamedFeature]:
+    """Merge duplicate feature records while preferring script-block metadata."""
+    merged: dict[tuple[str, str], NamedFeature] = {}
+    order: list[tuple[str, str]] = []
+    for feature in features:
+        key = (feature.id, feature.kind)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = feature
+            order.append(key)
+            continue
+        if feature.source and not existing.source:
+            merged[key] = feature
+        else:
+            existing.source = existing.source or feature.source
+            existing.parameters_used = sorted(
+                set(existing.parameters_used) | set(feature.parameters_used)
+            )
+            existing.parent_feature_ids = sorted(
+                set(existing.parent_feature_ids) | set(feature.parent_feature_ids)
+            )
+            existing.user_words = list(dict.fromkeys([*existing.user_words, *feature.user_words]))
+    return [merged[key] for key in order]
 
 
 def derive_parameters(sandbox_payload: dict) -> list[DesignParameter]:

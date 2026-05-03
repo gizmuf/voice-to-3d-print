@@ -14,6 +14,8 @@ type StreamState = {
 
 type SendOptions = {
   printerProfileId?: string;
+  selectedFeatureId?: string | null;
+  selectedFeatureLabel?: string | null;
 };
 
 const parseSSEStream = async function* (
@@ -122,6 +124,8 @@ export function useChatStream(workspaceId: string | null) {
             body: JSON.stringify({
               message,
               printer_profile_id: options.printerProfileId ?? null,
+              selected_feature_id: options.selectedFeatureId ?? null,
+              selected_feature_label: options.selectedFeatureLabel ?? null,
             }),
             signal: controller.signal,
           },

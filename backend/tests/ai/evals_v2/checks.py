@@ -41,11 +41,11 @@ def run_geometry_checks(build: dict[str, Any], checks: dict[str, Any]) -> list[s
         if thin:
             failures.append(f"minWallThicknessMm expected >= {min_wall}; issues={thin[:2]}")
 
-    # Hole counting is intentionally conservative until feature graph + B-rep
-    # face ownership lands. Cases can still declare it; unsupported assertions
-    # fail loudly instead of pretending mesh topology gave a reliable count.
-    if checks.get("holeCount") is not None:
-        failures.append("holeCount predicate is not implemented reliably for raw meshes yet")
+    if checks.get("holeCount") is not None and mesh is not None:
+        expected = int(checks["holeCount"])
+        actual = _count_through_holes(mesh)
+        if actual != expected:
+            failures.append(f"holeCount expected {expected}, got {actual}")
 
     return failures
 
@@ -70,6 +70,22 @@ def _load_stl_mesh(build: dict[str, Any]):
     if not isinstance(mesh, trimesh.Trimesh):
         mesh = trimesh.util.concatenate(tuple(mesh.dump()))  # type: ignore[arg-type]
     return mesh
+
+
+def _count_through_holes(mesh) -> int:
+    """Count genus-style through-holes for watertight manifold meshes."""
+    if not mesh.is_watertight:
+        return 0
+    components = mesh.split(only_watertight=False)
+    if not components:
+        components = [mesh]
+    count = 0
+    for component in components:
+        if not component.is_watertight:
+            continue
+        genus = int(round((2 - int(component.euler_number)) / 2))
+        count += max(0, genus)
+    return count
 
 
 __all__ = ["run_geometry_checks"]

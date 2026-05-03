@@ -42,6 +42,7 @@ export default function RevisionTimeline({
   useEffect(() => {
     if (!designId) {
       setRevisions([]);
+      setDiffs({});
       return;
     }
     let cancelled = false;
@@ -49,7 +50,12 @@ export default function RevisionTimeline({
       .then((r) => (r.ok ? r.json() : null))
       .then((payload) => {
         if (cancelled || !payload) return;
-        setRevisions(payload.revisions ?? []);
+        const nextRevisions = payload.revisions ?? [];
+        setRevisions(nextRevisions);
+        const validIds = new Set(nextRevisions.map((r: RevisionSummary) => r.revision_id));
+        setDiffs((prev) =>
+          Object.fromEntries(Object.entries(prev).filter(([revisionId]) => validIds.has(revisionId))),
+        );
       })
       .catch(() => undefined);
     return () => {
@@ -101,6 +107,11 @@ export default function RevisionTimeline({
         // Optimistic local update; the parent's onRestore re-fetches the design
         // anyway, but we also drop it from the visible strip immediately.
         setRevisions((prev) => prev.filter((r) => r.revision_id !== revisionId));
+        setDiffs((prev) => {
+          const next = { ...prev };
+          delete next[revisionId];
+          return next;
+        });
         onRestore();
       } else {
         const payload = await res.json().catch(() => null);

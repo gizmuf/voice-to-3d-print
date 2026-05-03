@@ -814,13 +814,13 @@ export default function DesignStudio() {
             onClick={async () => {
               setMakePrintable({ busy: true });
               try {
-                const res = await fetch(`${backendUrl}/design/${design.design_id}/make-printable`, {
+                const res = await fetch(`${backendUrl}/design/${design.design_id}/print-bundle`, {
                   method: "POST",
                   headers: { "content-type": "application/json" },
                   body: JSON.stringify({ expected_revision_id: design.revision_id }),
                 });
                 const payload = await res.json().catch(() => null);
-                if (!res.ok) throw new Error(payload?.detail ?? `Make printable failed: ${res.status}`);
+                if (!res.ok) throw new Error(payload?.detail ?? `FDM export failed: ${res.status}`);
                 setMakePrintable({
                   busy: false,
                   summary: payload.summary,
@@ -832,12 +832,12 @@ export default function DesignStudio() {
               } catch (error) {
                 setMakePrintable({
                   busy: false,
-                  error: error instanceof Error ? error.message : "Make printable failed.",
+                  error: error instanceof Error ? error.message : "FDM export failed.",
                 });
               }
             }}
           >
-            {makePrintable.busy ? "Preparing…" : "Prepare print bundle"}
+            {makePrintable.busy ? "Exporting…" : "Export for FDM"}
           </button>
           {makePrintable.summary ? (
             <span style={makePrintableResultStyle(makePrintable.status)}>
@@ -968,7 +968,6 @@ export default function DesignStudio() {
           </div>
           <DesignChatInput
             disabled={stream.state.status === "streaming"}
-            backendUrl={backendUrl}
             selectedFeature={selectedFeature}
             parameters={design.parameters}
             onSend={(text) =>
@@ -1141,14 +1140,12 @@ function DesignChatInput({
   onSend,
   disabled,
   isStreaming,
-  backendUrl,
   selectedFeature,
   parameters,
 }: {
   onSend: (text: string) => void;
   disabled: boolean;
   isStreaming: boolean;
-  backendUrl: string;
   selectedFeature: Design["features"][number] | null;
   parameters: Design["parameters"];
 }) {
@@ -1156,7 +1153,7 @@ function DesignChatInput({
   const [routeBadge, setRouteBadge] = useState<{
     label: string;
     title: string;
-    tone: "free" | "cheap" | "full";
+    tone: "free" | "cheap" | "full" | "answer";
   } | null>(null);
 
   useEffect(() => {
@@ -1167,47 +1164,14 @@ function DesignChatInput({
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      const lower = text.toLowerCase();
-      const paramHit = parameters.some((p) =>
-        lower.includes(p.name.toLowerCase().replaceAll("_", " "))) ||
-        parameters.some((p) => lower.includes(p.name.toLowerCase()));
-      fetch(`${backendUrl}/route-intent`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ raw_text: text, source: "text", preview_only: true }),
-      })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((payload) => {
-          if (cancelled) return;
-          if (paramHit) {
-            setRouteBadge({
-              label: "Free edit",
-              title: "Likely direct parameter update; no agent rebuild needed.",
-              tone: "free",
-            });
-          } else if (payload?.mode === "useful" && Number(payload.confidence ?? 0) >= 0.85) {
-            setRouteBadge({
-              label: "Cheap edit",
-              title: payload.route_reason ?? "Likely routable to a targeted CAD tool.",
-              tone: "cheap",
-            });
-          } else {
-            setRouteBadge({
-              label: "Full rebuild",
-              title: payload?.route_reason ?? "Likely needs the full agent loop.",
-              tone: "full",
-            });
-          }
-        })
-        .catch(() => {
-          if (!cancelled) setRouteBadge(null);
-        });
+      const badge = classifyDesignEditBadge(text, parameters);
+      if (!cancelled) setRouteBadge(badge);
     }, 250);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [backendUrl, draft, parameters]);
+  }, [draft, parameters]);
 
   return (
     <form
@@ -1248,6 +1212,63 @@ function DesignChatInput({
       </div>
     </form>
   );
+}
+
+type DesignEditBadge = {
+  label: string;
+  title: string;
+  tone: "free" | "cheap" | "full" | "answer";
+};
+
+function classifyDesignEditBadge(
+  text: string,
+  parameters: Design["parameters"],
+): DesignEditBadge {
+  const lower = text.toLowerCase();
+  const normalized = lower.replace(/[^a-z0-9_]+/g, " ").replace(/\s+/g, " ").trim();
+  const questionLike =
+    /^(why|what|how|can|does|do|is|are|where|which|explain|show|tell|count|measure|analyze|check)\b/.test(
+      normalized,
+    ) || (lower.includes("?") && !/\b(make|set|change|add|remove|delete|split|repair|orient)\b/.test(normalized));
+
+  if (questionLike) {
+    return {
+      label: "Answer only",
+      title: "Likely explanation or inspection; should not rebuild unless the agent needs a check.",
+      tone: "answer",
+    };
+  }
+
+  const hasEditVerb = /\b(make|set|change|increase|decrease|reduce|shrink|enlarge|scale|thicken|thin|add|remove|delete|drill|cut|replace|move|rotate|fillet|chamfer)\b/.test(
+    normalized,
+  );
+  const hasNumericIntent = /\d/.test(normalized) || /\b(twice|double|half|smaller|larger|bigger|thicker|thinner|more|less)\b/.test(normalized);
+  const mentionsParam = parameters.some((p) => {
+    const name = p.name.toLowerCase();
+    const spaced = name.replaceAll("_", " ");
+    return (` ${normalized} `.includes(` ${name} `) || ` ${normalized} `.includes(` ${spaced} `));
+  });
+  if (mentionsParam && hasEditVerb && hasNumericIntent) {
+    return {
+      label: "Direct param",
+      title: "Likely direct parameter update; no full agent rewrite expected.",
+      tone: "free",
+    };
+  }
+
+  if (/\b(split|repair|orient|orientation|support|smooth|mirror|offset|inflate|press fit|hole|holes|drill|detect)\b/.test(normalized)) {
+    return {
+      label: "Tool edit",
+      title: "Likely routed to a focused CAD or mesh tool.",
+      tone: "cheap",
+    };
+  }
+
+  return {
+    label: "Agent edit",
+    title: "Likely needs the full design-agent loop.",
+    tone: "full",
+  };
 }
 
 function paramNumber(design: Design, name: string, fallback: number): number {
@@ -1513,9 +1534,10 @@ const primaryButtonStyle: React.CSSProperties = {
 };
 
 const routeBadgeStyle = (
-  tone: "free" | "cheap" | "full",
+  tone: "free" | "cheap" | "full" | "answer",
 ): React.CSSProperties => {
   const colors = {
+    answer: ["rgba(33,150,243,0.14)", "rgba(13,71,161,0.9)"],
     free: ["rgba(76,175,80,0.16)", "rgba(46,125,50,0.85)"],
     cheap: ["rgba(255,193,7,0.20)", "rgba(126,87,0,0.9)"],
     full: ["rgba(244,67,54,0.12)", "rgba(183,28,28,0.9)"],
