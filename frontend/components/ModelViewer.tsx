@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, createElement, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
-import { Bounds, OrbitControls, useGLTF } from "@react-three/drei";
+import { Bounds, Html, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import type { Material, Mesh } from "three";
 import { Color, MOUSE, Vector3 } from "three";
@@ -184,6 +184,26 @@ function SelectionMarker({ marker }: { marker: ViewerSelectionMarker }) {
         emissive: "#f59f3a",
         emissiveIntensity: 0.4,
       })
+    ),
+    createElement(
+      Html,
+      {
+        center: true,
+        distanceFactor: 18,
+        position: [0, 3.2, 0],
+        style: {
+          pointerEvents: "none",
+          whiteSpace: "nowrap",
+          background: "rgba(255,255,255,0.86)",
+          border: "1px solid rgba(245,159,58,0.45)",
+          borderRadius: 999,
+          color: "rgba(90,58,0,0.95)",
+          fontSize: 11,
+          fontWeight: 700,
+          padding: "3px 8px",
+        },
+      },
+      marker.label
     )
   );
 }
@@ -195,7 +215,7 @@ function CameraTargetController({
   focusTarget: ViewerFocusTarget | null;
   controlsRef: MutableRefObject<{ target: Vector3; update: () => void } | null>;
 }) {
-  const { camera } = useThree();
+  const { camera, invalidate } = useThree();
   const desiredTargetRef = useRef<Vector3 | null>(null);
   const desiredCameraRef = useRef<Vector3 | null>(null);
 
@@ -211,7 +231,8 @@ function CameraTargetController({
     const distance = Math.max(focusTarget.distance ?? camera.position.distanceTo(currentTarget), 12);
     desiredTargetRef.current = nextTarget;
     desiredCameraRef.current = nextTarget.clone().add(direction.multiplyScalar(distance));
-  }, [camera.position, controlsRef, focusTarget]);
+    invalidate();
+  }, [camera.position, controlsRef, focusTarget, invalidate]);
 
   useFrame(() => {
     if (!desiredTargetRef.current || !desiredCameraRef.current) return;
@@ -226,6 +247,7 @@ function CameraTargetController({
         desiredTargetRef.current = null;
         desiredCameraRef.current = null;
       }
+      invalidate();
     }
   });
 

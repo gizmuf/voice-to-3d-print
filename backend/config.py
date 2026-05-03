@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,24 @@ def _resolve_output_dir(value: str | None, default: Path) -> Path:
         fallback = default.resolve()
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
+
+
+def _resolve_slicer_path(value: str | None) -> str:
+    if value:
+        return value
+    candidates = [
+        "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
+        "/Applications/Original Prusa Drivers/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
+        "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer",
+    ]
+    for binary in ("PrusaSlicer", "prusa-slicer", "slic3r", "OrcaSlicer", "orca-slicer"):
+        found = shutil.which(binary)
+        if found:
+            candidates.insert(0, found)
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    return candidates[0]
 
 
 @dataclass(frozen=True)
@@ -103,10 +122,7 @@ class Settings:
     )
     triposr_texture_resolution: str = os.getenv("TRIPOSR_TEXTURE_RESOLUTION", "")
 
-    prusaslicer_path: str = os.getenv(
-        "PRUSASLICER_PATH",
-        "/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",
-    )
+    prusaslicer_path: str = _resolve_slicer_path(os.getenv("PRUSASLICER_PATH"))
     prusaslicer_config: str = str(
         _resolve_path(os.getenv("PRUSASLICER_CONFIG"), Path("config.ini"))
     )
