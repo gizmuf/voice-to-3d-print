@@ -18,6 +18,8 @@ type RevisionDiff = {
   parameter_changes?: Array<{ name: string; before: unknown; after: unknown }>;
   features_added?: Array<{ id: string; name: string; kind: string }>;
   features_removed?: Array<{ id: string; name: string; kind: string }>;
+  locked_added?: string[];
+  locked_removed?: string[];
   duration_ms?: number | null;
 };
 
@@ -223,7 +225,14 @@ function RevisionDiffPopover({
   const params = diff.parameter_changes ?? [];
   const added = diff.features_added ?? [];
   const removed = diff.features_removed ?? [];
-  const empty = params.length === 0 && added.length === 0 && removed.length === 0;
+  const lockedAdded = diff.locked_added ?? [];
+  const lockedRemoved = diff.locked_removed ?? [];
+  const empty =
+    params.length === 0 &&
+    added.length === 0 &&
+    removed.length === 0 &&
+    lockedAdded.length === 0 &&
+    lockedRemoved.length === 0;
   return (
     <div style={diffPopoverStyle}>
       {empty ? <div>No structured changes detected.</div> : null}
@@ -237,6 +246,12 @@ function RevisionDiffPopover({
       ))}
       {removed.slice(0, 3).map((f) => (
         <div key={`remove-${f.id}`}>- {f.name}</div>
+      ))}
+      {lockedAdded.slice(0, 3).map((name) => (
+        <div key={`lock-${name}`}>🔒 locked {name}</div>
+      ))}
+      {lockedRemoved.slice(0, 3).map((name) => (
+        <div key={`unlock-${name}`}>🔓 unlocked {name}</div>
       ))}
       {diff.duration_ms ? (
         <div style={{ opacity: 0.65, marginTop: 4 }}>rebuild {Math.round(diff.duration_ms)} ms</div>

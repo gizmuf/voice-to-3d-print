@@ -10,16 +10,12 @@ export type ChatPanelProps = {
   workspaceId: string | null;
   disabled?: boolean;
   onRevisionChange?: (revisionId: string) => void;
-  selectedFeatureLabel?: string | null;
-  selectedFeatureId?: string | null;
 };
 
 export default function ChatPanel({
   workspaceId,
   disabled,
   onRevisionChange,
-  selectedFeatureLabel,
-  selectedFeatureId,
 }: ChatPanelProps) {
   const { history, state, latestRevisionId, send, cancel } =
     useChatStream(workspaceId);
@@ -49,10 +45,7 @@ export default function ChatPanel({
     if (!canSubmit) return;
     const message = draft.trim();
     setDraft("");
-    await send(message, {
-      selectedFeatureId: selectedFeatureId ?? null,
-      selectedFeatureLabel: selectedFeatureLabel ?? null,
-    });
+    await send(message);
   };
 
   return (

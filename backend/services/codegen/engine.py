@@ -31,6 +31,11 @@ from services.codegen.models import (
     ManufacturabilityIssue,
     ManufacturabilityReport,
     NamedFeature,
+    OrientationSuggestion,
+)
+from services.codegen.orientation import (
+    compute_overhang_fraction,
+    find_best_print_orientation,
 )
 from services.codegen.sandbox import SandboxResult, run_design
 from services.printer_profiles import PrinterProfile, get_profile
@@ -246,28 +251,47 @@ def derive_named_features(
 
 
 def _dedupe_named_features(features: list[NamedFeature]) -> list[NamedFeature]:
-    """Merge duplicate feature records while preferring script-block metadata."""
-    merged: dict[tuple[str, str], NamedFeature] = {}
-    order: list[tuple[str, str]] = []
+    """Collapse duplicate feature records keyed by id.
+
+    A `# @feature: ring` block and a top-level `ring = Part(...)` describe the
+    same logical feature in two views. We keep one row per id, preferring the
+    block view (it owns the actual source and `kind="block"`) and merging the
+    classifier-derived metadata into it. When no block exists, the classifier
+    record is kept as-is.
+    """
+    merged: dict[str, NamedFeature] = {}
+    order: list[str] = []
     for feature in features:
-        key = (feature.id, feature.kind)
-        existing = merged.get(key)
+        existing = merged.get(feature.id)
         if existing is None:
-            merged[key] = feature
-            order.append(key)
+            merged[feature.id] = feature
+            order.append(feature.id)
             continue
-        if feature.source and not existing.source:
-            merged[key] = feature
-        else:
-            existing.source = existing.source or feature.source
-            existing.parameters_used = sorted(
-                set(existing.parameters_used) | set(feature.parameters_used)
-            )
-            existing.parent_feature_ids = sorted(
-                set(existing.parent_feature_ids) | set(feature.parent_feature_ids)
-            )
-            existing.user_words = list(dict.fromkeys([*existing.user_words, *feature.user_words]))
-    return [merged[key] for key in order]
+        primary, secondary = _pick_feature_primary(existing, feature)
+        primary.parameters_used = sorted(
+            set(primary.parameters_used) | set(secondary.parameters_used)
+        )
+        primary.parent_feature_ids = sorted(
+            set(primary.parent_feature_ids) | set(secondary.parent_feature_ids)
+        )
+        primary.user_words = list(dict.fromkeys([*primary.user_words, *secondary.user_words]))
+        primary.source = primary.source or secondary.source
+        if not primary.source_prompt and secondary.source_prompt:
+            primary.source_prompt = secondary.source_prompt
+        merged[feature.id] = primary
+    return [merged[fid] for fid in order]
+
+
+def _pick_feature_primary(a: NamedFeature, b: NamedFeature) -> tuple[NamedFeature, NamedFeature]:
+    """Choose which of two same-id features wins. Block view wins over classifier."""
+    a_is_block = a.kind == "block" or bool(a.source)
+    b_is_block = b.kind == "block" or bool(b.source)
+    if a_is_block and not b_is_block:
+        return a, b
+    if b_is_block and not a_is_block:
+        return b, a
+    # Tie: keep the first one (preserves insertion order for stability).
+    return a, b
 
 
 def derive_parameters(sandbox_payload: dict) -> list[DesignParameter]:
@@ -413,8 +437,23 @@ def run_manufacturability(
             )
         )
 
+    current_overhang_fraction: float | None = None
+    suggested_orientation: OrientationSuggestion | None = None
+
     if process == "fdm":
         issues.extend(_fdm_checks(mesh, profile))
+        current_overhang_fraction = compute_overhang_fraction(mesh)
+        # Only run the orientation search if the as-modeled overhang is
+        # already meaningful; for clean parts the search is wasted work.
+        if current_overhang_fraction >= 0.05:
+            best_candidate, best_fraction = find_best_print_orientation(mesh)
+            # Surface a suggestion only if reorienting would meaningfully help.
+            if best_fraction + 0.02 < current_overhang_fraction:
+                suggested_orientation = OrientationSuggestion(
+                    label=best_candidate.label,
+                    euler_deg=best_candidate.euler_deg,
+                    overhang_fraction=best_fraction,
+                )
     elif process == "cnc":
         issues.extend(_cnc_checks(mesh, profile))
 
@@ -454,6 +493,8 @@ def run_manufacturability(
         bounding_box_mm=bbox,
         mesh_hash=mesh_hash,
         duration_ms=int((time.perf_counter() - started) * 1000),
+        current_overhang_fraction=current_overhang_fraction,
+        suggested_orientation=suggested_orientation,
     )
 
 

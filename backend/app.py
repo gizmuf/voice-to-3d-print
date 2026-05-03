@@ -382,6 +382,22 @@ class STTResponse(BaseModel):
     transcript: str
 
 
+@app.get("/telemetry/tool-summary")
+def telemetry_tool_summary(token: str | None = None) -> dict:
+    """Per-tool success/failure aggregates from production telemetry.
+
+    Hidden behind ``PULSAI_ADMIN_TOKEN`` to avoid leaking tool call counts
+    publicly. When the env var is unset the endpoint is unreachable.
+    """
+    if not settings.admin_token:
+        raise HTTPException(status_code=404, detail="not found")
+    if token != settings.admin_token:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+    from services.ai.telemetry import summarize_tool_calls
+
+    return summarize_tool_calls()
+
+
 @app.get("/health")
 def health() -> dict:
     trellis2_text_enabled = bool(settings.trellis2_api_url and settings.trellis2_text_endpoint)
@@ -2210,13 +2226,21 @@ def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) ->
     if status == "safe":
         summary_bits = ["Exported FDM bundle", "no manufacturability warnings"]
     else:
-        issue_codes = ", ".join(
-            str(issue.get("code")) for issue in remaining_issues if issue.get("code")
-        )
+        labels: list[str] = []
+        for issue in remaining_issues:
+            code = issue.get("code")
+            if code:
+                labels.append(str(code))
+                continue
+            message = issue.get("message")
+            if message:
+                truncated = str(message).strip().splitlines()[0]
+                labels.append(truncated[:50] + ("…" if len(truncated) > 50 else ""))
+        issue_summary = ", ".join(labels) or "manufacturability checks"
         severity = "UNPRINTABLE" if status == "unprintable" else "WARN"
         summary_bits = [
             "Exported FDM bundle",
-            f"still {severity}: {issue_codes or 'manufacturability checks'}",
+            f"still {severity}: {issue_summary}",
         ]
     if not slicer_ready:
         summary_bits.append("slicer not configured, STL/GLB only")

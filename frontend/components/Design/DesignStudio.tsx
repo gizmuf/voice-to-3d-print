@@ -8,6 +8,7 @@ import SelectionChip from "../SelectionChip";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { useDesignStream } from "../../lib/useDesignStream";
+import { useHealth } from "../../lib/useHealth";
 import type { Design, DesignTemplate, ManufacturabilityIssue } from "../../types/design";
 import type { SelectionPayload } from "../ModelViewer";
 
@@ -20,6 +21,7 @@ const TEMPLATE_PROMPTS: { label: string; prompt: string }[] = [
 
 export default function DesignStudio() {
   const backendUrl = resolveBackendUrl();
+  const health = useHealth();
   const [templates, setTemplates] = useState<DesignTemplate[]>([]);
   const [design, setDesign] = useState<Design | null>(null);
   const [creating, setCreating] = useState(false);
@@ -758,12 +760,9 @@ export default function DesignStudio() {
                       ? "1px solid rgba(33,150,243,0.7)"
                       : "1px solid transparent",
                 }}
-                title={`Select ${f.name} for the next chat edit`}
+                title={`${f.name} — kind ${f.kind}, id ${f.id}. Click to scope the next chat edit.`}
               >
                 <span style={{ fontSize: 12, fontWeight: 600 }}>{f.name}</span>
-                <span style={{ fontSize: 11, opacity: 0.55 }}>
-                  {f.kind} · {f.id}
-                </span>
               </button>
             ))}
             {design.features.length === 0 ? (
@@ -772,6 +771,60 @@ export default function DesignStudio() {
           </div>
 
           <h3 style={paneHeaderStyle}>Manufacturability</h3>
+          {health && !health.slicer_ready ? (
+            <div style={slicerHintStyle} role="note">
+              Slicer not configured. Install{" "}
+              <a
+                href="https://www.prusa3d.com/page/prusaslicer_424/"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "inherit" }}
+              >
+                PrusaSlicer
+              </a>{" "}
+              or set <code>PRUSASLICER_PATH</code> to enable G-code, print
+              time, and material estimates. STL/GLB export still works.
+            </div>
+          ) : null}
+          {(() => {
+            const orient = design.latest_build?.manufacturability?.suggested_orientation;
+            const current = design.latest_build?.manufacturability?.current_overhang_fraction;
+            if (!orient || current == null) return null;
+            const askDisabled = stream.state.status === "streaming" || makePrintable.busy;
+            return (
+              <div style={orientationHintStyle} role="note">
+                <div>
+                  Current orientation has{" "}
+                  <strong>~{Math.round(current * 100)}% overhang</strong>.
+                  Reorienting (<em>{orient.label}</em>,
+                  Euler {orient.euler_deg.map((d) => `${d.toFixed(0)}°`).join(", ")})
+                  would drop it to{" "}
+                  <strong>~{Math.round(orient.overhang_fraction * 100)}%</strong>.
+                </div>
+                <button
+                  type="button"
+                  disabled={askDisabled}
+                  style={orientationActionStyle(askDisabled)}
+                  onClick={() => {
+                    if (askDisabled) return;
+                    const [rx, ry, rz] = orient.euler_deg;
+                    const message =
+                      `Apply this print-orientation suggestion: rotate the part using Euler ` +
+                      `XYZ (${rx.toFixed(0)}°, ${ry.toFixed(0)}°, ${rz.toFixed(0)}°) so its overhang ` +
+                      `drops from ~${Math.round((current ?? 0) * 100)}% to ~${Math.round(orient.overhang_fraction * 100)}%. ` +
+                      `Use auto_orient_for_fdm or insert a rotation in the script — pick the smallest edit. ` +
+                      `Then rebuild and re-check manufacturability.`;
+                    stream.send(message, {
+                      selectedFeatureId: selectedFeature?.id ?? null,
+                      selectedFeatureLabel: selectedFeature?.name ?? null,
+                    });
+                  }}
+                >
+                  Try this orientation
+                </button>
+              </div>
+            );
+          })()}
           {status ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <span style={statusBadgeStyle(status)}>{status}</span>
@@ -1015,6 +1068,37 @@ export default function DesignStudio() {
                 selectedFeatureLabel: selectedFeature?.name ?? null,
               })
             }
+            onApplyDirect={async (text, edit) => {
+              const before = design.parameters.find((p) => p.name === edit.name)?.value;
+              try {
+                const res = await fetch(`${backendUrl}/design/${design.design_id}/parameter`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ name: edit.name, value: edit.value }),
+                });
+                const payload = await res.json().catch(() => null);
+                if (!res.ok) {
+                  const detail =
+                    (payload && typeof payload.detail === "object" && payload.detail.message) ||
+                    payload?.detail ||
+                    `Direct apply failed: ${res.status}`;
+                  stream.appendLocalTurn(text, `✕ ${detail}`);
+                  return;
+                }
+                const newRev = payload?.revision_id ?? null;
+                stream.appendLocalTurn(
+                  text,
+                  `✓ ${edit.name}: ${String(before ?? "?")} → ${edit.value} (direct, $0)`,
+                  newRev,
+                );
+                await refreshDesign(design.design_id);
+              } catch (error) {
+                stream.appendLocalTurn(
+                  text,
+                  `✕ ${error instanceof Error ? error.message : "Direct apply failed."}`,
+                );
+              }
+            }}
             isStreaming={stream.state.status === "streaming"}
           />
           {stream.state.status === "error" ? (
@@ -1178,6 +1262,7 @@ function ParameterControl({
 function DesignChatInput({
   onSend,
   onCancel,
+  onApplyDirect,
   disabled,
   isStreaming,
   selectedFeature,
@@ -1185,17 +1270,15 @@ function DesignChatInput({
 }: {
   onSend: (text: string) => void;
   onCancel: () => void;
+  onApplyDirect: (text: string, edit: { name: string; value: number | boolean | string }) => Promise<void> | void;
   disabled: boolean;
   isStreaming: boolean;
   selectedFeature: Design["features"][number] | null;
   parameters: Design["parameters"];
 }) {
   const [draft, setDraft] = useState("");
-  const [routeBadge, setRouteBadge] = useState<{
-    label: string;
-    title: string;
-    tone: "free" | "cheap" | "full" | "answer";
-  } | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [routeBadge, setRouteBadge] = useState<DesignEditBadge | null>(null);
 
   useEffect(() => {
     const text = draft.trim();
@@ -1213,6 +1296,17 @@ function DesignChatInput({
       clearTimeout(timer);
     };
   }, [draft, parameters]);
+
+  const handleApplyDirect = async () => {
+    if (!routeBadge?.directEdit || !draft.trim() || disabled || applying) return;
+    setApplying(true);
+    try {
+      await onApplyDirect(draft.trim(), routeBadge.directEdit);
+      setDraft("");
+    } finally {
+      setApplying(false);
+    }
+  };
 
   return (
     <form
@@ -1238,13 +1332,13 @@ function DesignChatInput({
           }
         }}
       />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 11, opacity: 0.55 }}>
           {selectedFeature ? `Target: ${selectedFeature.name}` : "⌘/Ctrl+Enter to send."}
         </span>
         {routeBadge ? (
           <span style={routeBadgeStyle(routeBadge.tone)} title={routeBadge.title}>
-            {routeBadge.label}
+            {routeBadge.label} · {routeBadge.costEstimate}
           </span>
         ) : null}
         {isStreaming ? (
@@ -1252,9 +1346,22 @@ function DesignChatInput({
             Stop
           </button>
         ) : (
-          <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
-            Send
-          </button>
+          <div style={{ display: "flex", gap: 6 }}>
+            {routeBadge?.directEdit ? (
+              <button
+                type="button"
+                onClick={handleApplyDirect}
+                disabled={disabled || applying || !draft.trim()}
+                style={applyDirectButtonStyle}
+                title={`Set ${routeBadge.directEdit.name} = ${routeBadge.directEdit.value} without an LLM call`}
+              >
+                {applying ? "Applying…" : "Apply directly"}
+              </button>
+            ) : null}
+            <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
+              Send
+            </button>
+          </div>
         )}
       </div>
     </form>
@@ -1265,6 +1372,29 @@ type DesignEditBadge = {
   label: string;
   title: string;
   tone: "free" | "cheap" | "full" | "answer";
+  /** Rough per-tone cost shown next to the label. Order-of-magnitude, not exact. */
+  costEstimate: string;
+  /**
+   * Set when the input parses cleanly to a single-parameter mutation.
+   * The Apply-directly button consumes this to skip the LLM round-trip.
+   */
+  directEdit?: { name: string; value: number | boolean | string };
+};
+
+/**
+ * Order-of-magnitude cost per tone. Sourced from observed median per-turn
+ * spend in the eval harness (Sonnet 4.6 with prompt caching). Refresh
+ * quarterly or when we change the model.
+ *  - answer: Claude reads the design, answers in text, no tool calls.
+ *  - free:   direct-apply path bypasses the LLM entirely.
+ *  - cheap:  one macro tool call (mesh ops, parameter mutation via agent).
+ *  - full:   multi-tool agent loop, possibly a rewrite_design.
+ */
+const COST_BY_TONE: Record<DesignEditBadge["tone"], string> = {
+  answer: "~$0.01",
+  free: "$0.00",
+  cheap: "~$0.02",
+  full: "~$0.05",
 };
 
 function classifyDesignEditBadge(
@@ -1283,6 +1413,7 @@ function classifyDesignEditBadge(
       label: "Answer only",
       title: "Likely explanation or inspection; should not rebuild unless the agent needs a check.",
       tone: "answer",
+      costEstimate: COST_BY_TONE.answer,
     };
   }
 
@@ -1296,10 +1427,15 @@ function classifyDesignEditBadge(
     return (` ${normalized} `.includes(` ${name} `) || ` ${normalized} `.includes(` ${spaced} `));
   });
   if (mentionsParam && hasEditVerb && hasNumericIntent) {
+    const directEdit = parseDirectParamEdit(normalized, parameters);
     return {
       label: "Direct param",
-      title: "Likely direct parameter update; no full agent rewrite expected.",
+      title: directEdit
+        ? `Will set ${directEdit.name} to ${directEdit.value}. No agent round-trip.`
+        : "Likely direct parameter update; no full agent rewrite expected.",
       tone: "free",
+      costEstimate: COST_BY_TONE.free,
+      ...(directEdit ? { directEdit } : {}),
     };
   }
 
@@ -1308,6 +1444,7 @@ function classifyDesignEditBadge(
       label: "Tool edit",
       title: "Likely routed to a focused CAD or mesh tool.",
       tone: "cheap",
+      costEstimate: COST_BY_TONE.cheap,
     };
   }
 
@@ -1315,7 +1452,63 @@ function classifyDesignEditBadge(
     label: "Agent edit",
     title: "Likely needs the full design-agent loop.",
     tone: "full",
+    costEstimate: COST_BY_TONE.full,
   };
+}
+
+/**
+ * Try to extract a single-parameter mutation from `normalized` text. We only
+ * commit to a result when the parse is unambiguous; everything else falls back
+ * to the agent path so we never silently apply the wrong value.
+ */
+function parseDirectParamEdit(
+  normalized: string,
+  parameters: Design["parameters"],
+): { name: string; value: number | boolean | string } | null {
+  const paramHits = parameters.filter((p) => {
+    const name = p.name.toLowerCase();
+    const spaced = name.replaceAll("_", " ");
+    return (` ${normalized} `.includes(` ${name} `) || ` ${normalized} `.includes(` ${spaced} `));
+  });
+  if (paramHits.length !== 1) return null;
+  const param = paramHits[0];
+  const current = param.value;
+
+  // Boolean toggles: "set X true / false / on / off / yes / no"
+  if (typeof current === "boolean") {
+    const onMatch = /\b(true|on|yes|enable[d]?)\b/.test(normalized);
+    const offMatch = /\b(false|off|no|disable[d]?)\b/.test(normalized);
+    if (onMatch && !offMatch) return { name: param.name, value: true };
+    if (offMatch && !onMatch) return { name: param.name, value: false };
+    return null;
+  }
+
+  // Relative phrasing first: works without an explicit number.
+  if (/\b(double|twice)\b/.test(normalized) && typeof current === "number") {
+    return { name: param.name, value: roundLikely(current * 2) };
+  }
+  if (/\bhalf\b/.test(normalized) && typeof current === "number") {
+    return { name: param.name, value: roundLikely(current / 2) };
+  }
+
+  // Absolute numeric token. Take the first number near the param mention.
+  const match = normalized.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const num = Number(match[0]);
+  if (!Number.isFinite(num)) return null;
+
+  if (typeof current === "number") {
+    return { name: param.name, value: num };
+  }
+  if (typeof current === "string") {
+    return { name: param.name, value: match[0] };
+  }
+  return null;
+}
+
+function roundLikely(n: number): number {
+  // Match the precision of typical mm parameters (1 decimal). Avoids 30 → 60.0000001.
+  return Math.round(n * 100) / 100;
 }
 
 function paramNumber(design: Design, name: string, fallback: number): number {
@@ -1592,6 +1785,48 @@ const secondaryButtonStyle: React.CSSProperties = {
   color: "rgba(0,0,0,0.78)",
   border: "1px solid rgba(0,0,0,0.12)",
 };
+
+const applyDirectButtonStyle: React.CSSProperties = {
+  ...primaryButtonStyle,
+  background: "rgba(76,175,80,0.18)",
+  color: "rgba(46,125,50,0.95)",
+  border: "1px solid rgba(76,175,80,0.45)",
+};
+
+const slicerHintStyle: React.CSSProperties = {
+  fontSize: 11,
+  lineHeight: 1.4,
+  padding: "8px 10px",
+  background: "rgba(255,193,7,0.10)",
+  border: "1px solid rgba(255,193,7,0.35)",
+  borderRadius: 6,
+  color: "rgba(126,87,0,0.95)",
+};
+
+const orientationHintStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  fontSize: 11,
+  lineHeight: 1.4,
+  padding: "8px 10px",
+  background: "rgba(33,150,243,0.10)",
+  border: "1px solid rgba(33,150,243,0.30)",
+  borderRadius: 6,
+  color: "rgba(13,71,161,0.95)",
+};
+
+const orientationActionStyle = (disabled: boolean): React.CSSProperties => ({
+  alignSelf: "flex-start",
+  padding: "4px 10px",
+  fontSize: 11,
+  fontWeight: 600,
+  borderRadius: 999,
+  border: "1px solid rgba(33,150,243,0.55)",
+  background: disabled ? "rgba(33,150,243,0.18)" : "rgba(33,150,243,0.85)",
+  color: disabled ? "rgba(13,71,161,0.6)" : "white",
+  cursor: disabled ? "not-allowed" : "pointer",
+});
 
 const routeBadgeStyle = (
   tone: "free" | "cheap" | "full" | "answer",

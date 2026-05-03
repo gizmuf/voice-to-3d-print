@@ -28,7 +28,11 @@
     "user_message": "make the angle 75 degrees",
     "expected_tools_called_any": [
       "update_parameter"
-    ]
+    ],
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "knob_more_knurls",
@@ -40,7 +44,11 @@
     "user_message": "give me twice as many knurls",
     "expected_tools_called_any": [
       "update_parameter"
-    ]
+    ],
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "stl_shrink_holes_macro",
@@ -52,7 +60,11 @@
     "expected_tools_called_any": [
       "mesh_modify_holes"
     ],
-    "expected_mesh_hash_changes": true
+    "expected_mesh_hash_changes": true,
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "stl_drill_hole_macro",
@@ -64,7 +76,11 @@
     "expected_tools_called_any": [
       "mesh_subtract_primitive"
     ],
-    "expected_mesh_hash_changes": true
+    "expected_mesh_hash_changes": true,
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "stl_inflate_macro",
@@ -76,7 +92,11 @@
     "expected_tools_called_any": [
       "mesh_offset_surface"
     ],
-    "expected_mesh_hash_changes": true
+    "expected_mesh_hash_changes": true,
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "stl_split_in_half_macro",
@@ -88,7 +108,10 @@
     "expected_tools_called_any": [
       "mesh_split_at_plane"
     ],
-    "expected_mesh_hash_changes": true
+    "expected_mesh_hash_changes": true,
+    "checks": {
+      "buildsSuccessfully": true
+    }
   },
   {
     "name": "stl_mirror_macro",
@@ -100,7 +123,11 @@
     "expected_tools_called_any": [
       "mesh_mirror"
     ],
-    "expected_mesh_hash_changes": true
+    "expected_mesh_hash_changes": true,
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "stl_detect_holes_macro",
@@ -134,7 +161,11 @@
     "user_message": "repair this mesh \u2014 looks like there might be holes in it",
     "expected_tools_called_any": [
       "mesh_repair"
-    ]
+    ],
+    "checks": {
+      "buildsSuccessfully": true,
+      "isWatertight": true
+    }
   },
   {
     "name": "ambiguous_make_it_bigger",

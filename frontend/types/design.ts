@@ -32,12 +32,20 @@ export type ManufacturabilityIssue = {
   process?: "fdm" | "cnc" | "any";
 };
 
+export type OrientationSuggestion = {
+  label: string;
+  euler_deg: [number, number, number];
+  overhang_fraction: number;
+};
+
 export type Manufacturability = {
   process: "fdm" | "cnc";
   status: "safe" | "warn" | "unprintable";
   issues: ManufacturabilityIssue[];
   estimated_volume_mm3?: number | null;
   bounding_box_mm?: [number, number, number] | null;
+  current_overhang_fraction?: number | null;
+  suggested_orientation?: OrientationSuggestion | null;
 };
 
 export type PrintEstimate = {

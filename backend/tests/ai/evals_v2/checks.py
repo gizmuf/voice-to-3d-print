@@ -73,7 +73,14 @@ def _load_stl_mesh(build: dict[str, Any]):
 
 
 def _count_through_holes(mesh) -> int:
-    """Count genus-style through-holes for watertight manifold meshes."""
+    """Count genus-style through-holes for watertight manifold meshes.
+
+    Caveat: this is topological genus, so any handle/loop on the surface
+    contributes — a torus reports 1, a chain link reports the link count, etc.
+    For the flat-plate parts our eval cases cover, genus equals through-hole
+    count and the predicate is trustworthy. Cases that test exotic topology
+    (handles, knots) should not rely on this.
+    """
     if not mesh.is_watertight:
         return 0
     components = mesh.split(only_watertight=False)

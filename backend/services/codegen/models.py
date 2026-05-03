@@ -99,6 +99,18 @@ class ManufacturabilityIssue(BaseModel):
     process: Literal["fdm", "cnc", "any"] = "any"
 
 
+class OrientationSuggestion(BaseModel):
+    """Result of the FDM orientation search.
+
+    Surfaced alongside the overhang issue so the UI can tell the user the part
+    *would* print cleanly if reoriented, instead of just warning.
+    """
+
+    label: str
+    euler_deg: tuple[float, float, float]
+    overhang_fraction: float
+
+
 class ManufacturabilityReport(BaseModel):
     process: Literal["fdm", "cnc"]
     status: Literal["safe", "warn", "unprintable"]
@@ -107,6 +119,8 @@ class ManufacturabilityReport(BaseModel):
     bounding_box_mm: tuple[float, float, float] | None = None
     mesh_hash: str = ""
     duration_ms: int = 0
+    current_overhang_fraction: float | None = None
+    suggested_orientation: OrientationSuggestion | None = None
 
 
 class PrintEstimate(BaseModel):

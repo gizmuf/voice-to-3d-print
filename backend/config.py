@@ -122,6 +122,10 @@ class Settings:
     )
     triposr_texture_resolution: str = os.getenv("TRIPOSR_TEXTURE_RESOLUTION", "")
 
+    revision_keep_last: int = int(os.getenv("PULSAI_REVISION_KEEP_LAST", "20"))
+    history_compact_at: int = int(os.getenv("PULSAI_HISTORY_COMPACT_AT", "30"))
+    admin_token: str = os.getenv("PULSAI_ADMIN_TOKEN", "")
+
     prusaslicer_path: str = _resolve_slicer_path(os.getenv("PRUSASLICER_PATH"))
     prusaslicer_config: str = str(
         _resolve_path(os.getenv("PRUSASLICER_CONFIG"), Path("config.ini"))

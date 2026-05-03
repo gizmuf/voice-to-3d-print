@@ -15,6 +15,7 @@ node_modules/
 
 # Output artifacts
 backend/data/output/
+backend/data/telemetry/
 backend/logs/
 frontend/logs/
 

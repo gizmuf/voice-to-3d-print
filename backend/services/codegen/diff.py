@@ -44,6 +44,11 @@ def revision_diff(design_id: str, revision_id: str) -> dict[str, Any]:
         if fid not in current_features
     ]
 
+    current_locked = {p.name for p in (design.parameters if design else []) if p.locked}
+    parent_locked = {p.name for p in (parent_design.parameters if parent_design else []) if p.locked}
+    locked_added = sorted(current_locked - parent_locked)
+    locked_removed = sorted(parent_locked - current_locked)
+
     return {
         "design_id": design_id,
         "revision_id": revision_id,
@@ -51,6 +56,8 @@ def revision_diff(design_id: str, revision_id: str) -> dict[str, Any]:
         "parameter_changes": parameter_changes,
         "features_added": added,
         "features_removed": removed,
+        "locked_added": locked_added,
+        "locked_removed": locked_removed,
         "duration_ms": build.duration_ms if build else None,
         "mesh_hash": build.mesh_hash if build else None,
         "bounding_box_mm": build.bounding_box_mm if build else None,

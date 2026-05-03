@@ -139,7 +139,22 @@ export function useDesignStream(designId: string | null) {
 
   const cancel = useCallback(() => abortRef.current?.abort(), []);
 
-  return { history, state, latestRevisionId, send, cancel };
+  const appendLocalTurn = useCallback(
+    (userText: string, assistantText: string, revisionId?: string | null) => {
+      const userEntry: ChatTurnEntry = { kind: "user", text: userText };
+      const assistantEntry: ChatTurnEntry = {
+        kind: "assistant",
+        text: assistantText,
+        toolCalls: [],
+        ...(revisionId ? { revisionIdAfter: revisionId } : {}),
+      };
+      setHistory((prev) => [...prev, userEntry, assistantEntry]);
+      if (revisionId) setLatestRevisionId(revisionId);
+    },
+    [],
+  );
+
+  return { history, state, latestRevisionId, send, cancel, appendLocalTurn };
 }
 
 function normalizeError(error: unknown, backendUrl: string): string {

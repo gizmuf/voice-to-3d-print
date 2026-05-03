@@ -16,7 +16,9 @@ from typing import Any
 from anthropic import Anthropic
 
 from config import settings
+from services.ai.compaction import maybe_compact_history
 from services.ai.prompts_v2 import SYSTEM_PROMPT, render_turn_context
+from services.ai.telemetry import record_tool_call
 from services.ai.tools_v2 import DesignContext, TOOL_DEFINITIONS, execute as execute_tool
 from services.codegen.store import (
     get_build,
@@ -127,6 +129,7 @@ def stream_turn(
 
     history = load_conversation(design_id)
     history = _repair_dangling_tool_uses(history)
+    history, _ = maybe_compact_history(history)
     history.append({"role": "user", "content": user_message})
     yield _sse(
         "turn_start",
@@ -139,92 +142,116 @@ def stream_turn(
 
     client = Anthropic(api_key=settings.anthropic_api_key)
     total_in = total_out = cache_read = cache_write = 0
+    persisted = False
 
-    for iteration in range(MAX_TOOL_ITERATIONS):
-        try:
-            response = client.messages.create(
-                model=settings.anthropic_chat_model,
-                max_tokens=settings.anthropic_max_output_tokens,
-                system=_system_blocks(
-                    ctx,
-                    selected_feature_id=selected_feature_id,
-                    selected_feature_label=selected_feature_label,
-                ),
-                tools=TOOL_DEFINITIONS,
-                messages=history,
-            )
-        except Exception as exc:
-            yield _sse("error", {"message": f"Anthropic call failed: {exc}"})
+    def _persist_history() -> None:
+        nonlocal persisted
+        if persisted:
             return
+        try:
+            save_conversation(design_id, _compact_for_persist(history))
+        except Exception:
+            pass
+        persisted = True
 
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            total_in += getattr(usage, "input_tokens", 0) or 0
-            total_out += getattr(usage, "output_tokens", 0) or 0
-            cache_read += getattr(usage, "cache_read_input_tokens", 0) or 0
-            cache_write += getattr(usage, "cache_creation_input_tokens", 0) or 0
+    try:
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            try:
+                response = client.messages.create(
+                    model=settings.anthropic_chat_model,
+                    max_tokens=settings.anthropic_max_output_tokens,
+                    system=_system_blocks(
+                        ctx,
+                        selected_feature_id=selected_feature_id,
+                        selected_feature_label=selected_feature_label,
+                    ),
+                    tools=TOOL_DEFINITIONS,
+                    messages=history,
+                )
+            except Exception as exc:
+                yield _sse("error", {"message": f"Anthropic call failed: {exc}"})
+                return
 
-        assistant_blocks: list[dict[str, Any]] = []
-        tool_uses: list[dict[str, Any]] = []
-        for block in response.content:
-            if block.type == "text":
-                assistant_blocks.append({"type": "text", "text": block.text})
-                yield _sse("assistant_text", {"text": block.text})
-            elif block.type == "tool_use":
-                use = {
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input or {},
-                }
-                assistant_blocks.append(use)
-                tool_uses.append(use)
-            else:
-                assistant_blocks.append({"type": block.type})
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                total_in += getattr(usage, "input_tokens", 0) or 0
+                total_out += getattr(usage, "output_tokens", 0) or 0
+                cache_read += getattr(usage, "cache_read_input_tokens", 0) or 0
+                cache_write += getattr(usage, "cache_creation_input_tokens", 0) or 0
 
-        history.append({"role": "assistant", "content": assistant_blocks})
+            assistant_blocks: list[dict[str, Any]] = []
+            tool_uses: list[dict[str, Any]] = []
+            for block in response.content:
+                if block.type == "text":
+                    assistant_blocks.append({"type": "text", "text": block.text})
+                    yield _sse("assistant_text", {"text": block.text})
+                elif block.type == "tool_use":
+                    use = {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input or {},
+                    }
+                    assistant_blocks.append(use)
+                    tool_uses.append(use)
+                else:
+                    assistant_blocks.append({"type": block.type})
 
-        if response.stop_reason != "tool_use" or not tool_uses:
-            break
+            history.append({"role": "assistant", "content": assistant_blocks})
 
-        tool_results: list[dict[str, Any]] = []
-        for use in tool_uses:
+            if response.stop_reason != "tool_use" or not tool_uses:
+                break
+
+            tool_results: list[dict[str, Any]] = []
+            for use in tool_uses:
+                yield _sse(
+                    "tool_call_start",
+                    {"id": use["id"], "name": use["name"], "input": use["input"]},
+                )
+                tool_started = time.perf_counter()
+                result = execute_tool(use["name"], use["input"], ctx)
+                tool_ms = int((time.perf_counter() - tool_started) * 1000)
+                is_error = bool(result.get("error"))
+                record_tool_call(
+                    tool_name=use["name"],
+                    success=not is_error,
+                    duration_ms=tool_ms,
+                    design_id=design_id,
+                )
+                yield _sse(
+                    "tool_call_end",
+                    {
+                        "id": use["id"],
+                        "name": use["name"],
+                        "result": result,
+                        "is_error": is_error,
+                    },
+                )
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": use["id"],
+                        "content": json.dumps(result),
+                        "is_error": is_error,
+                    }
+                )
+            history.append({"role": "user", "content": tool_results})
+        else:
             yield _sse(
-                "tool_call_start",
-                {"id": use["id"], "name": use["name"], "input": use["input"]},
-            )
-            result = execute_tool(use["name"], use["input"], ctx)
-            is_error = bool(result.get("error"))
-            yield _sse(
-                "tool_call_end",
+                "warning",
                 {
-                    "id": use["id"],
-                    "name": use["name"],
-                    "result": result,
-                    "is_error": is_error,
+                    "message": (
+                        f"Reached max tool iterations ({MAX_TOOL_ITERATIONS}); "
+                        "stopping to avoid runaway loops."
+                    )
                 },
             )
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": use["id"],
-                    "content": json.dumps(result),
-                    "is_error": is_error,
-                }
-            )
-        history.append({"role": "user", "content": tool_results})
-    else:
-        yield _sse(
-            "warning",
-            {
-                "message": (
-                    f"Reached max tool iterations ({MAX_TOOL_ITERATIONS}); "
-                    "stopping to avoid runaway loops."
-                )
-            },
-        )
+    finally:
+        # Persist on every exit path including client abort (GeneratorExit).
+        # The dangling-tool-use repair on the next load patches any in-flight
+        # tool_use blocks left without matching results.
+        _persist_history()
 
-    save_conversation(design_id, _compact_for_persist(history))
     yield _sse(
         "turn_end",
         {

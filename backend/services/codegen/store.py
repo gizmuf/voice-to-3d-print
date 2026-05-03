@@ -141,7 +141,57 @@ def save_build(design_id: str, build: Build) -> Build:
             )
         )
     _sync_to_legacy_workspace(design_id, build)
+    prune_revisions(design_id, keep_last=settings.revision_keep_last)
     return build
+
+
+def prune_revisions(
+    design_id: str,
+    *,
+    keep_last: int,
+    extra_pinned: set[str] | None = None,
+) -> int:
+    """Drop old revision artifact dirs to bound disk usage.
+
+    Always retains: the current head (so the design can re-render) and any
+    ``extra_pinned`` IDs the caller provides. Beyond that we keep the
+    ``keep_last`` most-recent revisions by mtime. We intentionally do not keep
+    the full parent chain: normal revision history is linear, so recursive
+    parent retention would keep every old revision forever.
+    """
+    if keep_last <= 0:
+        return 0
+    revisions_dir = _design_dir(design_id) / "revisions"
+    if not revisions_dir.exists():
+        return 0
+    pinned: set[str] = set(extra_pinned or set())
+    design = get_design_or_none(design_id)
+    if design is not None:
+        pinned.add(design.revision_id)
+
+    entries: list[tuple[str, Path, float]] = []
+    for child in revisions_dir.iterdir():
+        if not child.is_dir():
+            continue
+        bjson = child / "build.json"
+        if not bjson.exists():
+            continue
+        entries.append((child.name, child, bjson.stat().st_mtime))
+    entries.sort(key=lambda e: e[2], reverse=True)
+
+    keep: set[str] = set(pinned)
+    for rev_id, _, _ in entries[:keep_last]:
+        keep.add(rev_id)
+
+    import shutil
+
+    deleted = 0
+    for rev_id, child, _ in entries:
+        if rev_id in keep:
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+        deleted += 1
+    return deleted
 
 
 def _sync_to_legacy_workspace(design_id: str, build: Build) -> None:
@@ -371,6 +421,7 @@ __all__ = [
     "list_revisions",
     "restore_revision",
     "delete_revision",
+    "prune_revisions",
     "update_design_script",
     "load_conversation",
     "save_conversation",

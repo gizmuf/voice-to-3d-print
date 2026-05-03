@@ -295,8 +295,6 @@ function WorkspaceInspectorPanel({
           <ChatPanel
             workspaceId={workspaceId}
             disabled={isBusy}
-            selectedFeatureId={selectedBody?.id ?? null}
-            selectedFeatureLabel={selectedBody?.label ?? null}
           />
         </div>
       ) : null}
