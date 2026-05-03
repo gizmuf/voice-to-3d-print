@@ -775,34 +775,69 @@ export default function DesignStudio() {
           {status ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <span style={statusBadgeStyle(status)}>{status}</span>
-              {issues.map((issue, i) => (
-                <div key={i} style={issueStyle(issue.severity)}>
-                  <strong>{issue.code}</strong>: {issue.message}
-                  {issue.suggestion ? (
-                    <em style={{ display: "block", opacity: 0.7 }}>
-                      → {issue.suggestion}
-                    </em>
-                  ) : null}
-                  {issue.location ? (
+              {issues.map((issue, i) => {
+                const fixDisabled =
+                  stream.state.status === "streaming" || makePrintable.busy;
+                const fixThisIssue = () => {
+                  if (fixDisabled) return;
+                  const loc = issue.location
+                    ? ` at (x=${issue.location[0].toFixed(1)}, y=${issue.location[1].toFixed(1)}, z=${issue.location[2].toFixed(1)})`
+                    : "";
+                  const message =
+                    `Fix this manufacturability issue: ${issue.code} (${issue.severity}) — ${issue.message}${loc}.` +
+                    (issue.suggestion ? ` Suggested approach: ${issue.suggestion}.` : "") +
+                    ` Pick the smallest edit that resolves it (a parameter tweak first, a feature replacement only if needed). After the change, run a build and re-check manufacturability so we can confirm the issue is gone.`;
+                  stream.send(message, {
+                    selectedFeatureId: selectedFeature?.id ?? null,
+                    selectedFeatureLabel: selectedFeature?.name ?? null,
+                  });
+                };
+                return (
+                  <div key={i} style={issueStyle(issue.severity)}>
+                    <strong>{issue.code}</strong>: {issue.message}
+                    {issue.suggestion ? (
+                      <em style={{ display: "block", opacity: 0.7 }}>
+                        → {issue.suggestion}
+                      </em>
+                    ) : null}
                     <div style={issueMetaRowStyle}>
-                      <span>
-                        x {issue.location[0].toFixed(1)} · y {issue.location[1].toFixed(1)} · z{" "}
-                        {issue.location[2].toFixed(1)}
-                      </span>
-                      <button
-                        type="button"
-                        style={issueLocateButtonStyle}
-                        onClick={() => {
-                          setSelectedManufacturabilityIssueIndex(i);
-                          setSelectedFeaturePoint(null);
-                        }}
-                      >
-                        Locate
-                      </button>
+                      {issue.location ? (
+                        <span>
+                          x {issue.location[0].toFixed(1)} · y {issue.location[1].toFixed(1)} · z{" "}
+                          {issue.location[2].toFixed(1)}
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {issue.location ? (
+                          <button
+                            type="button"
+                            style={issueLocateButtonStyle}
+                            onClick={() => {
+                              setSelectedManufacturabilityIssueIndex(i);
+                              setSelectedFeaturePoint(null);
+                            }}
+                          >
+                            Locate
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          style={issueFixButtonStyle(fixDisabled)}
+                          disabled={fixDisabled}
+                          title="Ask Pulsai to fix this issue via chat"
+                          onClick={fixThisIssue}
+                        >
+                          {stream.state.status === "streaming"
+                            ? "Asking…"
+                            : "Fix this"}
+                        </button>
+                      </div>
                     </div>
-                  ) : null}
-                </div>
-              ))}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <span style={{ fontSize: 12, opacity: 0.55 }}>No build yet.</span>
@@ -837,8 +872,11 @@ export default function DesignStudio() {
               }
             }}
           >
-            {makePrintable.busy ? "Exporting…" : "Export for FDM"}
+            {makePrintable.busy ? "Exporting…" : "Export FDM ZIP"}
           </button>
+          <span style={exportHintStyle}>
+            Download only. Use “Fix this” to ask Pulsai to change geometry.
+          </span>
           {makePrintable.summary ? (
             <span style={makePrintableResultStyle(makePrintable.status)}>
               {makePrintable.summary}
@@ -970,6 +1008,7 @@ export default function DesignStudio() {
             disabled={stream.state.status === "streaming"}
             selectedFeature={selectedFeature}
             parameters={design.parameters}
+            onCancel={stream.cancel}
             onSend={(text) =>
               stream.send(text, {
                 selectedFeatureId: selectedFeature?.id ?? null,
@@ -1138,12 +1177,14 @@ function ParameterControl({
 
 function DesignChatInput({
   onSend,
+  onCancel,
   disabled,
   isStreaming,
   selectedFeature,
   parameters,
 }: {
   onSend: (text: string) => void;
+  onCancel: () => void;
   disabled: boolean;
   isStreaming: boolean;
   selectedFeature: Design["features"][number] | null;
@@ -1206,9 +1247,15 @@ function DesignChatInput({
             {routeBadge.label}
           </span>
         ) : null}
-        <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
-          {isStreaming ? "…" : "Send"}
-        </button>
+        {isStreaming ? (
+          <button type="button" onClick={onCancel} style={secondaryButtonStyle}>
+            Stop
+          </button>
+        ) : (
+          <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
+            Send
+          </button>
+        )}
       </div>
     </form>
   );
@@ -1500,6 +1547,12 @@ const makePrintableIssueListStyle: React.CSSProperties = {
   padding: "6px 8px",
 };
 
+const exportHintStyle: React.CSSProperties = {
+  fontSize: 10,
+  lineHeight: 1.35,
+  color: "rgba(0,0,0,0.48)",
+};
+
 const historyStyle: React.CSSProperties = {
   flex: 1,
   display: "flex",
@@ -1531,6 +1584,13 @@ const primaryButtonStyle: React.CSSProperties = {
   cursor: "pointer",
   fontSize: 13,
   fontWeight: 600,
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  ...primaryButtonStyle,
+  background: "rgba(0,0,0,0.08)",
+  color: "rgba(0,0,0,0.78)",
+  border: "1px solid rgba(0,0,0,0.12)",
 };
 
 const routeBadgeStyle = (
@@ -1931,3 +1991,14 @@ const issueLocateButtonStyle: React.CSSProperties = {
   fontWeight: 700,
   cursor: "pointer",
 };
+
+const issueFixButtonStyle = (disabled: boolean): React.CSSProperties => ({
+  border: "none",
+  background: disabled ? "rgba(33,150,243,0.35)" : "rgba(33,150,243,0.85)",
+  color: "white",
+  borderRadius: 999,
+  padding: "2px 10px",
+  fontSize: 10,
+  fontWeight: 700,
+  cursor: disabled ? "wait" : "pointer",
+});
