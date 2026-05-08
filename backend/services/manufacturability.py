@@ -101,9 +101,12 @@ def _check_overhangs(mesh: trimesh.Trimesh, issues: list[Issue]) -> None:
         return
     cos_threshold = math.cos(math.radians(_OVERHANG_ANGLE_DEG))
     normals = mesh.face_normals
+    z_min = float(mesh.bounds[0][2])
+    centers = mesh.triangles_center
     # Faces pointing downward (normal dotted with -Z > cos(45)) are overhang candidates.
     down = -normals[:, 2]
-    overhanging = down > cos_threshold
+    supported_by_bed = centers[:, 2] <= z_min + 0.25
+    overhanging = (down > cos_threshold) & ~supported_by_bed
     if not bool(np.any(overhanging)):
         return
     overhang_area = float(mesh.area_faces[overhanging].sum())

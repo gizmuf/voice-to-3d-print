@@ -53,8 +53,13 @@ def compute_overhang_fraction(mesh, *, max_overhang_deg: float = 45.0) -> float:
         return 0.0
     cos_threshold = math.cos(math.radians(90.0 - max_overhang_deg))
     normals = mesh.face_normals
+    z_min = float(mesh.bounds[0][2])
+    centers = mesh.triangles_center
     down = -normals[:, 2]
-    overhanging = down > cos_threshold
+    # The face touching the build plate is a supported first layer, not an
+    # overhang. Ignore downward faces whose centroid sits on the bed plane.
+    supported_by_bed = centers[:, 2] <= z_min + 0.25
+    overhanging = (down > cos_threshold) & ~supported_by_bed
     if not bool(np.any(overhanging)):
         return 0.0
     overhang_area = float(mesh.area_faces[overhanging].sum())

@@ -546,8 +546,13 @@ def _fdm_checks(
     cos_clean_threshold = math.cos(math.radians(90.0 - profile.clean_overhang_deg))
 
     normals = mesh.face_normals
+    z_min = float(mesh.bounds[0][2])
+    centers = mesh.triangles_center
     down = -normals[:, 2]
-    overhanging = down > cos_threshold
+    # The bottom face is supported by the build plate. Counting it as a
+    # steep overhang made simple cups/boxes look suspiciously risky.
+    supported_by_bed = centers[:, 2] <= z_min + 0.25
+    overhanging = (down > cos_threshold) & ~supported_by_bed
     if bool(np.any(overhanging)):
         overhang_area = float(mesh.area_faces[overhanging].sum())
         total_area = float(mesh.area_faces.sum()) or 1.0
@@ -556,7 +561,7 @@ def _fdm_checks(
         # between the clean angle and the unsupported angle print fine on
         # this printer's profile. Treat them as informational, not as
         # printability defects.
-        steeper_than_clean = down > cos_clean_threshold
+        steeper_than_clean = (down > cos_clean_threshold) & ~supported_by_bed
         steeper_area = float(mesh.area_faces[steeper_than_clean].sum())
         steeper_fraction = steeper_area / total_area
         if fraction >= 0.02:
