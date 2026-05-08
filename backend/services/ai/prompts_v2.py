@@ -124,6 +124,14 @@ distribution means varying angle at one Z.
 extrusion is added to the active BuildPart.
 - Final shape MUST end with `result = part.part` (or `result = <Compound>`).
 
+## Imported CAD files
+
+If the user wants an editable handoff from a designer or another CAD package,
+prefer STEP/STP. STEP carries B-rep solids and topology, so the imported part
+can be transformed and augmented with build123d boolean cuts/additions. STL is
+only triangles; treat it as a final print mesh unless reconstruction recognized
+specific editable features.
+
 ## Editing an imported mesh (STL upload)
 
 When the user starts from an uploaded STL, the runner pre-loads it into the

@@ -190,18 +190,31 @@ Every workspace ships with a backend-enforced `EditabilityAssessment`
 
 - **editable** — full parametric tree, all tools available.
 - **partially_editable** — recognized features editable, opaque parts move with the model.
-- **reference_only** — STEP imports and unrecognized STLs; export is `as_is`, no geometry edits.
+- **reference_only** — unrecognized imports; export is `as_is`, no geometry edits.
 - **locked_unsafe** — manufacturability flagged the model invalid; export blocked until repair.
 
 The same assessment populates the `EditabilityBadge` shown next to the model
 name in the inspector.
 
+### Upload format guidance
+
+For editable CAD handoff, ask designers for **STEP/STP**. STEP preserves
+solid/B-rep topology, so Pulsai can load it as `imported_part` and apply
+build123d transforms, boolean cuts, mounting holes, and additive features.
+Use **STL** for final print meshes only; STL is triangles, so edits are limited
+to reconstruction, mesh booleans, repair, and reference workflows.
+
+The preferred endpoint is `POST /design/import-cad`. The older
+`POST /design/import-stl` route remains as a backward-compatible alias.
+
 ### Printer profiles
 
-Phase 1 ships one profile, `prusa_mk4_default` (mirrors prior hardcoded
-behavior). Add new ones by extending `backend/services/printer_profiles.py`
-and dropping a PrusaSlicer config file into `PRUSASLICER_CONFIG`. Phase 2 will
-add Bambu X1, Ender 3, and Prusa MINI as drop-in additions.
+The studio ships a curated FDM profile registry in
+`backend/services/printer_profiles.py` covering common Prusa, Bambu, Voron,
+Creality, Elegoo, Anycubic, and generic 0.4mm printers. Profiles drive bed-fit,
+overhang messaging, and slicing defaults. Add new curated profiles there; user
+custom/imported profiles should stay data-driven rather than hardcoded into UI
+components.
 
 ### ZIP export bundle
 

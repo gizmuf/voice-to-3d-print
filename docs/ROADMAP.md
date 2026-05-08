@@ -32,7 +32,7 @@ The core engine works end-to-end:
 - 9-tool agent loop (Claude Sonnet 4.6) with prompt caching.
 - Three editing primitives: parameter mutation, surgical feature replacement, full rewrite.
 - One macro tool (`mesh_modify_holes`) that proves the cost-cutting pattern (5× cheaper, 5× faster than letting Claude write the trimesh code).
-- Imported STL flow (`/design/import-stl`) — upload, edit, export.
+- STEP-first CAD import (`/design/import-cad`) — STEP/STP for editable B-rep handoff, STL as mesh fallback.
 - Bridge from legacy `/?workspace=` URLs into the powerful engine without breaking bookmarks.
 - Inline parameter sliders + numeric inputs (no LLM call for tweaks).
 - Per-turn cost transparency in chat (`$0.04 · 5,667 in / 439 out · rev abc12345`).
@@ -259,12 +259,12 @@ Real STEP files vary in topology and naming; full B-rep round-trip editing is a 
 The auto-detected tier is shown in the editability badge. Most STEP files land at "augment"; that's still useful.
 
 **Files:**
-- `backend/app.py` — extend `/design/import-stl` to accept `.step` / `.stp` (or new endpoint)
+- `backend/app.py` — preferred `/design/import-cad` endpoint, with `/design/import-stl` kept as a compatibility alias
 - `backend/services/codegen/templates/__init__.py` — add `IMPORTED_STEP` starter script (uses `imported_part` instead of `imported_mesh`)
 - `backend/services/codegen/runner/host.py` — pre-load STEP into namespace
 - `frontend/components/Design/DesignStudio.tsx` — accept `.step` / `.stp` in the file input
 
-UX: same Import STL flow but the file picker accepts more types. The seed script uses build123d's full B-rep API on the imported part, so booleans, fillets, chamfers all "just work" — much better than mesh-level ops.
+UX: STEP/STP is the recommended upload for editable CAD handoff. STL remains accepted, but the UI labels it as a final triangle mesh with limited reconstruction / mesh-boolean edits.
 
 **Success:** real CAD users from Fusion/SolidWorks can drop their STEP file in and edit it.
 
@@ -776,7 +776,7 @@ Single autonomous session. What landed:
 - **Phase 1.3** — `LIVE` toggle in the parameter header; debounced 250 ms re-renders on slider drag when on, on-commit only when off.
 - **Phase 1.4** — Print cost / time estimator: parses `; estimated printing time` and `; filament used [g]` from PrusaSlicer headers; configurable `FILAMENT_PRICE_USD_PER_G` env var (default $0.025/g); inspector panel shows weight / time / cost in a 3-column grid.
 - **Phase 1.5** — v2 eval suite at `tests/ai/evals_v2/` with 12 cases covering macro routing, parametric edits, ambiguity-clarifying behavior. Skip-if-no-API-key.
-- **Phase 2.1** — STEP import (`.step`/`.stp`): runner pre-loads via `build123d.import_step` as `imported_part`; new `IMPORTED_STEP` seeder (build123d ops, not trimesh); same upload endpoint, same UX. Honest framing: transform/augment is supported, full B-rep feature editing is not promised.
+- **Phase 2.1** — STEP import (`.step`/`.stp`): runner pre-loads via `build123d.import_step` as `imported_part`; new `IMPORTED_STEP` seeder (build123d ops, not trimesh); preferred `/design/import-cad` upload endpoint with `/design/import-stl` as a compatibility alias. Honest framing: transform/augment is supported, full B-rep feature editing is not promised.
 - **Phase 2.2** — Multi-process export presets (`POST /design/{id}/export?preset=fdm|cnc|docs|all`). CNC bundle includes auto-generated `setup_notes.json` with bbox, recommended stock, supported features, limitations, parameters-at-export. Frontend "Export ⌄" picker replaces the per-format buttons.
 - **Phase 2.4** — Mini-gallery: 5 flagship cards on the empty state ("Wall hook · Phone stand · Cylindrical knob · Right-angle bracket · Electronics enclosure") via `/design/flagship/fork`. Closes the makers-vs-pros sequencing tension.
 - **Phase 3.5** — Mobile-responsive: three columns collapse to one stack on <900 px viewports via injected `<style>` block.

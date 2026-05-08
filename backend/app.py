@@ -1869,6 +1869,7 @@ class DesignImportSTLResponse(BaseModel):
     initial_build: dict | None
 
 
+@app.post("/design/import-cad", response_model=DesignImportSTLResponse)
 @app.post("/design/import-stl", response_model=DesignImportSTLResponse)
 async def design_import_stl_endpoint(
     model: UploadFile = File(...),
@@ -1880,8 +1881,8 @@ async def design_import_stl_endpoint(
     - ``.stl`` → loaded as ``imported_mesh`` (trimesh.Trimesh) for mesh-level ops.
     - ``.step`` / ``.stp`` → loaded as ``imported_part`` (build123d Compound) for B-rep ops.
 
-    The endpoint name is kept as ``import-stl`` for backward compatibility;
-    both file types are accepted.
+    ``/design/import-cad`` is the preferred route. ``/design/import-stl`` is
+    kept as a compatibility alias for older clients.
     """
     filename = (model.filename or "imported.stl").strip() or "imported.stl"
     lower = filename.lower()

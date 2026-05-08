@@ -141,7 +141,7 @@ export default function ExistingModelPanel({
   const [modeMessage, setModeMessage] = useState<string | null>(null);
   const [lastImportedName, setLastImportedName] = useState<string | null>(null);
 
-  const acceptedLabel = useMemo(() => ".stl, .step, .stp", []);
+  const acceptedLabel = useMemo(() => ".step, .stp, .stl", []);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -259,9 +259,9 @@ export default function ExistingModelPanel({
     <section className="panel">
       <div className="panel-header">
         <p className="eyebrow">Import Model</p>
-        <h2>Import STEP or STL into the shared workspace shell</h2>
+        <h2>Import editable CAD</h2>
         <p className="panel-subtitle">
-          STEP is the preferred exchange format. STL is limited to reconstruction, reference, or locked modes.
+          Ask designers for STEP/STP. STL is a final triangle mesh, so editing is limited to reconstruction, reference, or locked modes.
         </p>
       </div>
 

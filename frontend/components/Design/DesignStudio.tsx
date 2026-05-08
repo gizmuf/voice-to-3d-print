@@ -235,7 +235,7 @@ export default function DesignStudio() {
       })
       .catch(() => undefined)
       .finally(() => setCreating(false));
-    // Run once on mount; subsequent changes go through onCreate / onImportSTL.
+    // Run once on mount; subsequent changes go through onCreate / onImportCAD.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -359,7 +359,7 @@ export default function DesignStudio() {
     [backendUrl, process],
   );
 
-  const onImportSTL = useCallback(
+  const onImportCAD = useCallback(
     async (file: File) => {
       setCreating(true);
       setCreateError(null);
@@ -368,7 +368,7 @@ export default function DesignStudio() {
         fd.append("model", file);
         fd.append("process", process);
         if (file.name) fd.append("name", file.name);
-        const res = await fetch(`${backendUrl}/design/import-stl`, {
+        const res = await fetch(`${backendUrl}/design/import-cad`, {
           method: "POST",
           body: fd,
         });
@@ -399,7 +399,7 @@ export default function DesignStudio() {
         });
       } catch (error) {
         setCreateError(
-          error instanceof Error ? error.message : "Failed to import STL.",
+          error instanceof Error ? error.message : "Failed to import CAD file.",
         );
       } finally {
         setCreating(false);
@@ -540,19 +540,19 @@ export default function DesignStudio() {
               border: "1px dashed rgba(33,150,243,0.45)",
             }}
           >
-            <strong style={{ fontSize: 13 }}>Or import an existing CAD file</strong>
+            <strong style={{ fontSize: 13 }}>Or import an editable CAD file</strong>
             <span style={{ fontSize: 12, opacity: 0.7 }}>
-              <code>.stl</code> for mesh edits, <code>.step</code>/<code>.stp</code> for B-rep parts. Edit by chat — transform, boolean cuts, mounting holes, etc.
+              Ask designers for <code>.step</code>/<code>.stp</code>. STL is a final print mesh, so edits are limited to reconstruction or mesh booleans.
             </span>
             <label style={{ ...chipButtonStyle, marginLeft: "auto", cursor: creating ? "wait" : "pointer" }}>
               {creating ? "Importing…" : "Choose file"}
               <input
                 type="file"
-                accept=".stl,.step,.stp,application/sla,model/stl,application/STEP,application/x-step"
+                accept=".step,.stp,.stl,application/STEP,application/x-step,application/sla,model/stl"
                 disabled={creating}
                 onChange={(e) => {
                   const file = e.target.files?.[0];
-                  if (file) onImportSTL(file);
+                  if (file) onImportCAD(file);
                   e.target.value = "";
                 }}
                 style={{ display: "none" }}
