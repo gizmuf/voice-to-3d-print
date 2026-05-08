@@ -1,7 +1,10 @@
 # Ignore virtualenv and local artifacts
 .venv/
 __pycache__/
+.pytest_cache/
+.uvicorn.log
 data/output/
 logs/
 .env
 .env.*
+cloudrun.env.yaml
