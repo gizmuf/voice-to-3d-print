@@ -202,6 +202,18 @@ _PROFILES_LIST: list[PrinterProfile] = [
         notes="Enclosed CoreXY; close to X1C for PLA/PETG printability.",
     ),
     _profile(
+        "bambu_h2s",
+        label="Bambu Lab H2S",
+        vendor="Bambu Lab",
+        model="H2S",
+        bed=(340.0, 320.0, 340.0),
+        max_overhang=60.0,
+        clean_overhang=65.0,
+        bridge=10.0,
+        auto_tree=True,
+        notes="Large-format single-nozzle Bambu CoreXY; conservative PLA defaults.",
+    ),
+    _profile(
         "bambu_a1",
         label="Bambu Lab A1",
         vendor="Bambu Lab",

@@ -221,7 +221,9 @@ The studio ships a curated FDM profile registry in
 Creality, Elegoo, Anycubic, and generic 0.4mm printers. Profiles drive bed-fit,
 overhang messaging, and slicing defaults. Add new curated profiles there; user
 custom/imported profiles should stay data-driven rather than hardcoded into UI
-components.
+components. If a user's exact printer is missing, pick the closest bed/nozzle
+match or the Generic 0.4mm FDM profile; this changes printability estimates and
+slicer defaults, not the CAD geometry itself.
 
 ### ZIP export bundle
 

@@ -107,6 +107,9 @@ that order. Each step up costs ~3× more tokens.
 - `BuildPart()` / `BuildSketch()` are context managers. Inside them, calls \
 to shape primitives (Box, Cylinder, Sphere, RegularPolygon, Slot…) accumulate.
 - `Mode.SUBTRACT` cuts; `Mode.ADD` is the default; `Mode.INTERSECT` intersects.
+- When adding a feature with `append_feature`, do not assign `result` inside \
+the block. Build the updated geometry and assign its BuildPart context to \
+`part`; the tool keeps the one final `result = part.part` line coherent.
 - Locations: `with Locations((x, y, z)): ...` places shapes at points; \
 `PolarLocations(radius, count)` distributes around a circle; \
 `GridLocations(x_spacing, y_spacing, x_count, y_count)` rectangular grid; \

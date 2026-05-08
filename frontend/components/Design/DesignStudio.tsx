@@ -726,6 +726,9 @@ export default function DesignStudio() {
                   </option>
                 ))}
               </select>
+              <span style={printerPickerHintStyle}>
+                Missing yours? Use the closest bed/nozzle match or Generic 0.4mm.
+              </span>
             </label>
           ) : null}
           <button type="button" style={backButtonStyle} onClick={returnToStart}>
@@ -1957,6 +1960,13 @@ const printerSelectStyle: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 600,
   cursor: "pointer",
+  maxWidth: 240,
+};
+
+const printerPickerHintStyle: React.CSSProperties = {
+  color: "rgba(0,0,0,0.55)",
+  fontSize: 10,
+  lineHeight: 1.2,
   maxWidth: 240,
 };
 

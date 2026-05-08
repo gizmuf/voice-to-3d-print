@@ -102,6 +102,38 @@ def test_audit_rejects_assigned_primitive_inside_buildpart() -> None:
     assert any("auto-adds geometry" in error for error in result.errors)
 
 
+def test_audit_rejects_duplicate_result_assignments() -> None:
+    result = audit_script(
+        """
+from build123d import *
+with BuildPart() as part:
+    Box(10, 10, 10)
+result = part.part
+with BuildPart() as other:
+    Box(4, 4, 4)
+result = other.part
+"""
+    )
+
+    assert not result.ok
+    assert any("exactly one top-level `result = ...`" in error for error in result.errors)
+
+
+def test_audit_rejects_result_before_later_executable_code() -> None:
+    result = audit_script(
+        """
+from build123d import *
+with BuildPart() as part:
+    Box(10, 10, 10)
+result = part.part
+extra = 1
+"""
+    )
+
+    assert not result.ok
+    assert any("must be the final executable statement" in error for error in result.errors)
+
+
 def test_cup_side_hole_ring_stays_single_body_at_75_percent_height(tmp_path: Path) -> None:
     result = audit_then_run(
         script=SAFE_CUP_RING_SCRIPT,

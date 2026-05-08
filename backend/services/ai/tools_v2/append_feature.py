@@ -17,7 +17,10 @@ class AppendFeatureInput(BaseModel):
     code: str = Field(
         description=(
             "build123d code for the new block. Do NOT include the "
-            "`# @feature:` and `# @end` markers — the engine wraps automatically."
+            "`# @feature:` and `# @end` markers — the engine wraps automatically. "
+            "Do not assign `result` here; assign the updated BuildPart context to "
+            "`part`, and the tool will keep the single final `result = part.part` "
+            "export line coherent."
         )
     )
     rationale: str = Field(max_length=300, description="One sentence why.")
@@ -49,6 +52,15 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
             )
         }
 
+    if any(line.lstrip().startswith("result") for line in params.code.splitlines()):
+        return {
+            "error": (
+                "append_feature code must not assign `result`. Build the updated "
+                "geometry and assign it to `part`; the tool owns the single final "
+                "`result = part.part` line so stale exports cannot override edits."
+            )
+        }
+
     block = (
         f"\n# @feature: {params.name}\n"
         f"{params.code.rstrip()}\n"
@@ -64,6 +76,9 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         if lines[i].strip().startswith("result"):
             insert_idx = i
             break
+    assigns_part = any(line.lstrip().startswith("part =") for line in params.code.splitlines())
+    if insert_idx < len(lines) and assigns_part:
+        lines[insert_idx] = "result = part.part"
     new_script = "\n".join(lines[:insert_idx] + [block] + lines[insert_idx:])
 
     overrides = {p.name: p.value for p in ctx.design.parameters}

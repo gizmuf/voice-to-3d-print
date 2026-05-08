@@ -198,6 +198,18 @@ def _contains_build123d_primitive_call(node: ast.AST) -> bool:
     return False
 
 
+def _top_level_result_assignments(tree: ast.Module) -> list[ast.Assign | ast.AnnAssign]:
+    assignments: list[ast.Assign | ast.AnnAssign] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == "result" for target in node.targets):
+                assignments.append(node)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "result":
+                assignments.append(node)
+    return assignments
+
+
 def audit_script(source: str) -> AuditResult:
     """Parse and audit a script. Returns ok=False on any violation."""
     errors: list[str] = []
@@ -234,6 +246,22 @@ def audit_script(source: str) -> AuditResult:
     builder_audit = _Build123dBuilderAudit()
     builder_audit.visit(tree)
     errors.extend(builder_audit.errors)
+
+    result_assignments = _top_level_result_assignments(tree)
+    if len(result_assignments) != 1:
+        lines = [str(getattr(node, "lineno", "?")) for node in result_assignments]
+        errors.append(
+            "script must have exactly one top-level `result = ...` assignment "
+            f"as the final executable statement; found {len(result_assignments)}"
+            + (f" at lines {', '.join(lines)}" if lines else "")
+            + ". Use `part = ...` inside feature blocks and let the final result "
+            "line export that part."
+        )
+    elif tree.body and tree.body[-1] is not result_assignments[0]:
+        errors.append(
+            "the top-level `result = ...` assignment must be the final executable "
+            "statement so stale result lines cannot override later feature edits."
+        )
 
     return AuditResult(ok=not errors, errors=errors)
 
