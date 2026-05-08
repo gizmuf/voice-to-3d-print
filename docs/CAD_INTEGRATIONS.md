@@ -26,13 +26,24 @@ Onshape is cloud-native, so it matches a hosted web app. A user can authorize
 Pulsai, select a document, and let the backend export a Part Studio as STEP.
 No local desktop CAD install is required.
 
-Phase 1 scope:
+Implemented first bridge:
 
-- Add `ONSHAPE_CLIENT_ID`, `ONSHAPE_CLIENT_SECRET`, and callback URL config.
-- Add OAuth connect/disconnect flow.
-- List recent documents and Part Studios.
-- Import selected Part Studio as STEP via the existing `/design/import-cad`
-  pipeline.
+- Backend config supports `ONSHAPE_ACCESS_KEY` / `ONSHAPE_SECRET_KEY` for
+  server-side imports and OAuth env vars for the later account-scoped flow.
+- `GET /integrations/onshape/status` reports whether the bridge is configured.
+- `GET /integrations/onshape/documents` and `/elements` expose authenticated
+  document/element discovery.
+- `POST /integrations/onshape/import-step` accepts a pasted Onshape URL or
+  explicit document/workspace/element IDs, exports STEP through Onshape, then
+  imports the result through Pulsai's existing `/design/import-cad` path.
+- Design Studio shows a simple Onshape URL import panel when the bridge is
+  available.
+
+Remaining Phase 1 scope:
+
+- Persist OAuth tokens per Pulsai user once accounts exist.
+- Connect/disconnect UX for OAuth users.
+- Rich document picker instead of URL paste.
 - Store only document/workspace/version/element IDs plus import metadata.
 
 Out of scope for Phase 1:

@@ -54,6 +54,7 @@ Open http://localhost:3000
 - **Deepgram STT (optional):** Set `DEEPGRAM_API_KEY` to enable server transcription from recorded audio.
 - **Model library option:** Add GLB links to `backend/data/model_library.json` for local catalog search.
 - **Sketchfab search (optional):** Set `SKETCHFAB_API_TOKEN` to search downloadable models and retrieve GLB links.
+- **Onshape import (optional):** Set `ONSHAPE_ACCESS_KEY` + `ONSHAPE_SECRET_KEY` for server-side STEP import from pasted Onshape Part Studio / Assembly URLs. OAuth config is scaffolded for the public multi-user version.
 - **Image to model:** `/generate-image` supports Meshy, Tripo, Trellis2, and TripoSR (set `provider` query param).
 - **Trellis2 API:** Set `TRELLIS2_API_URL` plus `TRELLIS2_IMAGE_ENDPOINT` to enable image-to-3D via a Trellis2 GPU service. Text-to-3D requires a custom `TRELLIS2_TEXT_ENDPOINT`.
 - **TripoSR local:** Set `TRIPOSR_ROOT` (path to the TripoSR repo) and optionally `TRIPOSR_CACHE_DIR` (e.g. an external drive). TripoSR is image-to-3D only and runs on CPU if no CUDA GPU is present.
@@ -88,6 +89,8 @@ Open http://localhost:3000
 **Common:**
 - `GET /artifacts/...` → static artifact serving
 - `GET /printer-profiles` → list available printer profiles
+- `GET /integrations/onshape/status` → check Onshape config
+- `POST /integrations/onshape/import-step` → export STEP from an Onshape Part Studio / Assembly URL and import it as a Pulsai design
 
 ## The Pulsai Design Studio (powerful)
 

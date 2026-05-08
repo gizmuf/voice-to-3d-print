@@ -29,6 +29,16 @@ export default function DesignStudio() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [onshapeStatus, setOnshapeStatus] = useState<{
+    configured: boolean;
+    api_key_configured: boolean;
+    oauth_configured: boolean;
+    mode: string;
+  } | null>(null);
+  const [onshapeUrl, setOnshapeUrl] = useState("");
+  const [onshapeElementKind, setOnshapeElementKind] = useState<"partstudio" | "assembly">("partstudio");
+  const [onshapeImporting, setOnshapeImporting] = useState(false);
+  const [onshapeError, setOnshapeError] = useState<string | null>(null);
   const [process, setProcess] = useState<"fdm" | "cnc" | "either">("fdm");
   const reloadAfterRef = useRef<string | null>(null);
   // After /design/create returns, we may want Claude to actually *shape* the
@@ -206,6 +216,15 @@ export default function DesignStudio() {
       .then((res) => (res.ok ? res.json() : null))
       .then((payload) => {
         if (payload?.templates) setTemplates(payload.templates);
+      })
+      .catch(() => undefined);
+  }, [backendUrl]);
+
+  useEffect(() => {
+    fetch(`${backendUrl}/integrations/onshape/status`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (payload) setOnshapeStatus(payload);
       })
       .catch(() => undefined);
   }, [backendUrl]);
@@ -408,6 +427,56 @@ export default function DesignStudio() {
     [backendUrl, process],
   );
 
+  const onImportOnshape = useCallback(async () => {
+    const url = onshapeUrl.trim();
+    if (!url) {
+      setOnshapeError("Paste an Onshape Part Studio or Assembly URL first.");
+      return;
+    }
+    setOnshapeImporting(true);
+    setCreateError(null);
+    setOnshapeError(null);
+    try {
+      const res = await fetch(`${backendUrl}/integrations/onshape/import-step`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url,
+          element_kind: onshapeElementKind,
+          process,
+        }),
+      });
+      if (!res.ok) {
+        let detail = `Onshape import failed: ${res.status}`;
+        try {
+          const payload = await res.json();
+          detail = typeof payload?.detail === "string" ? payload.detail : detail;
+        } catch {
+          // keep
+        }
+        throw new Error(detail);
+      }
+      const payload = await res.json();
+      setDesign({
+        design_id: payload.design_id,
+        revision_id: payload.revision_id,
+        name: payload.name,
+        process,
+        script: payload.script,
+        parameters: payload.parameters ?? [],
+        features: payload.features ?? [],
+        latest_build: payload.initial_build ?? null,
+      });
+      setOnshapeUrl("");
+    } catch (error) {
+      setOnshapeError(
+        error instanceof Error ? error.message : "Failed to import from Onshape.",
+      );
+    } finally {
+      setOnshapeImporting(false);
+    }
+  }, [backendUrl, onshapeElementKind, onshapeUrl, process]);
+
   const buildArtifactUrl = useMemo(() => {
     const glb = design?.latest_build?.artifacts?.glb as
       | { url?: string }
@@ -527,6 +596,66 @@ export default function DesignStudio() {
                 {p.label}
               </button>
             ))}
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              padding: "10px 12px",
+              borderRadius: 10,
+              background: "rgba(43,140,122,0.08)",
+              border: "1px dashed rgba(43,140,122,0.35)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+              <strong style={{ fontSize: 13 }}>Import from Onshape</strong>
+              <span style={{ fontSize: 11, opacity: 0.65 }}>
+                {onshapeStatus?.configured
+                  ? `Configured: ${onshapeStatus.mode}`
+                  : "Backend needs Onshape API keys or OAuth config"}
+              </span>
+            </div>
+            <span style={{ fontSize: 12, opacity: 0.7 }}>
+              Paste a Part Studio or Assembly URL. Pulsai exports STEP from Onshape, then imports it as editable CAD reference.
+            </span>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8, alignItems: "center" }}>
+              <input
+                value={onshapeUrl}
+                onChange={(e) => setOnshapeUrl(e.target.value)}
+                placeholder="https://cad.onshape.com/documents/d/.../w/.../e/..."
+                style={onshapeInputStyle}
+                disabled={onshapeImporting || creating}
+              />
+              <select
+                value={onshapeElementKind}
+                onChange={(e) => setOnshapeElementKind(e.target.value as typeof onshapeElementKind)}
+                style={onshapeInputStyle}
+                disabled={onshapeImporting || creating}
+              >
+                <option value="partstudio">Part Studio</option>
+                <option value="assembly">Assembly</option>
+              </select>
+              <button
+                type="button"
+                onClick={onImportOnshape}
+                disabled={
+                  onshapeImporting ||
+                  creating ||
+                  !onshapeUrl.trim() ||
+                  onshapeStatus?.configured === false
+                }
+                style={primaryButtonStyle}
+              >
+                {onshapeImporting ? "Importing…" : "Import"}
+              </button>
+            </div>
+            {onshapeError ? (
+              <p style={{ color: "rgba(244,67,54,0.95)", fontSize: 12, margin: 0 }}>
+                {onshapeError}
+              </p>
+            ) : null}
           </div>
 
           <div
@@ -1828,6 +1957,15 @@ const historyStyle: React.CSSProperties = {
   overflowY: "auto",
   padding: 4,
   minHeight: 200,
+};
+
+const onshapeInputStyle: React.CSSProperties = {
+  border: "1px solid rgba(0,0,0,0.12)",
+  borderRadius: 8,
+  padding: "8px 10px",
+  fontSize: 13,
+  fontFamily: "inherit",
+  background: "rgba(255,255,255,0.92)",
 };
 
 const textareaStyle: React.CSSProperties = {

@@ -9,7 +9,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -76,6 +76,15 @@ from services.job_store import (
     upload_artifact,
 )
 from services.library import resolve_library_item, search_library
+from services.integrations.onshape import (
+    OnshapeClient,
+    OnshapeError,
+    OnshapeLocation,
+    exchange_oauth_code,
+    integration_status as onshape_integration_status,
+    make_oauth_authorization_url,
+    parse_onshape_url,
+)
 from services.model_editing import (
     analyze_model,
     apply_edit,
@@ -1836,7 +1845,7 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
             continue
     sandbox_result.payload["artifacts"] = relocated_artifacts
 
-    build = build_from_sandbox_result(design, sandbox_result, process="fdm")
+    build = build_from_sandbox_result(design, sandbox_result, process=request.process)
     save_build(design.id, build)
 
     editable_model = design_to_editable_model(design, build)
@@ -1869,22 +1878,14 @@ class DesignImportSTLResponse(BaseModel):
     initial_build: dict | None
 
 
-@app.post("/design/import-cad", response_model=DesignImportSTLResponse)
-@app.post("/design/import-stl", response_model=DesignImportSTLResponse)
-async def design_import_stl_endpoint(
-    model: UploadFile = File(...),
-    name: str | None = Form(None),
-    process: str = Form("fdm"),
+def _import_cad_bytes_as_design(
+    *,
+    content: bytes,
+    filename: str,
+    name: str | None = None,
+    process: str = "fdm",
+    source_metadata: dict | None = None,
 ) -> DesignImportSTLResponse:
-    """Upload an STL or STEP file and seed an editable design.
-
-    - ``.stl`` → loaded as ``imported_mesh`` (trimesh.Trimesh) for mesh-level ops.
-    - ``.step`` / ``.stp`` → loaded as ``imported_part`` (build123d Compound) for B-rep ops.
-
-    ``/design/import-cad`` is the preferred route. ``/design/import-stl`` is
-    kept as a compatibility alias for older clients.
-    """
-    filename = (model.filename or "imported.stl").strip() or "imported.stl"
     lower = filename.lower()
     if lower.endswith((".step", ".stp")):
         ext = ".step"
@@ -1899,12 +1900,11 @@ async def design_import_stl_endpoint(
             status_code=400,
             detail="Only .stl, .step, and .stp files are supported here.",
         )
-
-    content = await model.read()
     if not content:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        raise HTTPException(status_code=400, detail="Imported file is empty.")
 
     from services.codegen.store import new_design_id
+
     design_id = new_design_id()
     persistent = settings.output_dir / "designs" / design_id
     persistent.mkdir(parents=True, exist_ok=True)
@@ -1923,7 +1923,7 @@ async def design_import_stl_endpoint(
         raise HTTPException(
             status_code=500,
             detail={
-                "message": "STL seed build failed.",
+                "message": "CAD import seed build failed.",
                 "error": sandbox_result.payload.get("error"),
                 "traceback": sandbox_result.payload.get("traceback"),
             },
@@ -1936,25 +1936,23 @@ async def design_import_stl_endpoint(
         created_by="import",
     )
 
+    metadata = {
+        "template_id": template_id,
+        "imported_files": {scope_var: str(source_dest)},
+        "source_filename": filename,
+        "source_format": ext.lstrip("."),
+        **(source_metadata or {}),
+    }
+
     design = create_design(
         name=display_name,
         script=seed_script,
         parameters=parameters,
         features=features,
         process=process,
-        metadata={
-            "template_id": template_id,
-            "imported_files": {scope_var: str(source_dest)},
-            "source_filename": filename,
-            "source_format": ext.lstrip("."),
-        },
+        metadata=metadata,
         design_id=design_id,
     )
-
-    # Move artifacts from the throwaway sandbox tmp dir into the design's
-    # persistent dir (same pattern as /design/create).
-    from pathlib import Path
-    import shutil
 
     relocated: dict[str, str] = {}
     for kind, src in (sandbox_result.payload.get("artifacts") or {}).items():
@@ -1985,6 +1983,172 @@ async def design_import_stl_endpoint(
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        },
+    )
+
+
+@app.post("/design/import-cad", response_model=DesignImportSTLResponse)
+@app.post("/design/import-stl", response_model=DesignImportSTLResponse)
+async def design_import_stl_endpoint(
+    model: UploadFile = File(...),
+    name: str | None = Form(None),
+    process: str = Form("fdm"),
+) -> DesignImportSTLResponse:
+    """Upload an STL or STEP file and seed an editable design.
+
+    - ``.stl`` → loaded as ``imported_mesh`` (trimesh.Trimesh) for mesh-level ops.
+    - ``.step`` / ``.stp`` → loaded as ``imported_part`` (build123d Compound) for B-rep ops.
+
+    ``/design/import-cad`` is the preferred route. ``/design/import-stl`` is
+    kept as a compatibility alias for older clients.
+    """
+    filename = (model.filename or "imported.stl").strip() or "imported.stl"
+    content = await model.read()
+    return _import_cad_bytes_as_design(
+        content=content,
+        filename=filename,
+        name=name,
+        process=process,
+        source_metadata={"source_provider": "upload"},
+    )
+
+
+class OnshapeOAuthStartResponse(BaseModel):
+    authorization_url: str
+    state: str
+
+
+class OnshapeImportRequest(BaseModel):
+    url: str | None = None
+    document_id: str | None = None
+    wvm: str = "w"
+    wvm_id: str | None = None
+    element_id: str | None = None
+    element_kind: str = "partstudio"
+    name: str | None = None
+    process: str = "fdm"
+
+
+@app.get("/integrations/onshape/status")
+def onshape_status_endpoint() -> dict:
+    return onshape_integration_status()
+
+
+@app.get("/integrations/onshape/oauth/start", response_model=OnshapeOAuthStartResponse)
+def onshape_oauth_start_endpoint(return_to: str | None = None) -> OnshapeOAuthStartResponse:
+    try:
+        payload = make_oauth_authorization_url(return_to=return_to)
+    except OnshapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return OnshapeOAuthStartResponse(**payload)
+
+
+@app.get("/integrations/onshape/oauth/callback")
+async def onshape_oauth_callback_endpoint(
+    code: str | None = None,
+    state: str | None = None,
+    return_to: str | None = None,
+):
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing Onshape OAuth code.")
+    try:
+        token = await exchange_oauth_code(code)
+    except OnshapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Until the app has accounts, do not persist user tokens server-wide. Return
+    # only non-sensitive connection metadata; a real account-scoped token store
+    # is the next step before publishing this as a multi-user OAuth integration.
+    if return_to:
+        return RedirectResponse(return_to)
+    return {
+        "connected": True,
+        "state": state,
+        "expires_in": token.get("expires_in"),
+        "token_type": token.get("token_type"),
+    }
+
+
+@app.get("/integrations/onshape/documents")
+async def onshape_documents_endpoint(q: str = "", limit: int = 20, offset: int = 0) -> dict:
+    try:
+        docs = await OnshapeClient().list_documents(q=q, limit=limit, offset=offset)
+    except OnshapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"documents": docs}
+
+
+@app.get("/integrations/onshape/elements")
+async def onshape_elements_endpoint(
+    url: str | None = None,
+    document_id: str | None = None,
+    wvm: str = "w",
+    wvm_id: str | None = None,
+) -> dict:
+    try:
+        if url:
+            location = parse_onshape_url(url)
+        else:
+            if not (document_id and wvm_id):
+                raise OnshapeError("Provide an Onshape URL or document_id + wvm_id.")
+            location = OnshapeLocation(
+                document_id=document_id,
+                wvm=wvm if wvm in {"w", "v", "m"} else "w",  # type: ignore[arg-type]
+                wvm_id=wvm_id,
+            )
+        elements = await OnshapeClient().list_elements(location)
+    except OnshapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "document_id": location.document_id,
+        "wvm": location.wvm,
+        "wvm_id": location.wvm_id,
+        "elements": elements,
+    }
+
+
+@app.post("/integrations/onshape/import-step", response_model=DesignImportSTLResponse)
+async def onshape_import_step_endpoint(request: OnshapeImportRequest) -> DesignImportSTLResponse:
+    try:
+        if request.url:
+            location = parse_onshape_url(request.url)
+            if request.element_id:
+                location = OnshapeLocation(
+                    document_id=location.document_id,
+                    wvm=location.wvm,
+                    wvm_id=location.wvm_id,
+                    element_id=request.element_id,
+                )
+        else:
+            if not (request.document_id and request.wvm_id and request.element_id):
+                raise OnshapeError("Provide an Onshape URL or document/workspace/element ids.")
+            location = OnshapeLocation(
+                document_id=request.document_id,
+                wvm=request.wvm if request.wvm in {"w", "v", "m"} else "w",  # type: ignore[arg-type]
+                wvm_id=request.wvm_id,
+                element_id=request.element_id,
+            )
+        if not location.element_id:
+            raise OnshapeError("The Onshape URL must include /e/{elementId}, or send element_id.")
+        kind = "assembly" if request.element_kind.lower() == "assembly" else "partstudio"
+        content, filename = await OnshapeClient().export_step(location, element_kind=kind)
+    except OnshapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    display_name = request.name or f"Onshape {kind} {location.element_id[:8]}"
+    return _import_cad_bytes_as_design(
+        content=content,
+        filename=filename,
+        name=display_name,
+        process=request.process,
+        source_metadata={
+            "source_provider": "onshape",
+            "onshape": {
+                "document_id": location.document_id,
+                "wvm": location.wvm,
+                "wvm_id": location.wvm_id,
+                "element_id": location.element_id,
+                "element_kind": kind,
+            },
         },
     )
 

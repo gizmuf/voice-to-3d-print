@@ -155,6 +155,21 @@ class Settings:
     sketchfab_api_token: str = os.getenv("SKETCHFAB_API_TOKEN", "")
     sketchfab_base_url: str = os.getenv("SKETCHFAB_BASE_URL", "https://api.sketchfab.com/v3")
 
+    onshape_base_url: str = os.getenv("ONSHAPE_BASE_URL", "https://cad.onshape.com").rstrip("/")
+    onshape_access_key: str = os.getenv("ONSHAPE_ACCESS_KEY", "")
+    onshape_secret_key: str = os.getenv("ONSHAPE_SECRET_KEY", "")
+    onshape_oauth_client_id: str = os.getenv("ONSHAPE_OAUTH_CLIENT_ID", "")
+    onshape_oauth_client_secret: str = os.getenv("ONSHAPE_OAUTH_CLIENT_SECRET", "")
+    onshape_oauth_redirect_uri: str = os.getenv("ONSHAPE_OAUTH_REDIRECT_URI", "")
+    onshape_oauth_authorize_url: str = os.getenv(
+        "ONSHAPE_OAUTH_AUTHORIZE_URL",
+        "https://oauth.onshape.com/oauth/authorize",
+    )
+    onshape_oauth_token_url: str = os.getenv(
+        "ONSHAPE_OAUTH_TOKEN_URL",
+        "https://oauth.onshape.com/oauth/token",
+    )
+
     mesh_merge_tolerance: float = float(os.getenv("MESH_MERGE_TOLERANCE", "0.0005"))
 
 
