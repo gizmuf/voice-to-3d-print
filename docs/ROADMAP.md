@@ -344,12 +344,38 @@ Bundle existing print-prep pieces behind one manufacturability-panel action: `me
 
 **Success:** one click produces a printable FDM bundle and a summary like `Repaired 1 non-manifold edge · oriented largest face down · sliced at 0.2mm · 12g · 47min`.
 
+#### 2.8 CAD handoff integrations — Onshape first, Fusion optional
+
+Pulsai remains web-first. External CAD integrations are bridges for pro users,
+not a replacement for the build123d engine.
+
+**Onshape first:** cloud-native and browser-based. User connects Onshape, picks
+a document / Part Studio, and Pulsai imports it as STEP through the existing
+`/design/import-cad` pipeline. This requires no local desktop CAD install.
+
+**Fusion first step:** export STEP + setup notes for manual Fusion handoff.
+Local Fusion MCP can become an optional pro bridge later, but it requires the
+user to have Fusion installed and running. Autodesk Fusion Automation API is a
+later server-side option for batch automation/CAM, not the default interactive
+path.
+
+**Files:**
+- `docs/CAD_INTEGRATIONS.md` — integration architecture and scope.
+- `backend/services/integrations/onshape.py` (future) — OAuth + document/element list + STEP export.
+- `frontend/components/Design/CadHandoffPanel.tsx` (future) — connect/import/export UI.
+
+**Success:** a Fusion/SolidWorks/Onshape designer can hand a user a STEP file
+today; next, an Onshape user can import a Part Studio without leaving the web
+app. Fusion remains a high-quality export/local-pro path, not a product
+dependency.
+
 **Verification for Phase 2:**
 - Upload a STEP file from Fusion → renders in viewer, edits via chat work.
 - "Export for CNC" → ZIP contains STEP + DXF, no G-code.
 - Click the `pattern` feature in the viewer → inspector highlights it; chat picks it up as selected feature.
 - Hardware vocabulary prompts map to preset dimensions without hand-entered numbers.
 - Make printable returns a ZIP and a one-line repair/orientation/slice summary.
+- Onshape/Fusion paths are documented as bridges; no CAD install is required for the core flow.
 
 ---
 

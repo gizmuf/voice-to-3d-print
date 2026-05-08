@@ -326,7 +326,7 @@ export default function ModelViewer({
       <div className="model-placeholder">
         <div className="placeholder-title">No model yet</div>
         <div className="placeholder-body">
-          Describe a design or import an STL to start the workspace.
+          Describe a design or import STEP/STP to start an editable workspace.
         </div>
       </div>
     );

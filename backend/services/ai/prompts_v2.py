@@ -119,6 +119,11 @@ center at the middle of wall thickness, e.g. radius \
 pattern is `Pos(x, y, z) * Rot(0, 0, angle_deg) * Cylinder(..., rotation=(0, 90, 0))`. \
 Vertical distribution means varying Z; horizontal distribution means varying \
 angle at one Z.
+- Builder-mode caution: never assign `cutter = Cylinder(...)`, `shape = Box(...)`, \
+or a transformed primitive while inside `with BuildPart()`. build123d auto-adds \
+primitives created in an active BuildPart, which can leave cutter bodies in the \
+model. Build temporary cutters before entering the target BuildPart, then subtract \
+them with `add(cutter, mode=Mode.SUBTRACT)`.
 - Selectors: `part.edges().filter_by(Axis.Z)`, `part.faces().sort_by(Axis.Z)[-1]` (top face).
 - Modifiers: `fillet(edges, radius=...)`, `chamfer(edges, length=...)`, \
 `offset(amount=..., openings=...)` for shells.

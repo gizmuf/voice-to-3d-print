@@ -207,6 +207,13 @@ to reconstruction, mesh booleans, repair, and reference workflows.
 The preferred endpoint is `POST /design/import-cad`. The older
 `POST /design/import-stl` route remains as a backward-compatible alias.
 
+### CAD integrations
+
+See `docs/CAD_INTEGRATIONS.md`. Current direction: **Onshape first** for direct
+cloud CAD import, **Fusion STEP handoff first** with optional local Fusion MCP
+bridge later. No CAD account or desktop install should be required for the core
+maker flow.
+
 ### Printer profiles
 
 The studio ships a curated FDM profile registry in

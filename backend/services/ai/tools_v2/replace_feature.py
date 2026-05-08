@@ -18,7 +18,8 @@ class ReplaceFeatureInput(BaseModel):
             "with them automatically. Use parameters by name, not literals. "
             "For side-wall hole rings, place horizontal cutters at the middle "
             "of wall thickness with radial axes; don't leave them centered at "
-            "the origin."
+            "the origin. Do not assign temporary Cylinder/Box cutters inside "
+            "an active BuildPart; build cutters first, then subtract them."
         )
     )
     rationale: str = Field(max_length=300, description="One sentence why.")

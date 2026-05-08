@@ -456,6 +456,7 @@ export default function DesignStudio() {
       if (featureId) {
         selectFeature(featureId, payload.point);
       } else {
+        setSelectedFeatureId(null);
         setSelectedFeaturePoint(payload.point);
         setSelectedManufacturabilityIssueIndex(null);
       }
@@ -1588,14 +1589,15 @@ function featureAnchorForDesign(design: Design, featureId: string): { x: number;
   const id = featureId.toLowerCase();
   const bbox = design.latest_build?.bounding_box_mm;
   const outerRadius = paramNumber(design, "outer_diameter", bbox?.[0] ?? 40) / 2;
-  const height = paramNumber(design, "knob_height", bbox?.[2] ?? 10);
+  const height = paramNumber(design, "height", paramNumber(design, "knob_height", bbox?.[2] ?? 10));
+  const holeZ = height * paramNumber(design, "hole_zone_fraction", 0.75);
   const insertRadius = paramNumber(design, "insert_diameter", 0) / 2;
 
   if (id.includes("knurl")) {
     return { x: outerRadius, y: 0, z: height / 2 };
   }
   if (id.includes("hole")) {
-    return { x: outerRadius * 0.5, y: 0, z: height };
+    return { x: outerRadius, y: 0, z: holeZ };
   }
   if (id.includes("insert") || id.includes("pocket")) {
     return { x: Math.max(insertRadius * 0.4, 0), y: 0, z: 0 };
@@ -1617,7 +1619,8 @@ function inferFeatureFromPoint(design: Design, point: { x: number; y: number; z:
     })?.id ?? null;
 
   const outerRadius = paramNumber(design, "outer_diameter", design.latest_build?.bounding_box_mm?.[0] ?? 40) / 2;
-  const height = paramNumber(design, "knob_height", design.latest_build?.bounding_box_mm?.[2] ?? 10);
+  const height = paramNumber(design, "height", paramNumber(design, "knob_height", design.latest_build?.bounding_box_mm?.[2] ?? 10));
+  const holeZ = height * paramNumber(design, "hole_zone_fraction", 0.75);
   const insertRadius = paramNumber(design, "insert_diameter", 0) / 2;
   const knurlDepth = paramNumber(design, "knurl_depth", 1);
   const radialDistance = Math.hypot(point.x, point.y);
@@ -1628,7 +1631,7 @@ function inferFeatureFromPoint(design: Design, point: { x: number; y: number; z:
   if (radialDistance >= Math.max(0, outerRadius - Math.max(knurlDepth * 2, 2))) {
     return findFeature("knurl");
   }
-  if (point.z >= height * 0.75 && radialDistance > insertRadius + 1 && radialDistance < outerRadius * 0.82) {
+  if (Math.abs(point.z - holeZ) <= Math.max(4, height * 0.08) && radialDistance >= outerRadius * 0.65) {
     return findFeature("hole");
   }
   return findFeature("cylinder", "body") ?? features[0]?.id ?? null;

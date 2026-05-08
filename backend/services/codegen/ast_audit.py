@@ -104,11 +104,98 @@ DENIED_ATTRS: frozenset[str] = frozenset(
     }
 )
 
+BUILD123D_PRIMITIVES: frozenset[str] = frozenset(
+    {
+        "Box",
+        "Cylinder",
+        "Cone",
+        "Sphere",
+        "Torus",
+        "Wedge",
+        "CounterBoreHole",
+        "CounterSinkHole",
+        "Hole",
+        "RegularPolygon",
+        "Circle",
+        "Rectangle",
+        "Slot",
+    }
+)
+
 
 @dataclass
 class AuditResult:
     ok: bool
     errors: list[str]
+
+
+class _Build123dBuilderAudit(ast.NodeVisitor):
+    """Catch common builder-mode mistakes before they become bad geometry."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self._buildpart_depth = 0
+
+    def visit_With(self, node: ast.With) -> None:
+        enters_buildpart = any(_is_call_named(item.context_expr, "BuildPart") for item in node.items)
+        if enters_buildpart:
+            self._buildpart_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            if enters_buildpart:
+                self._buildpart_depth -= 1
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self._check_primitive_assignment(node.value, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._check_primitive_assignment(node.value, node.lineno)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._check_primitive_assignment(node.value, node.lineno)
+        self.generic_visit(node)
+
+    def _check_primitive_assignment(self, value: ast.AST, lineno: int) -> None:
+        if self._buildpart_depth <= 0:
+            return
+        if _contains_build123d_primitive_call(value):
+            self.errors.append(
+                "line "
+                f"{lineno}: assigning a build123d primitive inside BuildPart auto-adds geometry; "
+                "create temporary cutters outside the BuildPart context, or call the primitive "
+                "directly without assigning it."
+            )
+
+
+def _is_call_named(node: ast.AST, name: str) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == name
+    if isinstance(func, ast.Attribute):
+        return func.attr == name
+    return False
+
+
+def _call_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _contains_build123d_primitive_call(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call) and _call_name(child) in BUILD123D_PRIMITIVES:
+            return True
+    return False
 
 
 def audit_script(source: str) -> AuditResult:
@@ -144,7 +231,17 @@ def audit_script(source: str) -> AuditResult:
                     f"line {node.lineno}: attribute access '.{node.attr}' is not allowed"
                 )
 
+    builder_audit = _Build123dBuilderAudit()
+    builder_audit.visit(tree)
+    errors.extend(builder_audit.errors)
+
     return AuditResult(ok=not errors, errors=errors)
 
 
-__all__ = ["audit_script", "AuditResult", "ALLOWED_TOP_LEVEL_MODULES", "DENIED_NAMES"]
+__all__ = [
+    "audit_script",
+    "AuditResult",
+    "ALLOWED_TOP_LEVEL_MODULES",
+    "DENIED_NAMES",
+    "BUILD123D_PRIMITIVES",
+]
