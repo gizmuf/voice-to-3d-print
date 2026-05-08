@@ -1,0 +1,10 @@
+.env
+.env.*
+.pytest_cache/
+.uvicorn.log
+.venv/
+__pycache__/
+cloudrun.env.yaml
+data/output/
+logs/
+tests/__pycache__/
