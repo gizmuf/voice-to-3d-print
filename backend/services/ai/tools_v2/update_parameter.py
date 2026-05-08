@@ -90,7 +90,6 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
 
     design.revision_id = new_revision_id()
     save_design(design)
-    ctx.reload(design)
     return {
         "ok": True,
         "name": params.name,

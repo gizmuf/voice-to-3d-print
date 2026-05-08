@@ -9,9 +9,13 @@ sandbox build.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Iterator
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 from anthropic import Anthropic
 
@@ -150,8 +154,15 @@ def stream_turn(
             return
         try:
             save_conversation(design_id, _compact_for_persist(history))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — telemetry, never block the turn
+            # Disk full, permission errors, etc. shouldn't fail the user-facing
+            # turn but they need to be visible somewhere or the conversation
+            # silently rolls back across restarts.
+            logger.warning(
+                "save_conversation failed for design %s: %s",
+                design_id,
+                exc,
+            )
         persisted = True
 
     try:
@@ -319,51 +330,73 @@ def _repair_dangling_tool_uses(history: list[dict]) -> list[dict]:
     A turn that was cut off mid-tool-execution (process killed, network
     blip, sandbox timeout) leaves the conversation with an assistant message
     containing tool_use blocks that have no matching tool_result. Anthropic
-    rejects the next call with a 400. We patch the history on load so the
-    chat is forgiving — every dangling tool_use becomes an `is_error: true`
-    tool_result with a brief "(interrupted)" payload.
+    rejects the next call with a 400.
+
+    Walks every assistant message in the history (not only the last) and
+    inserts an ``is_error: true`` tool_result for any tool_use whose id is
+    never answered. Compaction can leave the dangler somewhere in the
+    middle, and we want a single load to clean the whole transcript.
     """
     if not history:
         return history
-    out = list(history)
-    last = out[-1]
-    if last.get("role") != "assistant":
-        return out
-    content = last.get("content")
-    if not isinstance(content, list):
-        return out
-    pending_ids: list[str] = [
-        block["id"]
-        for block in content
-        if isinstance(block, dict)
-        and block.get("type") == "tool_use"
-        and block.get("id")
-    ]
-    if not pending_ids:
-        return out
-    out.append(
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tid,
-                    "content": json.dumps(
-                        {
-                            "error": (
-                                "Tool call was interrupted before the runtime returned a "
-                                "result (process restart, sandbox timeout, or network "
-                                "blip). The design state is unchanged. Either retry the "
-                                "same operation or take a different approach."
-                            )
-                        }
-                    ),
-                    "is_error": True,
-                }
-                for tid in pending_ids
-            ],
-        }
-    )
+
+    answered_ids: set[str] = set()
+    for msg in history:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and isinstance(block.get("tool_use_id"), str)
+            ):
+                answered_ids.add(block["tool_use_id"])
+
+    out: list[dict] = []
+    for msg in history:
+        out.append(msg)
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        pending_ids = [
+            block["id"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and isinstance(block.get("id"), str)
+            and block["id"] not in answered_ids
+        ]
+        if not pending_ids:
+            continue
+        out.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tid,
+                        "content": json.dumps(
+                            {
+                                "error": (
+                                    "Tool call was interrupted before the runtime returned a "
+                                    "result (process restart, sandbox timeout, or network "
+                                    "blip). The design state is unchanged. Either retry the "
+                                    "same operation or take a different approach."
+                                )
+                            }
+                        ),
+                        "is_error": True,
+                    }
+                    for tid in pending_ids
+                ],
+            }
+        )
+        answered_ids.update(pending_ids)
     return out
 
 

@@ -68,14 +68,22 @@ export default function RevisionTimeline({
   useEffect(() => {
     if (!designId || !hovering || diffs[hovering]) return;
     setDiffs((prev) => ({ ...prev, [hovering]: "loading" }));
-    fetch(`${backendUrl}/design/${designId}/revisions/${hovering}/diff`)
+    const controller = new AbortController();
+    fetch(`${backendUrl}/design/${designId}/revisions/${hovering}/diff`, {
+      signal: controller.signal,
+    })
       .then((r) => (r.ok ? r.json() : null))
       .then((payload) => {
+        if (controller.signal.aborted) return;
         setDiffs((prev) => ({ ...prev, [hovering]: payload ?? "error" }));
       })
       .catch(() => {
+        if (controller.signal.aborted) return;
         setDiffs((prev) => ({ ...prev, [hovering]: "error" }));
       });
+    return () => {
+      controller.abort();
+    };
   }, [backendUrl, designId, diffs, hovering]);
 
   if (!designId || revisions.length <= 1) return null;

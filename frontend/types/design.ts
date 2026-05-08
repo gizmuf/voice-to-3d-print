@@ -86,4 +86,21 @@ export type Design = {
   parameters: DesignParameter[];
   features: NamedFeature[];
   latest_build: DesignBuild | null;
+  printer_profile_id?: string | null;
+};
+
+export type PrinterProfile = {
+  id: string;
+  label: string;
+  vendor?: string;
+  model?: string;
+  bed_size_mm?: [number, number, number];
+  nozzle_mm?: number;
+  layer_height_mm?: number;
+  max_unsupported_overhang_deg?: number;
+  clean_overhang_deg?: number;
+  min_wall_thickness_mm?: number;
+  supports_auto_tree?: boolean;
+  material?: string;
+  notes?: string | null;
 };

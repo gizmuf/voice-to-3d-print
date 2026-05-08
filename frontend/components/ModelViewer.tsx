@@ -103,6 +103,24 @@ function LoadedModel({
     return collected;
   }, [scene]);
 
+  // We `cloneMaterial` per mesh so hover/select tints don't leak into the
+  // upstream cached gltf. Those cloned materials are owned by this component
+  // and must be released on unmount or src change, otherwise the GPU
+  // accumulates one set per design rebuild. Geometries are NOT disposed —
+  // they're shared by reference with the cached gltf scene (Three's
+  // Object3D.clone is shallow on geometry refs), so disposing them would
+  // break the next consumer of the same source.
+  useEffect(() => {
+    return () => {
+      for (const mesh of meshes) {
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const material of mats) {
+          if (material) material.dispose();
+        }
+      }
+    };
+  }, [meshes]);
+
   useEffect(() => {
     for (const mesh of meshes) {
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];

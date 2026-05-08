@@ -11,6 +11,7 @@ One directory per design at ``output_dir/designs/{design_id}``:
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -18,6 +19,9 @@ from fastapi import HTTPException
 
 from config import settings
 from services.codegen.models import Build, Design, DesignRecord
+
+
+logger = logging.getLogger(__name__)
 
 
 def _root() -> Path:
@@ -113,7 +117,11 @@ def get_design_or_none(design_id: str) -> Design | None:
         return None
     try:
         return Design.model_validate_json(path.read_text())
-    except Exception:
+    except Exception as exc:
+        # Distinguish "file is corrupt" from "design doesn't exist". A bare
+        # None return masks the difference and the caller has no signal that
+        # something on disk needs attention.
+        logger.warning("Failed to load design %s from %s: %s", design_id, path, exc)
         return None
 
 

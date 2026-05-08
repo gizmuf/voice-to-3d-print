@@ -441,19 +441,33 @@ def run_manufacturability(
     suggested_orientation: OrientationSuggestion | None = None
 
     if process == "fdm":
-        issues.extend(_fdm_checks(mesh, profile))
-        current_overhang_fraction = compute_overhang_fraction(mesh)
-        # Only run the orientation search if the as-modeled overhang is
-        # already meaningful; for clean parts the search is wasted work.
+        # Orientation search runs *before* the FDM checks so the overhang
+        # issue can describe the part in both the as-modeled and best-rotated
+        # frames. Without that context a knurled cylinder lying on its side
+        # (50%+ apparent overhang) reads as catastrophic when in fact a
+        # single 90° rotation makes it trivial.
+        current_overhang_fraction = compute_overhang_fraction(
+            mesh,
+            max_overhang_deg=profile.max_unsupported_overhang_deg,
+        )
         if current_overhang_fraction >= 0.05:
-            best_candidate, best_fraction = find_best_print_orientation(mesh)
-            # Surface a suggestion only if reorienting would meaningfully help.
+            best_candidate, best_fraction = find_best_print_orientation(
+                mesh,
+                max_overhang_deg=profile.max_unsupported_overhang_deg,
+            )
             if best_fraction + 0.02 < current_overhang_fraction:
                 suggested_orientation = OrientationSuggestion(
                     label=best_candidate.label,
                     euler_deg=best_candidate.euler_deg,
                     overhang_fraction=best_fraction,
                 )
+        issues.extend(
+            _fdm_checks(
+                mesh,
+                profile,
+                suggested_orientation=suggested_orientation,
+            )
+        )
     elif process == "cnc":
         issues.extend(_cnc_checks(mesh, profile))
 
@@ -498,8 +512,22 @@ def run_manufacturability(
     )
 
 
-def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
-    """Overhang + thin-wall heuristics for FDM 3D printing."""
+def _fdm_checks(
+    mesh,
+    profile: PrinterProfile,
+    *,
+    suggested_orientation: "OrientationSuggestion | None" = None,
+) -> list[ManufacturabilityIssue]:
+    """Overhang + thin-wall heuristics for FDM 3D printing.
+
+    Overhangs are intentionally reported at ``warn`` severity, never
+    ``error``. They're fixable by the user — supports, chamfer, or a
+    rotation — and the orientation search has already picked the best
+    candidate (passed in via ``suggested_orientation``). Reserving
+    ``error`` for genuinely unfixable conditions (non-watertight,
+    exceeds_bed) avoids the previous 20%-cliff that flipped near-identical
+    parts between WARN and UNPRINTABLE.
+    """
     import math
 
     import numpy as np
@@ -510,7 +538,13 @@ def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
     if len(mesh.faces) == 0:
         return issues
 
-    cos_threshold = math.cos(math.radians(45))
+    # Overhang angles follow common slicer wording: angle from vertical.
+    # 0° = vertical wall, 90° = flat underside. A face is risky when its
+    # downward-normal component exceeds cos(90° - limit). Larger limits mean
+    # a stronger printer/cooling profile.
+    cos_threshold = math.cos(math.radians(90.0 - profile.max_unsupported_overhang_deg))
+    cos_clean_threshold = math.cos(math.radians(90.0 - profile.clean_overhang_deg))
+
     normals = mesh.face_normals
     down = -normals[:, 2]
     overhanging = down > cos_threshold
@@ -518,18 +552,80 @@ def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
         overhang_area = float(mesh.area_faces[overhanging].sum())
         total_area = float(mesh.area_faces.sum()) or 1.0
         fraction = overhang_area / total_area
+        # Carve out the "still clean for this printer" subset — overhangs
+        # between the clean angle and the unsupported angle print fine on
+        # this printer's profile. Treat them as informational, not as
+        # printability defects.
+        steeper_than_clean = down > cos_clean_threshold
+        steeper_area = float(mesh.area_faces[steeper_than_clean].sum())
+        steeper_fraction = steeper_area / total_area
         if fraction >= 0.02:
-            severity = "error" if fraction > 0.20 else "warn"
             centroid_idx = int(np.argmax(mesh.area_faces * overhanging))
             location = tuple(float(c) for c in mesh.triangles_center[centroid_idx])
+            printer_label = profile.label
+            angle_max = int(round(profile.max_unsupported_overhang_deg))
+            angle_clean = int(round(profile.clean_overhang_deg))
+            message = (
+                f"~{fraction*100:.0f}% of surface area overhangs steeper than "
+                f"{angle_max}° (the as-modeled limit for {printer_label})."
+            )
+            suggestion = (
+                f"Add support material, reorient on the build plate, or "
+                f"chamfer the overhang. {printer_label} prints up to ~{angle_clean}° "
+                f"clean."
+            )
+            # Default severity is `warn` — modern FDM with auto-supports prints
+            # most overhangs cleanly, so we never escalate to `error`. If
+            # reorientation knocks the overhang under 5% the issue collapses
+            # to `info`: the part is effectively safe, the user just gets a
+            # gentle "you'll get a better print this way" note.
+            severity: str = "warn"
+            best_under_easy_threshold = (
+                suggested_orientation is not None
+                and suggested_orientation.overhang_fraction < 0.05
+            )
+            # Profiles with auto-tree-support get to downgrade midband
+            # overhangs to info as long as the steeper-than-clean fraction
+            # is small. The slicer will handle the rest.
+            mostly_clean_for_printer = (
+                profile.supports_auto_tree and steeper_fraction < 0.03
+            )
+            if suggested_orientation is not None:
+                rotated = suggested_orientation.overhang_fraction * 100
+                rx, ry, rz = suggested_orientation.euler_deg
+                message += (
+                    f" Reorienting ({suggested_orientation.label}) drops it to "
+                    f"~{rotated:.0f}%."
+                )
+                if best_under_easy_threshold or mostly_clean_for_printer:
+                    severity = "info"
+                    suggestion = (
+                        f"This prints fine on {printer_label} with auto-supports. "
+                        f"For an even cleaner print, rotate using Euler "
+                        f"({rx:.0f}°, {ry:.0f}°, {rz:.0f}°) — overhang drops to "
+                        f"~{rotated:.0f}%."
+                    )
+                else:
+                    suggestion = (
+                        f"Best fix: rotate the part using Euler "
+                        f"({rx:.0f}°, {ry:.0f}°, {rz:.0f}°) — overhang becomes "
+                        f"~{rotated:.0f}%. Or add supports / chamfer in place."
+                    )
+            elif mostly_clean_for_printer:
+                severity = "info"
+                suggestion = (
+                    f"{printer_label} prints up to ~{angle_clean}° clean, and only "
+                    f"~{steeper_fraction*100:.0f}% of the surface is steeper than that. "
+                    f"Auto-supports will handle it."
+                )
             issues.append(
                 ManufacturabilityIssue(
                     severity=severity,  # type: ignore[arg-type]
                     code="overhang_steep",
-                    message=f"~{fraction*100:.0f}% of surface area overhangs at >45°.",
+                    message=message,
                     location=location,
                     process="fdm",
-                    suggestion="Add support material, reorient on the build plate, or chamfer the overhang.",
+                    suggestion=suggestion,
                 )
             )
 
@@ -537,7 +633,7 @@ def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
     if mesh.is_watertight:
         try:
             samples = 250
-            threshold = max(profile.nozzle_mm * 2.0, 0.8)
+            threshold = profile.min_wall_thickness_mm
             seed_digest = hashlib.sha256()
             seed_digest.update(np.ascontiguousarray(mesh.vertices).tobytes())
             seed_digest.update(np.ascontiguousarray(mesh.faces).tobytes())
@@ -567,8 +663,9 @@ def _fdm_checks(mesh, profile: PrinterProfile) -> list[ManufacturabilityIssue]:
                                 severity=severity,  # type: ignore[arg-type]
                                 code="min_wall_thin",
                                 message=(
-                                    f"Wall thickness as low as {thinnest:.2f} mm "
-                                    f"(threshold {threshold:.2f} mm)."
+                                    f"Wall thickness as low as {thinnest:.2f} mm; "
+                                    f"{profile.label} needs at least "
+                                    f"{threshold:.2f} mm with a {profile.nozzle_mm} mm nozzle."
                                 ),
                                 location=location,
                                 process="fdm",

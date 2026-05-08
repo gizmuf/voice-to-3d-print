@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { resolveBackendUrl } from "./backend";
+import { resolveBackendUrl, normalizeFetchError } from "./backend";
 import type { ChatTurnEntry, ToolCall } from "../types/chat";
 
 type SSEvent = { event: string; data: Record<string, unknown> };
@@ -146,8 +146,7 @@ export function useChatStream(workspaceId: string | null) {
           setState({ status: "idle" });
           return;
         }
-        const errorMessage =
-          error instanceof Error ? error.message : "Unknown chat error.";
+        const errorMessage = normalizeFetchError(error, backendUrl);
         setState({ status: "error", errorMessage });
         updateAssistant((entry) => ({
           ...entry,

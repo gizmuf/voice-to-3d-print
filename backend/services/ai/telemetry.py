@@ -10,12 +10,27 @@ Best-effort by design — telemetry must never block a chat turn or raise.
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from config import settings
+
+
+# In-process serialization. Two simultaneous tool calls in the same worker
+# would otherwise interleave bytes mid-line on append; POSIX guarantees
+# atomic writes only up to PIPE_BUF (~4 KB on macOS) and we don't want to
+# rely on that. For multi-worker setups we additionally take a fcntl
+# advisory lock per write, so cross-process appends serialize too.
+_WRITE_LOCK = threading.Lock()
+
+try:
+    import fcntl as _fcntl  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover — non-POSIX (Windows) — fall back to thread lock only
+    _fcntl = None  # type: ignore[assignment]
 
 
 def _telemetry_path(*, create: bool = False) -> Path:
@@ -40,10 +55,20 @@ def record_tool_call(
         "design_id": design_id,
         "ts": time.time(),
     }
+    line = json.dumps(payload) + "\n"
     try:
         path = _telemetry_path(create=True)
-        with path.open("a") as fh:
-            fh.write(json.dumps(payload) + "\n")
+        with _WRITE_LOCK, path.open("a") as fh:
+            if _fcntl is not None:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                try:
+                    fh.write(line)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+            else:
+                fh.write(line)
     except Exception:
         # Telemetry is best-effort. We never want to fail a chat turn here.
         pass

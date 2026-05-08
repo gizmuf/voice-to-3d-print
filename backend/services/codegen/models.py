@@ -81,6 +81,11 @@ class Design(BaseModel):
     process: Literal["fdm", "cnc", "either"] = "either"
     parent_revision_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Selected printer profile id. None means "use the global default";
+    # the value must match an entry in services.printer_profiles. Stored
+    # on the design so the manufacturability check is consistent across
+    # builds without the frontend resending it on every request.
+    printer_profile_id: str | None = None
 
 
 class BuildArtifact(BaseModel):

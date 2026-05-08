@@ -15,7 +15,9 @@ class ReplaceFeatureInput(BaseModel):
         description=(
             "build123d code for the new block body. Do NOT include the "
             "`# @feature:` and `# @end` markers — the engine wraps your code "
-            "with them automatically. Use parameters by name, not literals."
+            "with them automatically. Use parameters by name, not literals. "
+            "For side-wall hole rings, place horizontal cutters on the wall "
+            "radius; don't leave them centered at the origin."
         )
     )
     rationale: str = Field(max_length=300, description="One sentence why.")

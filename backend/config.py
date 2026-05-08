@@ -13,6 +13,21 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var, falling back to ``default`` on garbage values.
+
+    Lets a misconfigured ``PULSAI_REVISION_KEEP_LAST=garbage`` boot the
+    server with a sensible default instead of crashing on import.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _resolve_path(value: str | None, default: Path) -> Path:
     path = Path(value) if value else default
     if not path.is_absolute():
@@ -68,9 +83,7 @@ class Settings:
     anthropic_classify_model: str = os.getenv(
         "ANTHROPIC_CLASSIFY_MODEL", "claude-haiku-4-5-20251001"
     )
-    anthropic_max_output_tokens: int = int(
-        os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "1500")
-    )
+    anthropic_max_output_tokens: int = _env_int("ANTHROPIC_MAX_OUTPUT_TOKENS", 1500)
     default_printer_profile_id: str = os.getenv(
         "DEFAULT_PRINTER_PROFILE_ID", "prusa_mk4_default"
     )
@@ -107,7 +120,7 @@ class Settings:
     triposr_device: str = os.getenv("TRIPOSR_DEVICE", "cpu")
     triposr_model: str = os.getenv("TRIPOSR_MODEL", "stabilityai/TripoSR")
     triposr_cache_dir: str = os.getenv("TRIPOSR_CACHE_DIR", "")
-    triposr_timeout_s: int = int(os.getenv("TRIPOSR_TIMEOUT_S", "3600"))
+    triposr_timeout_s: int = _env_int("TRIPOSR_TIMEOUT_S", 3600)
     triposr_chunk_size: str = os.getenv("TRIPOSR_CHUNK_SIZE", "")
     triposr_mc_resolution: str = os.getenv("TRIPOSR_MC_RESOLUTION", "")
     triposr_no_remove_bg: bool = os.getenv("TRIPOSR_NO_REMOVE_BG", "").lower() in (
@@ -122,9 +135,10 @@ class Settings:
     )
     triposr_texture_resolution: str = os.getenv("TRIPOSR_TEXTURE_RESOLUTION", "")
 
-    revision_keep_last: int = int(os.getenv("PULSAI_REVISION_KEEP_LAST", "20"))
-    history_compact_at: int = int(os.getenv("PULSAI_HISTORY_COMPACT_AT", "30"))
+    revision_keep_last: int = _env_int("PULSAI_REVISION_KEEP_LAST", 20)
+    history_compact_at: int = _env_int("PULSAI_HISTORY_COMPACT_AT", 30)
     admin_token: str = os.getenv("PULSAI_ADMIN_TOKEN", "")
+    cors_origins: str = os.getenv("CORS_ORIGINS", "")
 
     prusaslicer_path: str = _resolve_slicer_path(os.getenv("PRUSASLICER_PATH"))
     prusaslicer_config: str = str(

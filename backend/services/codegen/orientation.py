@@ -19,9 +19,6 @@ from dataclasses import dataclass
 import numpy as np
 
 
-_OVERHANG_COS_THRESHOLD = math.cos(math.radians(45))
-
-
 @dataclass(frozen=True)
 class OrientationCandidate:
     """One axis-aligned orientation expressed as Euler XYZ degrees."""
@@ -42,17 +39,22 @@ ORIENTATION_CANDIDATES: tuple[OrientationCandidate, ...] = (
 )
 
 
-def compute_overhang_fraction(mesh) -> float:
-    """Fraction of surface area whose normal points downward at >45°.
+def compute_overhang_fraction(mesh, *, max_overhang_deg: float = 45.0) -> float:
+    """Fraction of surface area past the unsupported overhang angle.
+
+    ``max_overhang_deg`` follows common slicer wording: angle from vertical.
+    0° is a vertical wall, 90° is a flat underside. A better printer can handle
+    a larger value, so the downward-normal threshold is cos(90° - limit).
 
     Returns 0.0 for a degenerate mesh; the caller should already have
     rejected those before slicing anyway.
     """
     if len(mesh.faces) == 0:
         return 0.0
+    cos_threshold = math.cos(math.radians(90.0 - max_overhang_deg))
     normals = mesh.face_normals
     down = -normals[:, 2]
-    overhanging = down > _OVERHANG_COS_THRESHOLD
+    overhanging = down > cos_threshold
     if not bool(np.any(overhanging)):
         return 0.0
     overhang_area = float(mesh.area_faces[overhanging].sum())
@@ -60,7 +62,11 @@ def compute_overhang_fraction(mesh) -> float:
     return overhang_area / total_area
 
 
-def find_best_print_orientation(mesh) -> tuple[OrientationCandidate, float]:
+def find_best_print_orientation(
+    mesh,
+    *,
+    max_overhang_deg: float = 45.0,
+) -> tuple[OrientationCandidate, float]:
     """Return the candidate orientation with the lowest overhang fraction.
 
     The search rotates a copy of the mesh; the input mesh is left alone. The
@@ -72,7 +78,7 @@ def find_best_print_orientation(mesh) -> tuple[OrientationCandidate, float]:
     best: tuple[OrientationCandidate, float] | None = None
     for candidate in ORIENTATION_CANDIDATES:
         if candidate.euler_deg == (0.0, 0.0, 0.0):
-            fraction = compute_overhang_fraction(mesh)
+            fraction = compute_overhang_fraction(mesh, max_overhang_deg=max_overhang_deg)
         else:
             rotated = mesh.copy()
             matrix = trimesh.transformations.euler_matrix(
@@ -82,7 +88,7 @@ def find_best_print_orientation(mesh) -> tuple[OrientationCandidate, float]:
                 "sxyz",
             )
             rotated.apply_transform(matrix)
-            fraction = compute_overhang_fraction(rotated)
+            fraction = compute_overhang_fraction(rotated, max_overhang_deg=max_overhang_deg)
         if best is None or fraction < best[1] - 1e-6:
             best = (candidate, fraction)
     assert best is not None

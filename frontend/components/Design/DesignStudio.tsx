@@ -9,6 +9,7 @@ import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { useDesignStream } from "../../lib/useDesignStream";
 import { useHealth } from "../../lib/useHealth";
+import { usePrinterProfiles } from "../../lib/usePrinterProfiles";
 import type { Design, DesignTemplate, ManufacturabilityIssue } from "../../types/design";
 import type { SelectionPayload } from "../ModelViewer";
 
@@ -22,6 +23,7 @@ const TEMPLATE_PROMPTS: { label: string; prompt: string }[] = [
 export default function DesignStudio() {
   const backendUrl = resolveBackendUrl();
   const health = useHealth();
+  const printerCatalog = usePrinterProfiles();
   const [templates, setTemplates] = useState<DesignTemplate[]>([]);
   const [design, setDesign] = useState<Design | null>(null);
   const [creating, setCreating] = useState(false);
@@ -50,6 +52,17 @@ export default function DesignStudio() {
     error?: string;
   }>({ busy: false });
   const liveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cancel any pending live-preview debounce on unmount or when the design
+  // changes; otherwise the timer fires after the studio is gone and tries to
+  // fetch parameters for a stale design id.
+  useEffect(() => {
+    return () => {
+      if (liveDebounceRef.current) {
+        clearTimeout(liveDebounceRef.current);
+        liveDebounceRef.current = null;
+      }
+    };
+  }, []);
   const [flagships, setFlagships] = useState<{ id: string; name: string; description: string }[]>([]);
   const [recentDesigns, setRecentDesigns] = useState<
     {
@@ -105,6 +118,7 @@ export default function DesignStudio() {
           parameters: payload.parameters ?? [],
           features: payload.features ?? [],
           latest_build: payload.latest_build ?? null,
+          printer_profile_id: payload.printer_profile_id ?? null,
         });
         if (typeof window !== "undefined") {
           const url = new URL(window.location.href);
@@ -174,6 +188,7 @@ export default function DesignStudio() {
           parameters: payload.parameters ?? [],
           features: payload.features ?? [],
           latest_build: (payload as any).initial_build ?? null,
+          printer_profile_id: payload.printer_profile_id ?? null,
         });
       } catch (error) {
         setCreateError(
@@ -215,6 +230,7 @@ export default function DesignStudio() {
           parameters: payload.parameters ?? [],
           features: payload.features ?? [],
           latest_build: payload.latest_build ?? null,
+          printer_profile_id: payload.printer_profile_id ?? null,
         });
       })
       .catch(() => undefined)
@@ -664,9 +680,57 @@ export default function DesignStudio() {
             blocks · target: <strong>{design.process}</strong>
           </p>
         </div>
-        <button type="button" style={backButtonStyle} onClick={returnToStart}>
-          ← Back to designs
-        </button>
+        <div style={headerActionsStyle}>
+          {printerCatalog && printerCatalog.profiles.length > 0 ? (
+            <label style={printerPickerStyle} title="Manufacturability checks and slicer profile use this printer.">
+              <span style={printerPickerLabelStyle}>Printer</span>
+              <select
+                value={
+                  design.printer_profile_id || printerCatalog.defaultId || ""
+                }
+                onChange={async (e) => {
+                  const profileId = e.target.value;
+                  try {
+                    const res = await fetch(
+                      `${backendUrl}/design/${design.design_id}/printer`,
+                      {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ profile_id: profileId }),
+                      },
+                    );
+                    if (res.ok) {
+                      const payload = await res.json().catch(() => null);
+                      setDesign((current) =>
+                        current && current.design_id === design.design_id
+                          ? {
+                              ...current,
+                              printer_profile_id: profileId,
+                              latest_build: payload?.build ?? current.latest_build,
+                            }
+                          : current,
+                      );
+                      await refreshDesign(design.design_id);
+                    }
+                  } catch {
+                    // Network blip — leave the dropdown showing the previous value
+                    // on next render via refreshDesign.
+                  }
+                }}
+                style={printerSelectStyle}
+              >
+                {printerCatalog.profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <button type="button" style={backButtonStyle} onClick={returnToStart}>
+            ← Back to designs
+          </button>
+        </div>
       </header>
 
       <RevisionTimeline
@@ -746,25 +810,29 @@ export default function DesignStudio() {
 
           <h3 style={paneHeaderStyle}>Features</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {design.features.map((f) => (
-              <button
-                key={f.id || f.name}
-                type="button"
-                onClick={() => selectFeature(f.id)}
-                style={{
-                  ...paramRowStyle,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  border:
-                    selectedFeatureId === f.id
+            {design.features.map((f) => {
+              const isSelected = selectedFeatureId === f.id;
+              return (
+                <button
+                  key={f.id || f.name}
+                  type="button"
+                  onClick={() => selectFeature(f.id)}
+                  style={{
+                    ...paramRowStyle,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    border: isSelected
                       ? "1px solid rgba(33,150,243,0.7)"
                       : "1px solid transparent",
-                }}
-                title={`${f.name} — kind ${f.kind}, id ${f.id}. Click to scope the next chat edit.`}
-              >
-                <span style={{ fontSize: 12, fontWeight: 600 }}>{f.name}</span>
-              </button>
-            ))}
+                  }}
+                  title={`${f.name} — kind ${f.kind}, id ${f.id}. Click to scope the next chat edit.`}
+                  aria-label={`Feature ${f.name}, kind ${f.kind}`}
+                  aria-pressed={isSelected}
+                >
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{f.name}</span>
+                </button>
+              );
+            })}
             {design.features.length === 0 ? (
               <span style={{ fontSize: 12, opacity: 0.55 }}>(no @feature blocks)</span>
             ) : null}
@@ -1855,6 +1923,38 @@ const chipButtonStyle: React.CSSProperties = {
   borderRadius: 999,
   cursor: "pointer",
   fontSize: 12,
+};
+
+const headerActionsStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  flexShrink: 0,
+};
+
+const printerPickerStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  fontSize: 11,
+};
+
+const printerPickerLabelStyle: React.CSSProperties = {
+  fontSize: 9,
+  letterSpacing: 1,
+  textTransform: "uppercase",
+  opacity: 0.6,
+};
+
+const printerSelectStyle: React.CSSProperties = {
+  background: "rgba(255,255,255,0.92)",
+  border: "1px solid rgba(0,0,0,0.18)",
+  borderRadius: 6,
+  padding: "4px 8px",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  maxWidth: 240,
 };
 
 const backButtonStyle: React.CSSProperties = {

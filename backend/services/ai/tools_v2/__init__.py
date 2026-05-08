@@ -28,7 +28,12 @@ from services.codegen.models import Build, Design
 
 @dataclass
 class DesignContext:
-    """Mutable per-turn context shared across tool calls."""
+    """Mutable per-turn context shared across tool calls.
+
+    Tool implementations mutate ``design`` in place (Pydantic models are
+    aliased through Python references), so subsequent tools in the same
+    turn observe the prior tool's edits without an explicit reload step.
+    """
 
     design_id: str
     design: Design
@@ -36,9 +41,6 @@ class DesignContext:
     printer_profile_id: str
     last_build: Build | None = None
     current_user_message: str | None = None
-
-    def reload(self, design: Design) -> None:
-        self.design = design
 
 
 from services.ai.tools_v2 import (  # noqa: E402  -- after dataclass declaration
@@ -95,13 +97,44 @@ TOOL_DISPATCH: dict[str, Callable[[dict, "DesignContext"], dict]] = {
 
 
 def execute(name: str, payload: dict, ctx: "DesignContext") -> dict:
+    """Run a tool by name and normalize the error shape.
+
+    Every tool returns either a success dict (no ``error`` key) or a failure
+    dict with at least ``{"error": str}``; auxiliary fields like ``locked``,
+    ``previous_value``, or ``traceback`` are preserved for the agent to read
+    but the human-readable summary is always under ``error``.
+    """
+    import logging
+    import traceback
+
+    logger = logging.getLogger(__name__)
     handler = TOOL_DISPATCH.get(name)
     if handler is None:
-        return {"error": f"Unknown tool: {name}"}
+        return {
+            "error": f"Unknown tool: {name}",
+            "code": "unknown_tool",
+        }
     try:
-        return handler(payload, ctx)
-    except Exception as exc:
-        return {"error": f"Tool {name} raised: {exc}"}
+        result = handler(payload, ctx)
+    except Exception as exc:  # noqa: BLE001 — tool surface boundary
+        # Surface the exception class + message, plus a short traceback the
+        # agent can include in its retry plan. Without the traceback the
+        # agent has no way to pick a different approach.
+        tb = traceback.format_exc(limit=4)
+        logger.exception("Tool %s raised", name)
+        return {
+            "error": f"{type(exc).__name__}: {exc}",
+            "code": "tool_raised",
+            "tool_name": name,
+            "traceback": tb,
+        }
+    if not isinstance(result, dict):
+        return {
+            "error": f"Tool {name} returned non-dict {type(result).__name__}",
+            "code": "tool_bad_return",
+            "tool_name": name,
+        }
+    return result
 
 
 __all__ = ["DesignContext", "TOOL_DEFINITIONS", "TOOL_DISPATCH", "execute"]

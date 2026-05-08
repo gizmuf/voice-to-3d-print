@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { resolveBackendUrl } from "./backend";
+import { resolveBackendUrl, normalizeFetchError } from "./backend";
 import type { ChatTurnEntry, ToolCall } from "../types/chat";
 
 type SSEvent = { event: string; data: Record<string, unknown> };
@@ -157,15 +157,9 @@ export function useDesignStream(designId: string | null) {
   return { history, state, latestRevisionId, send, cancel, appendLocalTurn };
 }
 
-function normalizeError(error: unknown, backendUrl: string): string {
-  if (error instanceof DOMException && error.name === "AbortError") {
-    return "Cancelled.";
-  }
-  if (error instanceof TypeError && /fetch/i.test(error.message)) {
-    return `Could not reach the backend at ${backendUrl}. Is the FastAPI server running?`;
-  }
-  return error instanceof Error ? error.message : "Unknown chat error.";
-}
+// `normalizeError` was hoisted to ../lib/backend.ts as `normalizeFetchError`
+// so the workspace chat path gets the same friendly fetch-failure copy.
+const normalizeError = normalizeFetchError;
 
 function handleEvent(
   ev: SSEvent,

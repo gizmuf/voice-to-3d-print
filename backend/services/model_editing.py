@@ -1112,7 +1112,12 @@ def public_analysis_payload(analysis: dict) -> dict:
 def _load_mesh(stl_path: Path) -> trimesh.Trimesh:
     mesh = trimesh.load_mesh(stl_path, force="mesh")
     if not isinstance(mesh, trimesh.Trimesh):
-        raise RuntimeError("Uploaded model is not a single mesh.")
+        try:
+            mesh = trimesh.util.concatenate(tuple(mesh.dump()))
+        except Exception as exc:
+            raise RuntimeError("Uploaded model could not be merged into one mesh.") from exc
+    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+        raise RuntimeError("Uploaded model does not contain any mesh faces.")
     return mesh
 
 

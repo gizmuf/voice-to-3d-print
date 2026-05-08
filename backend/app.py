@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -11,6 +12,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+
+_DESIGN_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _validate_design_id(design_id: str) -> str:
+    """Reject design ids that aren't 32-char hex UUIDs.
+
+    Both ``new_design_id`` and ``new_workspace_id`` produce ``uuid4().hex``,
+    so anything outside that shape is either user-supplied junk or a path
+    traversal attempt (``..``, slashes, control chars). All ``/design/{id}/…``
+    handlers funnel through here before touching the filesystem.
+    """
+    if not _DESIGN_ID_RE.match(design_id or ""):
+        raise HTTPException(status_code=404, detail="Design not found.")
+    return design_id
 
 from services.ai.agent import load_conversation, stream_turn
 from services.ai.agent_v2 import stream_turn as stream_design_turn
@@ -88,13 +105,31 @@ from slicer_service import ProcessResult, _slice_mesh, process_model, validate_m
 
 app = FastAPI(title="3dprint Backend")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: `*` + `allow_credentials=True` is rejected by browsers (the spec
+# disallows the combination), so the previous config silently dropped
+# credentials. We default to permissive origins WITHOUT credentials, which
+# matches our actual usage (no cookies, no auth headers cross-origin). To
+# enable credentialed access from a known frontend, set CORS_ORIGINS to a
+# comma-separated origin list and the middleware will switch to that list
+# with credentials enabled.
+_cors_origins_env = settings.cors_origins.strip()
+if _cors_origins_env:
+    _cors_origins = [origin.strip() for origin in _cors_origins_env.split(",") if origin.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 artifacts_path = Path(settings.output_dir)
 artifacts_path.mkdir(parents=True, exist_ok=True)
@@ -539,6 +574,7 @@ def create_workspace_endpoint(request: WorkspaceCreateRequest) -> WorkspaceRespo
 
 @app.get("/workspace/{workspace_id}", response_model=WorkspaceResponse)
 def get_workspace_endpoint(workspace_id: str) -> WorkspaceResponse:
+    _validate_design_id(workspace_id)
     record = get_workspace(workspace_id)
     return WorkspaceResponse(
         workspace_id=record.workspace_id,
@@ -550,6 +586,7 @@ def get_workspace_endpoint(workspace_id: str) -> WorkspaceResponse:
 
 @app.post("/workspace/{workspace_id}/mutate", response_model=WorkspaceResponse)
 def mutate_workspace_endpoint(workspace_id: str, request: WorkspaceMutation) -> WorkspaceResponse:
+    _validate_design_id(workspace_id)
     record = update_workspace(workspace_id, request)
     return WorkspaceResponse(
         workspace_id=record.workspace_id,
@@ -561,6 +598,7 @@ def mutate_workspace_endpoint(workspace_id: str, request: WorkspaceMutation) -> 
 
 @app.post("/workspace/{workspace_id}/preview", response_model=WorkspacePreviewResponse)
 def preview_workspace_endpoint(workspace_id: str, request: WorkspacePreviewRequest) -> WorkspacePreviewResponse:
+    _validate_design_id(workspace_id)
     record = ensure_current_revision(workspace_id, request.expected_revision_id)
     workspace_dir = settings.output_dir / "workspaces" / workspace_id
     try:
@@ -589,6 +627,7 @@ def preview_workspace_endpoint(workspace_id: str, request: WorkspacePreviewReque
 
 @app.post("/workspace/{workspace_id}/build", response_model=WorkspaceBuildResponse)
 def build_workspace_endpoint(workspace_id: str, request: WorkspaceBuildRequest) -> WorkspaceBuildResponse:
+    _validate_design_id(workspace_id)
     record = ensure_current_revision(workspace_id, request.expected_revision_id)
     workspace_dir = settings.output_dir / "workspaces" / workspace_id
     try:
@@ -635,6 +674,7 @@ def build_workspace_endpoint(workspace_id: str, request: WorkspaceBuildRequest) 
 
 @app.post("/workspace/{workspace_id}/ai-edit", response_model=WorkspaceResponse)
 async def ai_edit_workspace_endpoint(workspace_id: str, request: WorkspaceAiEditRequest) -> WorkspaceResponse:
+    _validate_design_id(workspace_id)
     record = ensure_current_revision(workspace_id, request.expected_revision_id)
     param_changes = await ai_edit_workspace_model(record.editable_model, request.body_id, request.prompt)
     updated = update_workspace(
@@ -1517,6 +1557,7 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
     workspace's template. Falls back to the legacy capability-matrix agent
     only when the workspace has no build123d seeder available.
     """
+    _validate_design_id(workspace_id)
     from services.codegen.store import get_design_or_none
 
     design = get_design_or_none(workspace_id)
@@ -1622,11 +1663,13 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
 
 @app.get("/workspace/{workspace_id}/conversation")
 def workspace_conversation_endpoint(workspace_id: str) -> dict:
+    _validate_design_id(workspace_id)
     return {"workspace_id": workspace_id, "messages": load_conversation(workspace_id)}
 
 
 @app.get("/workspace/{workspace_id}/editability")
 def workspace_editability_endpoint(workspace_id: str) -> dict:
+    _validate_design_id(workspace_id)
     record = get_workspace(workspace_id)
     assessment = assess_editability(record.editable_model)
     return {
@@ -1659,6 +1702,7 @@ class WorkspaceExportBundleResponse(BaseModel):
 def workspace_export_bundle_endpoint(
     workspace_id: str, request: WorkspaceExportBundleRequest
 ) -> WorkspaceExportBundleResponse:
+    _validate_design_id(workspace_id)
     result = export_bundle_service(
         workspace_id,
         request.expected_revision_id,
@@ -1678,13 +1722,16 @@ def workspace_export_bundle_endpoint(
 
 @app.get("/workspace/{workspace_id}/export-bundle/dry-run")
 def workspace_export_bundle_dry_run_endpoint(workspace_id: str) -> dict:
+    _validate_design_id(workspace_id)
     return export_bundle_dry_run(workspace_id)
 
 
 @app.get("/printer-profiles")
 def printer_profiles_endpoint() -> dict:
+    from services.printer_profiles import get_profile
+
     return {
-        "default": settings.default_printer_profile_id,
+        "default": get_profile(settings.default_printer_profile_id).id,
         "profiles": [p.model_dump() for p in list_printer_profiles()],
     }
 
@@ -2050,8 +2097,10 @@ def design_templates_endpoint_aliased() -> dict:
 
 @app.get("/design/{design_id}")
 def design_get_endpoint(design_id: str) -> dict:
+    _validate_design_id(design_id)
+    from services.printer_profiles import get_profile
+
     record = get_record(design_id)
-    editable = design_to_editable_model(record.design, record.latest_build)
     return {
         "design_id": record.design.id,
         "revision_id": record.design.revision_id,
@@ -2060,6 +2109,9 @@ def design_get_endpoint(design_id: str) -> dict:
         "script": record.design.script,
         "parameters": [p.model_dump() for p in record.design.parameters],
         "features": [f.model_dump() for f in record.design.features],
+        "printer_profile_id": (
+            record.design.printer_profile_id or get_profile(settings.default_printer_profile_id).id
+        ),
         "latest_build": (
             {
                 "revision_id": record.latest_build.revision_id,
@@ -2081,7 +2133,6 @@ def design_get_endpoint(design_id: str) -> dict:
             if record.latest_build
             else None
         ),
-        "editable_model": editable.model_dump(mode="json"),
     }
 
 
@@ -2107,6 +2158,7 @@ def design_delete_endpoint(design_id: str) -> dict:
     """Permanently delete a design — the design.json, all revisions, all
     artifacts, and the conversation. The user has to confirm in the UI; we
     don't ask twice on the backend."""
+    _validate_design_id(design_id)
     import shutil
 
     target = settings.output_dir / "designs" / design_id
@@ -2137,10 +2189,11 @@ class DesignChatRequest(BaseModel):
 
 @app.post("/design/{design_id}/chat")
 async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
+    _validate_design_id(design_id)
     generator = stream_design_turn(
         design_id,
         request.message,
-        printer_profile_id=request.printer_profile_id,
+        printer_profile_id=_effective_printer_id(design_id, request.printer_profile_id),
         selected_feature_id=request.selected_feature_id,
         selected_feature_label=request.selected_feature_label,
     )
@@ -2149,6 +2202,7 @@ async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
 
 @app.get("/design/{design_id}/conversation")
 def design_conversation_endpoint(design_id: str) -> dict:
+    _validate_design_id(design_id)
     return {
         "design_id": design_id,
         "messages": load_design_conversation(design_id),
@@ -2173,6 +2227,7 @@ def design_export_endpoint(design_id: str, request: DesignExportRequest) -> dict
     Hides the file-format zoo behind the user's actual question — what are
     they going to do with the part?
     """
+    _validate_design_id(design_id)
     from services.codegen.design_export import export_preset_bundle
     from services.codegen.store import get_design
 
@@ -2187,13 +2242,14 @@ def design_export_endpoint(design_id: str, request: DesignExportRequest) -> dict
         design,
         preset=request.preset,  # type: ignore[arg-type]
         expected_revision_id=request.expected_revision_id,
-        printer_profile_id=request.printer_profile_id,
+        printer_profile_id=_effective_printer_id(design, request.printer_profile_id),
     )
 
 
 @app.post("/design/{design_id}/print-bundle")
 @app.post("/design/{design_id}/make-printable")
 def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) -> dict:
+    _validate_design_id(design_id)
     from services.codegen.design_export import export_preset_bundle
     from services.codegen.store import get_design
 
@@ -2202,7 +2258,7 @@ def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) ->
         design,
         preset="fdm",
         expected_revision_id=request.expected_revision_id,
-        printer_profile_id=request.printer_profile_id,
+        printer_profile_id=_effective_printer_id(design, request.printer_profile_id),
     )
     manifest = bundle.get("manifest") or {}
     report = manifest.get("manufacturability") or {}
@@ -2264,6 +2320,7 @@ def design_revisions_endpoint(design_id: str) -> dict:
     Each revision summary has the GLB url for thumbnail rendering, mesh hash,
     bounding box, manufacturability status, and build duration.
     """
+    _validate_design_id(design_id)
     from services.codegen.store import list_revisions
 
     return {
@@ -2274,6 +2331,8 @@ def design_revisions_endpoint(design_id: str) -> dict:
 
 @app.get("/design/{design_id}/revisions/{revision_id}/diff")
 def design_revision_diff_endpoint(design_id: str, revision_id: str) -> dict:
+    _validate_design_id(design_id)
+    _validate_design_id(revision_id)
     from services.codegen.diff import revision_diff
 
     try:
@@ -2289,6 +2348,8 @@ class DesignRevisionRestoreRequest(BaseModel):
 @app.delete("/design/{design_id}/revisions/{revision_id}")
 def design_revisions_delete_endpoint(design_id: str, revision_id: str) -> dict:
     """Remove a past revision's snapshot from disk. Refuses the current head."""
+    _validate_design_id(design_id)
+    _validate_design_id(revision_id)
     from services.codegen.store import delete_revision
 
     try:
@@ -2311,6 +2372,8 @@ def design_revisions_restore_endpoint(
     The current head becomes the parent of the restored revision — subsequent
     edits branch from here. Original revisions remain on disk untouched.
     """
+    _validate_design_id(design_id)
+    _validate_design_id(request.revision_id)
     from services.codegen.store import restore_revision
 
     try:
@@ -2350,6 +2413,7 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
     it doesn't crash) but no Anthropic round trip. Subsecond latency for
     simple parametric designs.
     """
+    _validate_design_id(design_id)
     from services.codegen.store import get_design, save_design, new_revision_id, save_build
     from services.codegen.engine import build_design
 
@@ -2368,17 +2432,35 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
 
     # Coerce string inputs (sliders / number inputs send strings) to the
     # parameter's existing runtime type — same logic as the agent's tool.
+    # If a fractional value lands on an int parameter we reject the request
+    # rather than silently truncating; the user's intent was probably to
+    # increase precision, and a 200-OK with `value: 3` for an input of
+    # `value: 3.7` is worse than a 400 explaining the type.
     existing = target.value
-    new_value = request.value
+    requested_value = request.value
+    new_value: object = requested_value
     try:
         if isinstance(existing, bool):
-            new_value = bool(new_value) if not isinstance(new_value, str) else (
-                new_value.lower() in ("1", "true", "yes", "on")
+            new_value = (
+                bool(requested_value)
+                if not isinstance(requested_value, str)
+                else requested_value.lower() in ("1", "true", "yes", "on")
             )
         elif isinstance(existing, int) and not isinstance(existing, bool):
-            new_value = int(float(new_value))
+            as_float = float(requested_value)
+            if as_float != int(as_float):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Parameter '{request.name}' is an integer; got {requested_value!r}. "
+                        f"Pass a whole number or change the parameter type."
+                    ),
+                )
+            new_value = int(as_float)
         elif isinstance(existing, float):
-            new_value = float(new_value)
+            new_value = float(requested_value)
+    except HTTPException:
+        raise
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"Bad value for '{request.name}': {exc}") from exc
 
@@ -2399,7 +2481,12 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
     save_design(design)
 
     try:
-        build = build_design(design, targets=["stl", "glb"], process="fdm")
+        build = build_design(
+            design,
+            targets=["stl", "glb"],
+            process="fdm",
+            printer_profile_id=_effective_printer_id(design, None),
+        )
     except DesignBuildError as exc:
         # Roll back the parameter change.
         target.value = existing
@@ -2432,6 +2519,7 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
 def design_parameter_lock_endpoint(
     design_id: str, request: DesignParameterLockUpdate
 ) -> dict:
+    _validate_design_id(design_id)
     from services.codegen.store import get_design, save_design
 
     design = get_design(design_id)
@@ -2449,14 +2537,97 @@ def design_parameter_lock_endpoint(
     }
 
 
+class DesignPrinterUpdate(BaseModel):
+    profile_id: str
+
+
+@app.post("/design/{design_id}/printer")
+def design_printer_endpoint(design_id: str, request: DesignPrinterUpdate) -> dict:
+    """Bind the design to a specific printer profile.
+
+    Stored on the design and immediately rebuilds the current revision so the
+    manufacturability panel reflects the selected printer without waiting for
+    the next slider drag or chat turn.
+    """
+    _validate_design_id(design_id)
+    from services.codegen.store import get_design, save_build, save_design
+    from services.printer_profiles import get_profile
+
+    design = get_design(design_id)
+    # Resolve through the registry so we reject unknown ids cleanly. The
+    # registry falls back to the default for unknown ids; we want a hard
+    # error here instead so the UI knows its dropdown is stale.
+    available = {p.id for p in list_printer_profiles()}
+    if request.profile_id not in available:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown printer profile: {request.profile_id}"
+        )
+    profile = get_profile(request.profile_id)
+    design.printer_profile_id = profile.id
+    try:
+        build = build_design(
+            design,
+            targets=["stl", "glb"],
+            printer_profile_id=profile.id,
+            process="fdm",
+        )
+    except DesignBuildError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Printer profile rebuild failed.", "error": str(exc)},
+        ) from exc
+    save_design(design)
+    save_build(design.id, build)
+    return {
+        "ok": True,
+        "design_id": design_id,
+        "printer_profile_id": profile.id,
+        "label": profile.label,
+        "build": {
+            "revision_id": build.revision_id,
+            "mesh_hash": build.mesh_hash,
+            "bounding_box_mm": build.bounding_box_mm,
+            "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+            "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        },
+    }
+
+
+def _effective_printer_id(
+    design_or_id: str | None,
+    request_profile_id: str | None,
+) -> str | None:
+    """Pick the printer id for a request: explicit override → design pref → default.
+
+    ``design_or_id`` may be a Design instance (preferred — already loaded) or a
+    design_id (we'll fetch it). Returns ``None`` only when the design is
+    missing and no override is provided, in which case the engine falls back
+    to its own default.
+    """
+    if request_profile_id:
+        return request_profile_id
+    from services.codegen.store import get_design_or_none
+    from services.codegen.models import Design as _Design
+
+    design = (
+        design_or_id
+        if isinstance(design_or_id, _Design)
+        else get_design_or_none(design_or_id) if design_or_id else None
+    )
+    if design and design.printer_profile_id:
+        return design.printer_profile_id
+    return None
+
+
 @app.post("/design/{design_id}/build")
 def design_build_endpoint(design_id: str, request: DesignBuildRequest) -> dict:
+    _validate_design_id(design_id)
     design = get_design(design_id)
     try:
         build = build_design(
             design,
             targets=request.targets,
-            printer_profile_id=request.printer_profile_id,
+            printer_profile_id=_effective_printer_id(design, request.printer_profile_id),
             process=request.process,
         )
     except DesignBuildError as exc:
@@ -2473,7 +2644,11 @@ def design_build_endpoint(design_id: str, request: DesignBuildRequest) -> dict:
 
         stl_path = Path(build.artifacts["stl"].path)
         gcode_path = stl_path.parent / "model.gcode"
-        if _slice_mesh(stl_path, gcode_path, profile_id=request.printer_profile_id):
+        if _slice_mesh(
+            stl_path,
+            gcode_path,
+            profile_id=_effective_printer_id(design, request.printer_profile_id),
+        ):
             from services.codegen.models import BuildArtifact
 
             build.artifacts["gcode"] = BuildArtifact(
