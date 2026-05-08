@@ -114,9 +114,11 @@ to shape primitives (Box, Cylinder, Sphere, RegularPolygon, Slot…) accumulate.
 - Cylindrical side-wall holes: a horizontal ring means every hole has the \
 same Z value and different angular positions. Do not leave cutter cylinders \
 centered at `(0, 0, z)` — that cuts through the part center. Place each cutter \
-center on the wall radius `(cos(a)*outer_radius, sin(a)*outer_radius, z)` and \
-orient its axis radially. Vertical distribution means varying Z; horizontal \
-distribution means varying angle at one Z.
+center at the middle of wall thickness, e.g. radius \
+`outer_radius - wall_thickness / 2`, and orient its axis radially. A robust \
+pattern is `Pos(x, y, z) * Rot(0, 0, angle_deg) * Cylinder(..., rotation=(0, 90, 0))`. \
+Vertical distribution means varying Z; horizontal distribution means varying \
+angle at one Z.
 - Selectors: `part.edges().filter_by(Axis.Z)`, `part.faces().sort_by(Axis.Z)[-1]` (top face).
 - Modifiers: `fillet(edges, radius=...)`, `chamfer(edges, length=...)`, \
 `offset(amount=..., openings=...)` for shells.

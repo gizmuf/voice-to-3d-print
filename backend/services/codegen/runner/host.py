@@ -304,7 +304,10 @@ def main() -> int:
                 from build123d import export_stl, export_step
 
                 if "stl" in targets:
-                    export_stl(result_obj, str(stl_path), tolerance=0.05, angular_tolerance=0.5)
+                    # Keep curved CAD features visually trustworthy in the viewer.
+                    # 0.5 rad produced visibly faceted cups/holes; ~5 degrees is
+                    # still lightweight while making cylinders read as round.
+                    export_stl(result_obj, str(stl_path), tolerance=0.05, angular_tolerance=0.08)
                     artifacts["stl"] = str(stl_path)
                 if "step" in targets:
                     try:
