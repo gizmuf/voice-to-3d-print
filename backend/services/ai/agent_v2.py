@@ -33,6 +33,7 @@ from services.codegen.store import (
 
 
 MAX_TOOL_ITERATIONS = 10
+MAX_FAILED_TOOL_CALLS = 2
 
 
 def _system_blocks(
@@ -146,6 +147,7 @@ def stream_turn(
 
     client = Anthropic(api_key=settings.anthropic_api_key)
     total_in = total_out = cache_read = cache_write = 0
+    failed_tool_calls = 0
     persisted = False
 
     def _persist_history() -> None:
@@ -223,6 +225,8 @@ def stream_turn(
                 result = execute_tool(use["name"], use["input"], ctx)
                 tool_ms = int((time.perf_counter() - tool_started) * 1000)
                 is_error = bool(result.get("error"))
+                if is_error:
+                    failed_tool_calls += 1
                 record_tool_call(
                     tool_name=use["name"],
                     success=not is_error,
@@ -247,6 +251,17 @@ def stream_turn(
                     }
                 )
             history.append({"role": "user", "content": tool_results})
+            if failed_tool_calls >= MAX_FAILED_TOOL_CALLS:
+                yield _sse(
+                    "error",
+                    {
+                        "message": (
+                            "Stopped after two failed CAD tool calls to avoid a costly retry loop. "
+                            "The design is unchanged; refine the request or use a known-good template."
+                        )
+                    },
+                )
+                break
         else:
             yield _sse(
                 "warning",
@@ -400,4 +415,4 @@ def _repair_dangling_tool_uses(history: list[dict]) -> list[dict]:
     return out
 
 
-__all__ = ["stream_turn", "MAX_TOOL_ITERATIONS"]
+__all__ = ["stream_turn", "MAX_TOOL_ITERATIONS", "MAX_FAILED_TOOL_CALLS"]

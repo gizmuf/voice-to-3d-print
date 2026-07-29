@@ -119,11 +119,17 @@ export function useDesignStream(designId: string | null) {
         if (!response.ok) {
           throw new Error(`Chat request failed: ${response.status}`);
         }
+        let streamFailed = false;
         for await (const ev of parseSSEStream(response)) {
           if (controller.signal.aborted) break;
+          if (ev.event === "error") {
+            const errorMessage = String(ev.data.message ?? "The CAD agent could not complete this edit.");
+            streamFailed = true;
+            setState({ status: "error", errorMessage });
+          }
           handleEvent(ev, { updateAssistant, setLatestRevisionId });
         }
-        setState({ status: "idle" });
+        if (!streamFailed) setState({ status: "idle" });
       } catch (error) {
         if (controller.signal.aborted) {
           setState({ status: "idle" });

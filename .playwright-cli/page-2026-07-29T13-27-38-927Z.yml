@@ -1,0 +1,69 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e2]
+  - main [ref=e3]:
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: PULSAI · DESIGN STUDIO (BETA)
+      - heading "Zaprojektuj. Zobacz. Wydrukuj." [level=1] [ref=e7]
+      - paragraph [ref=e8]: Rozmawiaj z Pulsai jak z projektantem. Model, rozmowa i parametry pozostają razem od pierwszego pomysłu do wydruku.
+    - group [ref=e9]:
+      - generic "Jewelry, relief and sketch workflow" [ref=e10] [cursor=pointer]
+      - option "Brooch" [selected]
+      - option "Charm"
+      - option "Earring"
+      - option "Medallion"
+      - option "Pendant"
+      - option "Relief plate"
+      - option "Freeform jewelry"
+      - option "Resin print" [selected]
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - paragraph [ref=e14]: PULSAI COPILOT
+          - heading "Co chcesz zaprojektować?" [level=2] [ref=e15]
+          - paragraph [ref=e16]: Napisz albo powiedz po polsku. Model pojawi się obok, a rozmowa zostanie w tym samym miejscu.
+        - textbox "Np. uchwyt na telefon szeroki na 80 mm, z otworem na kabel…" [disabled] [ref=e17]
+        - generic [ref=e18]:
+          - button "Powiedz po polsku" [disabled] [ref=e20] [cursor=pointer]:
+            - generic [ref=e24]: Mów
+          - generic [ref=e25]:
+            - text: Wykonanie
+            - combobox "Wykonanie" [ref=e26]:
+              - option "Druk 3D" [selected]
+              - option "CNC"
+              - option "Jeszcze nie wiem"
+          - button "Projektuję…" [disabled] [ref=e27] [cursor=pointer]
+      - region "Podgląd modelu 3D" [ref=e28]:
+        - generic [ref=e30]:
+          - generic [ref=e31]: X
+          - generic [ref=e32]: "Y"
+          - generic [ref=e33]: Z
+        - generic [ref=e34]:
+          - strong [ref=e36]: Tu pojawi się Twój model
+          - generic [ref=e37]: Podgląd pozostaje widoczny podczas całej rozmowy i każdej poprawki.
+        - generic [ref=e38]: "TRYB: ORBITA"
+      - complementary [ref=e39]:
+        - generic [ref=e40]:
+          - paragraph [ref=e41]: SZYBKI START
+          - heading "Przykładowe projekty" [level=3] [ref=e42]
+          - paragraph [ref=e43]: Kliknij przykład albo opisz własny pomysł w czacie.
+        - generic [ref=e44]:
+          - button "Maskownica głośnika 200 mm" [disabled] [ref=e45] [cursor=pointer]:
+            - generic [ref=e47]: →
+          - button "Stojak na telefon" [disabled] [ref=e48] [cursor=pointer]:
+            - generic [ref=e50]: →
+          - button "Pojemnik na długopisy" [disabled] [ref=e51] [cursor=pointer]:
+            - generic [ref=e53]: →
+          - button "Pudełko 80×60×30" [disabled] [ref=e54] [cursor=pointer]:
+            - generic [ref=e56]: →
+        - group [ref=e57]:
+          - generic "Importuj STEP lub STL" [ref=e58] [cursor=pointer]
+        - group [ref=e59]:
+          - generic "Szablony parametryczne" [ref=e60] [cursor=pointer]
+    - generic [ref=e61]:
+      - strong [ref=e62]: Why this is different
+      - list [ref=e63]:
+        - listitem [ref=e64]: The design is a build123d Python script Claude can read and rewrite — no fixed templates.
+        - listitem [ref=e65]: Triangular holes, hex grids, fillets, shells, threads — anything build123d expresses, the AI can build.
+        - listitem [ref=e66]: Outputs STL + GLB + STEP + DXF. STEP/DXF go straight into Fusion or your CAM tool.
+        - listitem [ref=e67]: Manufacturability runs after every build, FDM and CNC modes both supported.
+        - listitem [ref=e68]: Scripts run in a sandbox (AST audit, no network, no env passthrough, CPU/memory limits).

@@ -118,6 +118,23 @@ _NATIVE_MUTABLE: dict[str, dict[str, list[str]]] = {
             "arm_drop_mm",
         ],
     },
+    "jewelry_piece": {
+        "body": ["width", "height", "thickness"],
+        "hole": ["loop_outer_diameter_mm", "loop_inner_diameter_mm", "attachment_count"],
+        "boss": ["relief_depth_mm"],
+        "fillet": ["edge_bevel_mm"],
+    },
+    "jewelry_pendant": {
+        "body": ["width", "height", "thickness"],
+        "hole": ["loop_outer_diameter_mm", "loop_inner_diameter_mm", "attachment_count"],
+        "boss": ["relief_depth_mm"],
+        "fillet": ["edge_bevel_mm"],
+    },
+    "jewelry_ring": {
+        "body": ["inner_diameter", "band_width"],
+        "thickness": ["band_thickness_mm", "comfort_bevel_mm", "relief_depth_mm"],
+        "hole": ["stone_seat_diameter_mm"],
+    },
 }
 
 

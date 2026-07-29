@@ -69,6 +69,11 @@ def _coerce_targets(requested: Iterable[str] | None) -> list[str]:
     out = [t for t in requested if t in SUPPORTED_TARGETS]
     if not out:
         out = ["stl", "step", "glb"]
+    # GLB export is derived from the tessellated STL mesh in the runner.
+    # Requesting only GLB must therefore pull in its dependency; otherwise
+    # the runner reports success with no preview artifact.
+    if "glb" in out and "stl" not in out:
+        out.insert(0, "stl")
     return out
 
 

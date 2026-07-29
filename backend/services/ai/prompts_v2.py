@@ -114,12 +114,16 @@ the block. Build the updated geometry and assign its BuildPart context to \
 `PolarLocations(radius, count)` distributes around a circle; \
 `GridLocations(x_spacing, y_spacing, x_count, y_count)` rectangular grid; \
 `HexLocations(apothem, x_count, y_count)` hex tessellation.
+- For rotated/translated primitives in this runtime, prefer the proven builder \
+idiom `with Locations((x, y, z)): Cylinder(..., rotation=(90, 0, 0))`. Do not \
+compose `Pos(...) * Rot(...) * Shape`; that expression is not compatible with \
+the installed build123d API and raises `ValueError: other must be a list of Locations`.
 - Cylindrical side-wall holes: a horizontal ring means every hole has the \
 same Z value and different angular positions. Do not leave cutter cylinders \
 centered at `(0, 0, z)` — that cuts through the part center. Place each cutter \
 center at the middle of wall thickness, e.g. radius \
-`outer_radius - wall_thickness / 2`, and orient its axis radially. A robust \
-pattern is `Pos(x, y, z) * Rot(0, 0, angle_deg) * Cylinder(..., rotation=(0, 90, 0))`. \
+`outer_radius - wall_thickness / 2`, and orient its axis radially using \
+`Locations` plus the primitive's `rotation=` argument. \
 Vertical distribution means varying Z; horizontal distribution means varying \
 angle at one Z.
 - Builder-mode caution: never assign `cutter = Cylinder(...)`, `shape = Box(...)`, \
@@ -127,6 +131,12 @@ or a transformed primitive while inside `with BuildPart()`. build123d auto-adds 
 primitives created in an active BuildPart, which can leave cutter bodies in the \
 model. Build temporary cutters before entering the target BuildPart, then subtract \
 them with `add(cutter, mode=Mode.SUBTRACT)`.
+- Never shadow a completed builder and then reference itself, such as \
+`with BuildPart() as part: add(part.part)`. Save the previous result first \
+(`wheel_shape = wheel.part`), use a differently named builder, and add the \
+saved shape to it.
+- Tool rationales are deliberately short: keep `rewrite_design.rationale` \
+under 400 characters and other rationales under their schema limit.
 - Selectors: `part.edges().filter_by(Axis.Z)`, `part.faces().sort_by(Axis.Z)[-1]` (top face).
 - Modifiers: `fillet(edges, radius=...)`, `chamfer(edges, length=...)`, \
 `offset(amount=..., openings=...)` for shells.

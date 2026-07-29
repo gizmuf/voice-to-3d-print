@@ -117,7 +117,7 @@ class OrientationSuggestion(BaseModel):
 
 
 class ManufacturabilityReport(BaseModel):
-    process: Literal["fdm", "cnc"]
+    process: Literal["fdm", "cnc", "either"]
     status: Literal["safe", "warn", "unprintable"]
     issues: list[ManufacturabilityIssue] = Field(default_factory=list)
     estimated_volume_mm3: float | None = None

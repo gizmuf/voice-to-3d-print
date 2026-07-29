@@ -1,0 +1,165 @@
+- generic [ref=f3e1]:
+  - alert [ref=f3e2]
+  - main [ref=f3e3]:
+    - generic [ref=f3e4]:
+      - generic [ref=f3e5]:
+        - paragraph [ref=f3e6]: PULSAI · DESIGN STUDIO
+        - heading "Hamster wheel" [level=1] [ref=f3e7]
+        - paragraph [ref=f3e8]:
+          - text: revision
+          - code [ref=f3e9]: f853d3df
+          - text: "· 16 parameters · 4 feature blocks · target:"
+          - strong [ref=f3e10]: fdm
+      - generic [ref=f3e11]:
+        - generic "Manufacturability checks and slicer profile use this printer." [ref=f3e12]:
+          - generic [ref=f3e13]: Printer
+          - combobox "Printer Missing yours? Use the closest bed/nozzle match or Generic 0.4mm." [ref=f3e14] [cursor=pointer]:
+            - option "Prusa MK4 (default)" [selected]
+            - option "Prusa MK3S+"
+            - option "Prusa MINI+"
+            - option "Prusa XL"
+            - option "Bambu Lab X1 Carbon"
+            - option "Bambu Lab P1S"
+            - option "Bambu Lab H2S"
+            - option "Bambu Lab A1"
+            - option "Bambu Lab A1 mini"
+            - option "Voron 2.4 (350mm)"
+            - option "Creality Ender 3 V2"
+            - option "Creality K1"
+            - option "Creality K1 Max"
+            - option "Elegoo Neptune 4"
+            - option "Anycubic Kobra 2"
+            - option "Generic 0.4mm FDM"
+          - generic [ref=f3e15]: Missing yours? Use the closest bed/nozzle match or Generic 0.4mm.
+        - button "New jewelry sketch" [ref=f3e16] [cursor=pointer]
+        - button "← Back to designs" [ref=f3e17] [cursor=pointer]
+    - generic [ref=f3e18]:
+      - complementary [ref=f3e19]:
+        - generic [ref=f3e20]:
+          - generic [ref=f3e21]:
+            - heading "Controls" [level=3] [ref=f3e22]
+            - generic [ref=f3e23]: Change the model without writing a prompt.
+          - generic "Live preview re-renders the model on slider drag (uses more compute)" [ref=f3e24] [cursor=pointer]:
+            - checkbox "live" [ref=f3e25]
+            - text: live
+        - generic [ref=f3e26]:
+          - generic [ref=f3e27]:
+            - generic [ref=f3e28]:
+              - generic "wheel_diameter" [ref=f3e29]: Wheel Diameter
+              - generic [ref=f3e30]:
+                - generic [ref=f3e31]: 120 mm
+                - button "Lock" [ref=f3e32] [cursor=pointer]
+            - generic [ref=f3e33]:
+              - slider [ref=f3e34]: "120"
+              - spinbutton [ref=f3e35]: "120"
+            - generic [ref=f3e36]: Outside diameter of the running wheel.
+          - generic [ref=f3e37]:
+            - generic [ref=f3e38]:
+              - generic "track_width" [ref=f3e39]: Track Width
+              - generic [ref=f3e40]:
+                - generic [ref=f3e41]: 34 mm
+                - button "Lock" [ref=f3e42] [cursor=pointer]
+            - generic [ref=f3e43]:
+              - slider [ref=f3e44]: "34"
+              - spinbutton [ref=f3e45]: "34"
+            - generic [ref=f3e46]: Usable width of the continuous running tread.
+          - generic [ref=f3e47]:
+            - generic [ref=f3e48]:
+              - generic "tread_thickness" [ref=f3e49]: Tread Thickness
+              - generic [ref=f3e50]:
+                - generic [ref=f3e51]: 2.4 mm
+                - button "Lock" [ref=f3e52] [cursor=pointer]
+            - generic [ref=f3e53]:
+              - slider [ref=f3e54]: "2.4"
+              - spinbutton [ref=f3e55]: "2.4"
+            - generic [ref=f3e56]: Radial thickness of the continuous tread.
+          - generic [ref=f3e57]:
+            - generic [ref=f3e58]:
+              - generic "spoke_count" [ref=f3e59]: Spoke Count
+              - generic [ref=f3e60]:
+                - generic [ref=f3e61]: "6"
+                - button "Lock" [ref=f3e62] [cursor=pointer]
+            - generic [ref=f3e63]:
+              - slider [ref=f3e64]: "6"
+              - spinbutton [ref=f3e65]: "6"
+            - generic [ref=f3e66]: Number of radial support ribs.
+          - button "Show 12 more controls" [ref=f3e67] [cursor=pointer]
+        - heading "Features" [level=3] [ref=f3e68]
+        - generic [ref=f3e69]:
+          - button "Feature continuous_tread, kind block" [ref=f3e70] [cursor=pointer]:
+            - generic [ref=f3e71]: continuous_tread
+          - button "Feature hub_and_spokes, kind block" [ref=f3e72] [cursor=pointer]:
+            - generic [ref=f3e73]: hub_and_spokes
+          - button "Feature stable_stand, kind block" [ref=f3e74] [cursor=pointer]:
+            - generic [ref=f3e75]: stable_stand
+          - button "Feature axle, kind block" [ref=f3e76] [cursor=pointer]:
+            - generic [ref=f3e77]: axle
+        - heading "Manufacturability" [level=3] [ref=f3e78]
+        - note [ref=f3e79]:
+          - text: Slicer not configured. Install
+          - link "PrusaSlicer" [ref=f3e80] [cursor=pointer]:
+            - /url: https://www.prusa3d.com/page/prusaslicer_424/
+          - text: or set
+          - code [ref=f3e81]: PRUSASLICER_PATH
+          - text: to enable G-code, print time, and material estimates. STL/GLB export still works.
+        - note [ref=f3e82]:
+          - generic [ref=f3e83]:
+            - text: Current orientation has
+            - strong [ref=f3e84]: ~12% overhang
+            - text: . Reorienting (
+            - emphasis [ref=f3e85]: rotate X +90
+            - text: ", Euler 90°, 0°, 0°) would drop it to"
+            - strong [ref=f3e86]: ~8%
+            - text: .
+          - button "Try this orientation" [ref=f3e87] [cursor=pointer]
+        - generic [ref=f3e88]:
+          - generic [ref=f3e89]: warn
+          - generic [ref=f3e90]:
+            - strong [ref=f3e91]: overhang_steep
+            - text: ": ~12% of surface area overhangs steeper than 55° (the as-modeled limit for Prusa MK4 (default)). Reorienting (rotate X +90) drops it to ~8%."
+            - emphasis [ref=f3e92]: "→ Best fix: rotate the part using Euler (90°, 0°, 0°) — overhang becomes ~8%. Or add supports / chamfer in place."
+            - generic [ref=f3e93]:
+              - generic [ref=f3e94]: x -23.5 · y -14.3 · z 78.7
+              - generic [ref=f3e95]:
+                - button "Locate" [ref=f3e96] [cursor=pointer]
+                - button "Fix this" [ref=f3e97] [cursor=pointer]
+        - button "Export FDM ZIP" [ref=f3e98] [cursor=pointer]
+        - generic [ref=f3e99]: Download only. Use “Fix this” to ask Pulsai to change geometry.
+      - generic [ref=f3e100]:
+        - generic [ref=f3e105]:
+          - generic [ref=f3e146]: Drag to orbit · wheel to zoom
+          - button "Zoom in" [active] [ref=f3e147] [cursor=pointer]: +
+          - button "Zoom out" [ref=f3e148] [cursor=pointer]: −
+          - button "Reset view" [ref=f3e149] [cursor=pointer]
+          - 'button "Mode: orbit" [ref=f3e150] [cursor=pointer]'
+          - group [ref=f3e151]:
+            - generic "Appearance" [ref=f3e152] [cursor=pointer]
+        - generic [ref=f3e113]:
+          - button "Export ⌄" [ref=f3e115] [cursor=pointer]
+          - link "STL" [ref=f3e116] [cursor=pointer]:
+            - /url: http://localhost:8000/artifacts/designs/7d9bf919f0f44ba4a9b8d5ffa17ffcd0/model.stl
+          - link "GLB" [ref=f3e117] [cursor=pointer]:
+            - /url: http://localhost:8000/artifacts/designs/7d9bf919f0f44ba4a9b8d5ffa17ffcd0/model.glb
+      - complementary [ref=f3e118]:
+        - generic [ref=f3e119]:
+          - generic [ref=f3e120]:
+            - paragraph [ref=f3e121]: PULSAI COPILOT
+            - heading "Design by conversation" [level=3] [ref=f3e122]
+          - generic [ref=f3e123]: ready
+        - paragraph [ref=f3e125]:
+          - text: "Ask for any geometry change. Examples:"
+          - emphasis [ref=f3e126]: "\"hexagonal holes\""
+          - text: ","
+          - emphasis [ref=f3e127]: "\"add a 4mm fillet to the top edge\""
+          - text: ","
+          - emphasis [ref=f3e128]: "\"shell with 2mm wall, top open\""
+          - text: .
+        - generic [ref=f3e129]:
+          - textbox "Describe an edit…" [ref=f3e130]
+          - generic [ref=f3e131]:
+            - generic [ref=f3e132]:
+              - button "Powiedz po polsku" [ref=f3e134] [cursor=pointer]
+              - generic [ref=f3e138]: Speak or type an edit
+            - button "Send" [disabled] [ref=f3e140] [cursor=pointer]
+    - group [ref=f3e141]:
+      - generic "Show generated script (142 lines)" [ref=f3e142] [cursor=pointer]

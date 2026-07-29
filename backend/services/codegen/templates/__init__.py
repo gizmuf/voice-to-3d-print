@@ -11,6 +11,8 @@ any matrix gating.
 
 from __future__ import annotations
 
+import re
+
 PERFORATED_DISC = '''\
 """Perforated disc — speaker grilles, vents, plant-pot drainage discs.
 
@@ -199,6 +201,284 @@ result = part.part
 '''
 
 
+HAMSTER_WHEEL = '''\
+"""Freestanding hamster wheel with a continuous tread, axle and printable stand."""
+from build123d import *
+from pulsai import param
+import math
+
+wheel_diameter = param("wheel_diameter", 120.0, type="length_mm", min=80.0, max=260.0,
+                       doc="Outside diameter of the running wheel.")
+track_width = param("track_width", 34.0, type="length_mm", min=24.0, max=70.0,
+                    doc="Usable width of the continuous running tread.")
+tread_thickness = param("tread_thickness", 2.4, type="length_mm", min=1.6, max=5.0,
+                        doc="Radial thickness of the continuous tread.")
+spoke_count = int(param("spoke_count", 6, type="count", min=3, max=12,
+                        doc="Number of radial support ribs."))
+spoke_width = param("spoke_width", 5.0, type="length_mm", min=3.0, max=12.0)
+spoke_depth = param("spoke_depth", 4.0, type="length_mm", min=2.4, max=10.0)
+hub_diameter = param("hub_diameter", 20.0, type="length_mm", min=12.0, max=36.0)
+axle_diameter = param("axle_diameter", 5.0, type="length_mm", min=3.0, max=10.0)
+axle_clearance = param("axle_clearance", 0.4, type="length_mm", min=0.2, max=1.2)
+ground_clearance = param("ground_clearance", 8.0, type="length_mm", min=4.0, max=24.0)
+upright_width = param("upright_width", 14.0, type="length_mm", min=8.0, max=30.0)
+stand_thickness = param("stand_thickness", 6.0, type="length_mm", min=4.0, max=14.0)
+stand_gap = param("stand_gap", 2.0, type="length_mm", min=1.0, max=8.0)
+base_length = param("base_length", 90.0, type="length_mm", min=60.0, max=180.0)
+base_width = param("base_width", 54.0, type="length_mm", min=35.0, max=120.0)
+base_thickness = param("base_thickness", 5.0, type="length_mm", min=3.0, max=12.0)
+
+wheel_radius = wheel_diameter / 2.0
+inner_radius = wheel_radius - tread_thickness
+hub_radius = hub_diameter / 2.0
+axle_radius = axle_diameter / 2.0
+axle_hole_radius = axle_radius + axle_clearance / 2.0
+axle_height = wheel_radius + ground_clearance
+spoke_length = inner_radius - hub_radius + 1.2
+spoke_mid_radius = hub_radius + spoke_length / 2.0 - 0.6
+spoke_y = -(track_width / 2.0 - spoke_depth / 2.0)
+
+# @feature: continuous_tread
+with BuildPart() as wheel:
+    with Locations((0, 0, axle_height)):
+        Cylinder(
+            radius=wheel_radius,
+            height=track_width,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+        )
+        Cylinder(
+            radius=inner_radius,
+            height=track_width + 2.0,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            mode=Mode.SUBTRACT,
+        )
+# @end
+
+# @feature: hub_and_spokes
+with BuildPart() as wheel_supported:
+    add(wheel.part)
+    with Locations((0, spoke_y, axle_height)):
+        Cylinder(
+            radius=hub_radius,
+            height=spoke_depth,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+        )
+    for index in range(spoke_count):
+        angle_deg = index * 360.0 / spoke_count
+        angle_rad = math.radians(angle_deg)
+        spoke_x = math.sin(angle_rad) * spoke_mid_radius
+        spoke_z = axle_height + math.cos(angle_rad) * spoke_mid_radius
+        with Locations((spoke_x, spoke_y, spoke_z)):
+            Box(
+                spoke_width,
+                spoke_depth,
+                spoke_length,
+                rotation=(0, angle_deg, 0),
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+    with Locations((0, 0, axle_height)):
+        Cylinder(
+            radius=axle_hole_radius,
+            height=track_width + 2.0,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            mode=Mode.SUBTRACT,
+        )
+wheel = wheel_supported
+# @end
+
+stand_y = -(track_width / 2.0 + stand_gap + stand_thickness / 2.0)
+upright_height = axle_height - base_thickness
+
+# @feature: stable_stand
+with BuildPart() as stand:
+    Box(
+        base_length,
+        base_width,
+        base_thickness,
+        align=(Align.CENTER, Align.CENTER, Align.MIN),
+    )
+    with Locations((0, stand_y, base_thickness)):
+        Box(
+            upright_width,
+            stand_thickness,
+            upright_height,
+            align=(Align.CENTER, Align.CENTER, Align.MIN),
+        )
+    with Locations((0, stand_y, axle_height)):
+        Cylinder(
+            radius=hub_radius + 2.0,
+            height=stand_thickness,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+        )
+        Cylinder(
+            radius=axle_hole_radius,
+            height=stand_thickness + 2.0,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            mode=Mode.SUBTRACT,
+        )
+# @end
+
+# @feature: axle
+axle_min_y = stand_y - stand_thickness / 2.0 - 1.0
+axle_max_y = track_width / 2.0 + 1.0
+axle_length = axle_max_y - axle_min_y
+axle_center_y = (axle_min_y + axle_max_y) / 2.0
+with BuildPart() as axle:
+    with Locations((0, axle_center_y, axle_height)):
+        Cylinder(
+            radius=axle_radius,
+            height=axle_length,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+        )
+# @end
+
+wheel.part.label = "wheel"
+stand.part.label = "stand"
+axle.part.label = "axle"
+result = Compound(children=[wheel.part, stand.part, axle.part], label="hamster_wheel")
+'''
+
+
+JEWELRY_PIECE = '''\
+"""Editable flat jewelry starter for sketches, charms, pendants, earrings, brooches, and links."""
+from build123d import *
+from pulsai import param
+
+width = param("width", 42.0, type="length_mm", min=8.0, max=220.0)
+height = param("height", 58.0, type="length_mm", min=8.0, max=260.0)
+thickness = param("thickness", 2.2, type="length_mm", min=0.8, max=8.0)
+edge_bevel = param("edge_bevel", 0.6, type="length_mm", min=0.0, max=3.0)
+connector_outer = param("connector_outer", 8.0, type="length_mm", min=3.0, max=24.0)
+connector_inner = param("connector_inner", 3.2, type="length_mm", min=1.0, max=16.0)
+relief_depth = param("relief_depth", 0.35, type="length_mm", min=0.0, max=2.0)
+
+# @feature: body
+with BuildPart() as part:
+    Box(width, height, thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    with Locations((0, height * 0.18, 0)):
+        Cylinder(radius=width * 0.28, height=thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    with Locations((0, -height * 0.2, 0)):
+        Cylinder(radius=width * 0.22, height=thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    if edge_bevel > 0:
+        fillet(part.edges().filter_by(Axis.Z), radius=edge_bevel)
+# @end
+
+# @feature: connector
+with BuildPart() as connected:
+    add(part.part)
+    with Locations((0, height / 2 + connector_outer * 0.42, 0)):
+        Cylinder(radius=connector_outer / 2, height=thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+        Cylinder(radius=connector_inner / 2, height=thickness * 1.4,
+                 mode=Mode.SUBTRACT, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+part = connected
+# @end
+
+# @feature: openwork
+with BuildPart() as pierced:
+    add(part.part)
+    for x, y, r in [
+        (-width * 0.22, height * 0.12, width * 0.08),
+        (width * 0.2, height * 0.03, width * 0.07),
+        (-width * 0.05, -height * 0.18, width * 0.09),
+    ]:
+        with Locations((x, y, 0)):
+            Cylinder(radius=r, height=thickness * 1.5,
+                     mode=Mode.SUBTRACT, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+part = pierced
+# @end
+
+# @feature: raised_detail
+if relief_depth > 0:
+    with BuildPart() as detailed:
+        add(part.part)
+        z = thickness / 2 + relief_depth / 2
+        with Locations((0, 0, z)):
+            Box(width * 0.08, height * 0.72, relief_depth, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+        with Locations((-width * 0.18, height * 0.1, z)):
+            Box(width * 0.28, width * 0.05, relief_depth, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+        with Locations((width * 0.16, -height * 0.1, z)):
+            Box(width * 0.24, width * 0.05, relief_depth, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    part = detailed
+# @end
+
+result = part.part
+'''
+
+
+JEWELRY_CROSS = '''\
+"""Editable cross pendant starter with chain loop, openwork, and raised branch detail."""
+from build123d import *
+from pulsai import param
+
+width = param("width", 34.0, type="length_mm", min=12.0, max=140.0)
+height = param("height", 58.0, type="length_mm", min=18.0, max=180.0)
+thickness = param("thickness", 2.0, type="length_mm", min=0.8, max=8.0)
+arm_width = param("arm_width", 10.0, type="length_mm", min=3.0, max=40.0)
+edge_bevel = param("edge_bevel", 0.45, type="length_mm", min=0.0, max=2.5)
+connector_outer = param("connector_outer", 7.5, type="length_mm", min=3.0, max=24.0)
+connector_inner = param("connector_inner", 3.0, type="length_mm", min=1.0, max=16.0)
+relief_depth = param("relief_depth", 0.35, type="length_mm", min=0.0, max=2.0)
+
+# @feature: cross_body
+with BuildPart() as part:
+    Box(arm_width, height, thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    with Locations((0, height * 0.18, 0)):
+        Box(width, arm_width, thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    if edge_bevel > 0:
+        fillet(part.edges().filter_by(Axis.Z), radius=edge_bevel)
+# @end
+
+# @feature: bail
+with BuildPart() as bailed:
+    add(part.part)
+    with Locations((0, height / 2 + connector_outer * 0.35, 0)):
+        Cylinder(radius=connector_outer / 2, height=thickness, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+        Cylinder(radius=connector_inner / 2, height=thickness * 1.4,
+                 mode=Mode.SUBTRACT, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+part = bailed
+# @end
+
+# @feature: pierced_openwork
+with BuildPart() as pierced:
+    add(part.part)
+    for x, y, r in [
+        (-width * 0.24, height * 0.18, 2.0),
+        (width * 0.24, height * 0.18, 2.0),
+        (-arm_width * 0.18, height * 0.02, 2.1),
+        (arm_width * 0.2, -height * 0.18, 2.3),
+        (-arm_width * 0.18, -height * 0.34, 1.8),
+    ]:
+        with Locations((x, y, 0)):
+            Cylinder(radius=r, height=thickness * 1.5,
+                     mode=Mode.SUBTRACT, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+part = pierced
+# @end
+
+# @feature: raised_branch
+if relief_depth > 0:
+    with BuildPart() as detailed:
+        add(part.part)
+        z = thickness / 2 + relief_depth / 2
+        with Locations((0, -height * 0.04, z)):
+            Box(arm_width * 0.22, height * 0.82, relief_depth, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+        with Locations((-width * 0.18, height * 0.14, z)):
+            Box(width * 0.36, arm_width * 0.16, relief_depth, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+        with Locations((width * 0.14, -height * 0.12, z)):
+            Box(width * 0.24, arm_width * 0.14, relief_depth, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+    part = detailed
+# @end
+
+result = part.part
+'''
+
+
 IMPORTED_STL = '''\
 """Imported STL — augment with mesh + build123d operations.
 
@@ -305,6 +585,9 @@ _SEED_SCRIPTS: dict[str, tuple[str, str]] = {
     "phone_stand": ("Phone stand", PHONE_STAND),
     "simple_box": ("Simple box", SIMPLE_BOX),
     "cylindrical_holder": ("Cylindrical holder", CYLINDRICAL_HOLDER),
+    "hamster_wheel": ("Hamster wheel", HAMSTER_WHEEL),
+    "jewelry_piece": ("Jewelry sketch starter", JEWELRY_PIECE),
+    "jewelry_cross": ("Cross pendant starter", JEWELRY_CROSS),
     "imported_stl": ("Imported STL", IMPORTED_STL),
     "imported_step": ("Imported STEP", IMPORTED_STEP),
 }
@@ -319,6 +602,15 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
     "phone_stand": ("phone", "stand", "dock", "tablet", "device"),
     "simple_box": ("box", "container", "case", "enclosure", "tray"),
     "cylindrical_holder": ("holder", "cup", "pen", "vase", "pot", "cylinder"),
+    "hamster_wheel": (
+        "hamster wheel", "running wheel", "exercise wheel", "kołowrotek",
+        "kolowrotek", "chomik", "chomika", "terrarium",
+    ),
+    "jewelry_piece": (
+        "jewelry", "jewellery", "pendant", "necklace", "bracelet", "earring",
+        "brooch", "charm", "wearable", "castable resin", "resin jewelry",
+    ),
+    "jewelry_cross": ("cross", "crucifix"),
 }
 
 
@@ -332,21 +624,32 @@ def get_seed_script(template_id: str) -> tuple[str, str]:
     return _SEED_SCRIPTS[template_id]
 
 
-def seed_for(prompt: str) -> tuple[str, str, str]:
-    """Pick a template from a free-form prompt; return (template_id, name, script)."""
+def _keyword_hit(text: str, keyword: str) -> bool:
+    if len(keyword) <= 3 and keyword.isalpha():
+        return bool(re.search(rf"\b{re.escape(keyword)}\b", text))
+    return keyword in text
+
+
+def match_template_id(prompt: str) -> str | None:
+    """Return a genuinely matched template id, never a cosmetic fallback."""
     needle = (prompt or "").lower()
+    if any(_keyword_hit(needle, kw) for kw in _KEYWORDS["jewelry_cross"]):
+        return "jewelry_cross"
+    if any(_keyword_hit(needle, kw) for kw in _KEYWORDS["jewelry_piece"]):
+        return "jewelry_piece"
     best: tuple[str, int] | None = None
     for tid, kws in _KEYWORDS.items():
-        score = sum(1 for kw in kws if kw in needle)
+        score = sum(1 for kw in kws if _keyword_hit(needle, kw))
         if best is None or score > best[1]:
             best = (tid, score)
-    if best is None or best[1] == 0:
-        # default — start with a versatile rounded box
-        tid = "simple_box"
-    else:
-        tid = best[0]
+    return best[0] if best is not None and best[1] > 0 else None
+
+
+def seed_for(prompt: str) -> tuple[str, str, str]:
+    """Pick a template from a free-form prompt; return (template_id, name, script)."""
+    tid = match_template_id(prompt) or "simple_box"
     name, script = _SEED_SCRIPTS[tid]
     return tid, name, script
 
 
-__all__ = ["list_template_ids", "get_seed_script", "seed_for"]
+__all__ = ["list_template_ids", "get_seed_script", "match_template_id", "seed_for"]

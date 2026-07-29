@@ -73,7 +73,10 @@ def structured_spec_to_editable(spec: dict[str, Any]) -> EditableModel:
         selection = SelectionState(feature_id=_child_id(root.id, "pattern"), scope="body")
     else:
         root.children = _template_children(template_id, root.id, constraints)
-        manufacturability = Manufacturability(status="safe", messages=["Geometry is within the current manufacturable range."])
+        if template_id in {"jewelry_piece", "jewelry_pendant", "jewelry_ring"}:
+            manufacturability = _jewelry_manufacturability(spec)
+        else:
+            manufacturability = Manufacturability(status="safe", messages=["Geometry is within the current manufacturable range."])
         selection = SelectionState(feature_id=root.id, scope="body")
 
     return EditableModel(
@@ -134,6 +137,8 @@ def refresh_manufacturability(model: EditableModel) -> Manufacturability:
     template_id = str(root.params.get("_template_id", ""))
     if template_id == "perforated_disc":
         return _perforated_disc_manufacturability(editable_to_structured_spec(model))
+    if template_id in {"jewelry_piece", "jewelry_pendant", "jewelry_ring"}:
+        return _jewelry_manufacturability(editable_to_structured_spec(model))
     return Manufacturability(status="safe", messages=["Geometry is within the current manufacturable range."])
 
 
@@ -201,6 +206,31 @@ def _template_children(template_id: str, root_id: str, constraints: dict[str, An
                 "arm_drop_mm": _numeric(constraints.get("arm_drop_mm")),
             }),
         ]
+    if template_id in {"jewelry_piece", "jewelry_pendant"}:
+        return [
+            BodyNode(id=_child_id(root_id, "attachment"), kind="hole", label="Chain / connector openings", params={
+                "loop_outer_diameter_mm": _numeric(constraints.get("loop_outer_diameter_mm")),
+                "loop_inner_diameter_mm": _numeric(constraints.get("loop_inner_diameter_mm")),
+                "attachment_count": _numeric(constraints.get("attachment_count")),
+            }),
+            BodyNode(id=_child_id(root_id, "relief"), kind="boss", label="Raised or engraved detail", params={
+                "relief_depth_mm": _numeric(constraints.get("relief_depth_mm")),
+            }),
+            BodyNode(id=_child_id(root_id, "finish"), kind="fillet", label="Softened jewelry edges", params={
+                "edge_bevel_mm": _numeric(constraints.get("edge_bevel_mm")),
+            }),
+        ]
+    if template_id == "jewelry_ring":
+        return [
+            BodyNode(id=_child_id(root_id, "band"), kind="thickness", label="Ring band", params={
+                "band_thickness_mm": _numeric(constraints.get("band_thickness_mm")),
+                "comfort_bevel_mm": _numeric(constraints.get("comfort_bevel_mm")),
+                "relief_depth_mm": _numeric(constraints.get("relief_depth_mm")),
+            }),
+            BodyNode(id=_child_id(root_id, "stone"), kind="hole", label="Optional stone seat", params={
+                "stone_seat_diameter_mm": _numeric(constraints.get("stone_seat_diameter_mm")),
+            }),
+        ]
     return []
 
 
@@ -237,3 +267,34 @@ def _perforated_disc_manufacturability(spec: dict[str, Any]) -> Manufacturabilit
         return Manufacturability(status=status, messages=messages)
     except Exception as exc:
         return Manufacturability(status="invalid", messages=[str(exc)])
+
+
+def _jewelry_manufacturability(spec: dict[str, Any]) -> Manufacturability:
+    template_id = spec.get("template_id")
+    dims = spec.get("dimensions_mm", {})
+    constraints = spec.get("constraints", {})
+    status = "safe"
+    messages: list[str] = []
+
+    if template_id == "jewelry_ring":
+        band_thickness = _numeric(constraints.get("band_thickness_mm"))
+        band_width = _numeric(dims.get("band_width"))
+        if band_thickness < 1.2:
+            status = "risk"
+            messages.append("Ring band thickness is below 1.2 mm; it may be fragile after casting or resin printing.")
+        if band_width < 2.0:
+            status = "risk"
+            messages.append("Ring band width is very narrow for wearable jewelry.")
+    else:
+        thickness = _numeric(dims.get("thickness"))
+        loop_inner = _numeric(constraints.get("loop_inner_diameter_mm"))
+        if thickness < 1.2:
+            status = "risk"
+            messages.append("Jewelry body thickness is below 1.2 mm; fine details may break.")
+        if 0 < loop_inner < 2.0:
+            status = "risk"
+            messages.append("Connector opening is under 2 mm; chains or jump rings may not fit cleanly.")
+
+    if not messages:
+        messages.append("Jewelry starter is in a reasonable resin-printable range. Confirm final metal/casting tolerances before production.")
+    return Manufacturability(status=status, messages=messages)

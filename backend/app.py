@@ -55,6 +55,7 @@ from services.codegen.store import (
 from services.codegen.templates import (
     get_seed_script as get_template_seed,
     list_template_ids,
+    match_template_id,
     seed_for as seed_template_for,
 )
 
@@ -63,6 +64,13 @@ from services.ai_edit import ai_edit_workspace_model
 from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt, extract_prompt_from_image
 from services.generation import GenerationResult, generate_model, generate_model_from_image
+from services.jewelry_trace import (
+    generate_jewelry_concepts,
+    jewelry_profile_catalog,
+    trace_jewelry_image_preview,
+    trace_jewelry_image_to_script,
+    trace_preview_to_script,
+)
 from services.job_store import (
     create_project,
     ensure_job,
@@ -1519,10 +1527,21 @@ def update_project_endpoint(project_id: str, request: ProjectUpdateRequest) -> P
 
 
 @app.post("/stt", response_model=STTResponse)
-async def stt(audio: UploadFile = File(...)) -> STTResponse:
+async def stt(
+    audio: UploadFile = File(...),
+    language: str = Form("pl"),
+) -> STTResponse:
     try:
         content = await audio.read()
-        transcript = await transcribe_audio(content, content_type=audio.content_type or "")
+        if not content:
+            raise ValueError("The recording is empty.")
+        if len(content) > 15 * 1024 * 1024:
+            raise ValueError("The recording is too large. Keep it under 15 MB.")
+        transcript = await transcribe_audio(
+            content,
+            content_type=audio.content_type or "",
+            language=language,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1770,6 +1789,19 @@ class DesignCreateResponse(BaseModel):
     editable_model: dict
 
 
+class JewelryTraceCreateRequest(BaseModel):
+    trace: dict
+    process: str = "either"
+    name: str | None = None
+
+
+class JewelryConceptRequest(BaseModel):
+    prompt: str
+    context: str = "Pendant"
+    profile_id: str = "resin_print"
+    count: int = 3
+
+
 def _seed_design_record(request: DesignCreateRequest):
     if request.script:
         name = request.name or "Custom design"
@@ -1780,8 +1812,20 @@ def _seed_design_record(request: DesignCreateRequest):
         display, script = get_template_seed(request.template_id)
         return request.template_id, request.name or display, script
     if request.prompt:
-        tid, display, script = seed_template_for(request.prompt)
-        return tid, request.name or display, script
+        matched_template_id = match_template_id(request.prompt)
+        if matched_template_id:
+            display, script = get_template_seed(matched_template_id)
+            return matched_template_id, request.name or display, script
+        if not settings.anthropic_api_key:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "This request needs the CAD agent, but ANTHROPIC_API_KEY is not configured. "
+                    "No placeholder box was created."
+                ),
+            )
+        _, _, script = seed_template_for(request.prompt)
+        return None, request.name or "AI-generated design", script
     raise HTTPException(
         status_code=400,
         detail="Provide one of: prompt, template_id, or script.",
@@ -1865,6 +1909,194 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
         },
         editable_model=editable_model.model_dump(mode="json"),
+    )
+
+
+@app.get("/design/jewelry/profiles")
+def design_jewelry_profiles_endpoint() -> dict:
+    return jewelry_profile_catalog()
+
+
+@app.post("/design/jewelry/concepts")
+async def design_jewelry_concepts_endpoint(request: JewelryConceptRequest) -> dict:
+    try:
+        return await generate_jewelry_concepts(
+            prompt=request.prompt,
+            context=request.context,
+            profile_id=request.profile_id,
+            count=request.count,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/design/jewelry/trace-preview")
+@app.post("/design/jewelry-trace/preview")
+async def design_jewelry_trace_preview_endpoint(
+    image: UploadFile = File(...),
+    reference_mm: float = Form(...),
+    reference_label: str = Form("overall width"),
+    context: str = Form("Freeform jewelry"),
+    brief: str = Form(""),
+    profile_id: str = Form("resin_print"),
+    repairs: str = Form(""),
+    trace_mode: str = Form("auto"),
+    detail: str = Form("medium"),
+) -> dict:
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded jewelry image is empty.")
+    try:
+        repair_list = [part.strip() for part in repairs.split(",") if part.strip()]
+        preview = trace_jewelry_image_preview(
+            content,
+            reference_mm=reference_mm,
+            reference_label=reference_label,
+            context=context,
+            brief=brief,
+            profile_id=profile_id,
+            repairs=repair_list,
+            trace_mode=trace_mode,
+            detail=detail,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    preview["source_filename"] = image.filename
+    preview["source_content_type"] = image.content_type
+    return preview
+
+
+def _create_design_from_jewelry_trace(
+    *,
+    trace_payload: dict,
+    process: str = "either",
+    name: str | None = None,
+) -> DesignCreateResponse:
+    try:
+        trace = trace_preview_to_script(trace_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    script = trace.script
+    design_name = name or "Jewelry relief from trace"
+    try:
+        sandbox_result = audit_then_run(script=script, targets=["stl", "glb"])
+    except DesignBuildError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "Traced jewelry script failed AST audit.", "errors": exc.audit_errors},
+        ) from exc
+    if not sandbox_result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Traced jewelry build failed.",
+                "error": sandbox_result.payload.get("error"),
+                "traceback": sandbox_result.payload.get("traceback"),
+            },
+        )
+
+    parameters = derive_parameters(sandbox_result.payload)
+    features = derive_named_features(sandbox_result.payload, script, created_by="system")
+    metadata = {
+        **trace.metadata,
+        "source_filename": trace_payload.get("source_filename"),
+        "source_content_type": trace_payload.get("source_content_type"),
+    }
+
+    design = create_design(
+        name=design_name,
+        script=script,
+        parameters=parameters,
+        features=features,
+        process=process,
+        metadata=metadata,
+    )
+
+    persistent = settings.output_dir / "designs" / design.id
+    persistent.mkdir(parents=True, exist_ok=True)
+    relocated_artifacts: dict[str, str] = {}
+    for kind, src in (sandbox_result.payload.get("artifacts") or {}).items():
+        src_path = Path(src)
+        if not src_path.exists():
+            continue
+        dst_path = persistent / src_path.name
+        try:
+            shutil.copy2(src_path, dst_path)
+            relocated_artifacts[kind] = str(dst_path)
+        except Exception:
+            continue
+    sandbox_result.payload["artifacts"] = relocated_artifacts
+
+    build = build_from_sandbox_result(design, sandbox_result, process=process)
+    save_build(design.id, build)
+    try:
+        (persistent / "jewelry_trace.json").write_text(json.dumps(trace.metadata["jewelry_trace"], indent=2))
+    except Exception:
+        pass
+    editable_model = design_to_editable_model(design, build)
+    return DesignCreateResponse(
+        design_id=design.id,
+        revision_id=design.revision_id,
+        name=design.name,
+        template_id="jewelry_trace",
+        script=design.script,
+        parameters=[p.model_dump() for p in design.parameters],
+        features=[f.model_dump() for f in design.features],
+        initial_build={
+            "revision_id": build.revision_id,
+            "mesh_hash": build.mesh_hash,
+            "bounding_box_mm": build.bounding_box_mm,
+            "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
+            "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
+        },
+        editable_model=editable_model.model_dump(mode="json"),
+    )
+
+
+@app.post("/design/jewelry/create-from-trace", response_model=DesignCreateResponse)
+def design_jewelry_create_from_trace_endpoint(
+    request: JewelryTraceCreateRequest,
+) -> DesignCreateResponse:
+    return _create_design_from_jewelry_trace(
+        trace_payload=request.trace,
+        process=request.process,
+        name=request.name,
+    )
+
+
+@app.post("/design/jewelry-trace", response_model=DesignCreateResponse)
+async def design_jewelry_trace_endpoint(
+    image: UploadFile = File(...),
+    reference_mm: float = Form(...),
+    reference_label: str = Form("overall width"),
+    context: str = Form("Freeform jewelry"),
+    brief: str = Form(""),
+    process: str = Form("either"),
+    profile_id: str = Form("resin_print"),
+    trace_mode: str = Form("auto"),
+    detail: str = Form("medium"),
+) -> DesignCreateResponse:
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded jewelry image is empty.")
+    try:
+        trace = trace_jewelry_image_to_script(
+            content,
+            reference_mm=reference_mm,
+            reference_label=reference_label,
+            context=context,
+            brief=brief,
+            profile_id=profile_id,
+            trace_mode=trace_mode,
+            detail=detail,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _create_design_from_jewelry_trace(
+        trace_payload=trace.metadata["jewelry_trace"],
+        process=process,
+        name="Jewelry relief from trace",
     )
 
 

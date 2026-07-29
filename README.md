@@ -169,6 +169,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6              # verify against current Anthropic docs
 ANTHROPIC_CLASSIFY_MODEL=claude-haiku-4-5-20251001  # used in Phase 2 routing
 ANTHROPIC_MAX_OUTPUT_TOKENS=1500
+OPENAI_API_KEY=sk-...                               # optional jewelry concept generation
+OPENAI_IMAGE_MODEL=gpt-image-1.5
 DEFAULT_PRINTER_PROFILE_ID=prusa_mk4_default
 ```
 

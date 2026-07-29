@@ -40,6 +40,9 @@ TEMPLATE_LABELS = {
     "bracket": "Bracket",
     "cylindrical_holder": "Cylindrical holder",
     "wall_mount": "Wall mount",
+    "jewelry_piece": "Jewelry piece",
+    "jewelry_pendant": "Jewelry pendant",
+    "jewelry_ring": "Jewelry ring",
 }
 
 DEFAULT_SPECS: Dict[str, Dict[str, Any]] = {
@@ -127,6 +130,42 @@ DEFAULT_SPECS: Dict[str, Dict[str, Any]] = {
             "arm_drop_mm": 24.0,
         },
     },
+    "jewelry_piece": {
+        "object_label": "Jewelry piece",
+        "dimensions_mm": {"width": 42.0, "height": 58.0, "thickness": 2.2},
+        "constraints": {
+            "loop_outer_diameter_mm": 7.0,
+            "loop_inner_diameter_mm": 3.2,
+            "relief_depth_mm": 0.8,
+            "edge_bevel_mm": 0.5,
+            "shape_profile": "oval",
+            "attachment_count": 1.0,
+            "jewelry_context": "freeform",
+        },
+    },
+    "jewelry_pendant": {
+        "object_label": "Jewelry pendant",
+        "dimensions_mm": {"width": 32.0, "height": 42.0, "thickness": 2.2},
+        "constraints": {
+            "loop_outer_diameter_mm": 7.0,
+            "loop_inner_diameter_mm": 3.2,
+            "relief_depth_mm": 0.8,
+            "edge_bevel_mm": 0.5,
+            "shape_profile": "oval",
+            "attachment_count": 1.0,
+            "jewelry_context": "pendant",
+        },
+    },
+    "jewelry_ring": {
+        "object_label": "Jewelry ring",
+        "dimensions_mm": {"inner_diameter": 17.3, "band_width": 4.0},
+        "constraints": {
+            "band_thickness_mm": 1.8,
+            "comfort_bevel_mm": 0.35,
+            "relief_depth_mm": 0.6,
+            "stone_seat_diameter_mm": 0.0,
+        },
+    },
 }
 
 USEFUL_KEYWORDS = {
@@ -139,6 +178,9 @@ USEFUL_KEYWORDS = {
     "bracket": ("bracket", "support", "mounting"),
     "cylindrical_holder": ("cup", "holder", "pen", "cylinder"),
     "wall_mount": ("wall mount", "wall-mounted", "mount"),
+    "jewelry_piece": ("jewelry", "necklace", "earring", "bracelet", "brooch", "charm", "ornament", "wearable"),
+    "jewelry_pendant": ("pendant",),
+    "jewelry_ring": ("jewelry ring", "ring size", "finger ring", "bezel", "signet"),
 }
 
 CREATIVE_KEYWORDS = (
@@ -189,6 +231,9 @@ CADQUERY_TEMPLATES = {
     "bracket",
     "cylindrical_holder",
     "wall_mount",
+    "jewelry_piece",
+    "jewelry_pendant",
+    "jewelry_ring",
 }
 
 
@@ -229,6 +274,10 @@ def _detect_template(text: str, existing_template: str | None = None) -> str | N
         return "phone_stand"
     if any(word in lowered for word in ("cylindrical holder", "pen holder", "cup holder")):
         return "cylindrical_holder"
+    if any(word in lowered for word in ("jewelry ring", "finger ring", "ring size", "signet ring")):
+        return "jewelry_ring"
+    if any(word in lowered for word in ("jewelry", "necklace", "pendant", "charm", "earring", "bracelet", "brooch", "ornament", "wearable")):
+        return "jewelry_piece"
     if any(word in lowered for word in UNSUPPORTED_SEMANTIC_SHAPES):
         return None
     best_template = existing_template
@@ -305,7 +354,13 @@ def route_mode(
 
 
 def _parse_dimension_value(prompt: str, keywords: Tuple[str, ...], default: float) -> float:
+    lowered = prompt.lower()
     for keyword in keywords:
+        pattern = rf"{re.escape(keyword.lower())}\s*:?\s*(\d+(?:\.\d+)?)\s*(mm|cm|in|inch|inches)?"
+        match = re.search(pattern, lowered)
+        if match:
+            value, unit = match.groups()
+            return _to_mm(float(value), unit or "mm")
         value = _parse_value(prompt, keyword)
         if value:
             return value
@@ -340,6 +395,9 @@ def _parse_count(prompt: str, keywords: Tuple[str, ...], default: float) -> floa
     lowered = prompt.lower()
     for keyword in keywords:
         match = re.search(rf"(\d+)\s*{re.escape(keyword)}", lowered)
+        if match:
+            return float(match.group(1))
+        match = re.search(rf"(\d+)\s+(?:\w+\s+){{0,3}}{re.escape(keyword)}", lowered)
         if match:
             return float(match.group(1))
         match = re.search(rf"{re.escape(keyword)}\s*(?:count)?\s*(?:of)?\s*(\d+)", lowered)
@@ -419,7 +477,7 @@ def build_useful_structured_spec(
     if template_id is None:
         raise ValueError(
             "This prompt asks for a precise semantic shape that is not supported yet. "
-            "Right now the semantic workspace supports specific native templates such as perforated disc, phone stand, box, tray, hook, cable organizer, bracket, cylindrical holder, and wall mount."
+            "Right now the semantic workspace supports specific native templates such as perforated disc, phone stand, box, tray, hook, cable organizer, bracket, cylindrical holder, wall mount, freeform jewelry piece, and jewelry ring."
         )
     template_defaults = _deep_copy(DEFAULT_SPECS[template_id])
     if existing_spec:
@@ -540,6 +598,93 @@ def build_useful_structured_spec(
             ("rings", "ring"),
             constraints["ring_count"],
         )
+    elif template_id in {"jewelry_piece", "jewelry_pendant"}:
+        if prompt_triplet:
+            dimensions["width"], dimensions["height"], dimensions["thickness"] = prompt_triplet
+        dimensions["width"] = _parse_dimension_value(
+            prompt,
+            ("jewelry width", "necklace width", "pendant width", "charm width", "earring width", "bracelet width", "width"),
+            dimensions["width"],
+        )
+        dimensions["height"] = _parse_dimension_value(
+            prompt,
+            ("jewelry height", "necklace height", "pendant height", "charm height", "earring height", "bracelet height", "height", "tall"),
+            dimensions["height"],
+        )
+        dimensions["thickness"] = _parse_dimension_value(
+            prompt,
+            ("thickness", "wall"),
+            dimensions["thickness"],
+        )
+        constraints["loop_inner_diameter_mm"] = _parse_dimension_value(
+            prompt,
+            ("loop inner diameter", "chain hole", "jump ring hole", "hole"),
+            constraints["loop_inner_diameter_mm"],
+        )
+        constraints["loop_outer_diameter_mm"] = max(
+            _parse_dimension_value(prompt, ("loop outer diameter", "loop diameter"), constraints["loop_outer_diameter_mm"]),
+            float(constraints["loop_inner_diameter_mm"]) + 2.4,
+        )
+        constraints["relief_depth_mm"] = _parse_dimension_value(
+            prompt,
+            ("relief depth", "raised detail", "engraving depth", "detail depth"),
+            constraints["relief_depth_mm"],
+        )
+        constraints["edge_bevel_mm"] = _parse_dimension_value(
+            prompt,
+            ("bevel", "roundover", "rounded edge"),
+            constraints["edge_bevel_mm"],
+        )
+        if "circle" in lowered or "round" in lowered:
+            constraints["shape_profile"] = "round"
+        elif "rectangle" in lowered or "tag" in lowered:
+            constraints["shape_profile"] = "rounded_rectangle"
+        elif "necklace" in lowered:
+            constraints["shape_profile"] = "necklace_arc"
+            constraints["jewelry_context"] = "necklace"
+            constraints["attachment_count"] = max(_parse_count(prompt, ("links", "elements", "pieces"), 5.0), 3.0)
+        elif "earring" in lowered:
+            constraints["jewelry_context"] = "earring"
+            constraints["attachment_count"] = 1.0
+        elif "bracelet" in lowered:
+            constraints["jewelry_context"] = "bracelet"
+            constraints["attachment_count"] = max(_parse_count(prompt, ("links", "elements", "pieces"), 7.0), 3.0)
+        elif "brooch" in lowered:
+            constraints["jewelry_context"] = "brooch"
+            constraints["attachment_count"] = 0.0
+        else:
+            constraints["shape_profile"] = "oval"
+    elif template_id == "jewelry_ring":
+        dimensions["inner_diameter"] = _parse_dimension_value(
+            prompt,
+            ("inner diameter", "ring inner diameter", "finger diameter", "diameter"),
+            dimensions["inner_diameter"],
+        )
+        dimensions["band_width"] = _parse_dimension_value(
+            prompt,
+            ("band width", "ring width", "width"),
+            dimensions["band_width"],
+        )
+        constraints["band_thickness_mm"] = _parse_dimension_value(
+            prompt,
+            ("band thickness", "wall", "thickness"),
+            constraints["band_thickness_mm"],
+        )
+        constraints["comfort_bevel_mm"] = _parse_dimension_value(
+            prompt,
+            ("comfort bevel", "bevel", "rounded edge"),
+            constraints["comfort_bevel_mm"],
+        )
+        constraints["relief_depth_mm"] = _parse_dimension_value(
+            prompt,
+            ("relief depth", "raised detail", "engraving depth", "detail depth"),
+            constraints["relief_depth_mm"],
+        )
+        constraints["stone_seat_diameter_mm"] = _parse_dimension_value(
+            prompt,
+            ("stone seat", "stone diameter", "bezel diameter"),
+            constraints["stone_seat_diameter_mm"],
+        )
 
     _apply_relative_revisions(prompt, dimensions, constraints)
 
@@ -551,6 +696,9 @@ def build_useful_structured_spec(
         assumptions.append("Wall thickness defaulted to 3 mm.")
     if template_id == "perforated_disc":
         assumptions.append("Hole counts per ring are derived automatically from tangential spacing.")
+    if template_id in {"jewelry_piece", "jewelry_pendant", "jewelry_ring"}:
+        assumptions.append("Sketch/photo input is treated as a reference only; this is a rough editable jewelry starting point, not a category lock.")
+        assumptions.append("Use resin/SLA or castable resin for fine jewelry detail; FDM is only suitable for coarse prototypes.")
 
     keyword_hits = sum(1 for words in USEFUL_KEYWORDS.values() for word in words if word in lowered)
     confidence = min(0.98, 0.55 + (0.1 if re.search(r"\d", lowered) else 0) + keyword_hits * 0.05)
@@ -793,6 +941,120 @@ def _build_perforated_disc_cadquery(spec: Dict[str, Any]):
     return result
 
 
+def _build_jewelry_piece_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    height = float(dims["height"])
+    thickness = max(float(dims["thickness"]), 1.0)
+    loop_outer = max(float(constraints.get("loop_outer_diameter_mm", 7.0)), 3.0)
+    loop_inner = max(float(constraints.get("loop_inner_diameter_mm", 3.2)), 1.2)
+    relief_depth = max(float(constraints.get("relief_depth_mm", 0.8)), 0.0)
+    bevel = max(float(constraints.get("edge_bevel_mm", 0.5)), 0.0)
+    profile = str(constraints.get("shape_profile", "oval"))
+    attachment_count = max(0, int(round(float(constraints.get("attachment_count", 1.0) or 0.0))))
+
+    if profile == "necklace_arc":
+        result = None
+        count = max(3, attachment_count)
+        radius = width / 2.0
+        bead_width = max(width / (count * 1.75), 4.0)
+        bead_height = max(height / 7.0, 5.0)
+        for index in range(count):
+            t = 0.0 if count == 1 else index / (count - 1)
+            angle = math.radians(205 + t * 130)
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * height * 0.42 + height * 0.35
+            bead = (
+                cq.Workplane("XY")
+                .ellipse(bead_width / 2.0, bead_height / 2.0)
+                .extrude(thickness)
+                .translate((x, y, 0))
+            )
+            result = bead if result is None else result.union(bead)
+        assert result is not None
+        return result
+
+    if profile == "round":
+        body = cq.Workplane("XY").circle(min(width, height) / 2.0).extrude(thickness)
+    elif profile == "rounded_rectangle":
+        body = cq.Workplane("XY").box(width, height, thickness, centered=(True, True, False))
+        if bevel > 0:
+            try:
+                body = body.edges("|Z").fillet(min(bevel, width / 8.0, height / 8.0))
+            except Exception:
+                pass
+    else:
+        body = cq.Workplane("XY").ellipse(width / 2.0, height / 2.0).extrude(thickness)
+
+    result = body
+    if attachment_count > 0:
+        attachment_points = [(0.0, height / 2.0 + loop_outer * 0.32)]
+        if attachment_count >= 2:
+            attachment_points = [
+                (-width * 0.36, height / 2.0 + loop_outer * 0.18),
+                (width * 0.36, height / 2.0 + loop_outer * 0.18),
+            ]
+        for x, y in attachment_points[:attachment_count]:
+            loop = (
+                cq.Workplane("XY")
+                .circle(loop_outer / 2.0)
+                .circle(min(loop_inner / 2.0, loop_outer / 2.0 - 0.8))
+                .extrude(thickness)
+                .translate((x, y, 0))
+            )
+            result = result.union(loop)
+
+    if relief_depth > 0:
+        relief = (
+            cq.Workplane("XY")
+            .ellipse(max(width * 0.18, 2.0), max(height * 0.28, 2.0))
+            .extrude(min(relief_depth, thickness))
+            .translate((0, 0, thickness))
+        )
+        result = result.union(relief)
+    return result
+
+
+def _build_jewelry_pendant_cadquery(spec: Dict[str, Any]):
+    return _build_jewelry_piece_cadquery(spec)
+
+
+def _build_jewelry_ring_cadquery(spec: Dict[str, Any]):
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    inner_diameter = float(dims["inner_diameter"])
+    band_width = max(float(dims["band_width"]), 1.2)
+    band_thickness = max(float(constraints.get("band_thickness_mm", 1.8)), 1.0)
+    relief_depth = max(float(constraints.get("relief_depth_mm", 0.6)), 0.0)
+    stone_seat = max(float(constraints.get("stone_seat_diameter_mm", 0.0)), 0.0)
+    outer_radius = inner_diameter / 2.0 + band_thickness
+
+    ring = (
+        cq.Workplane("XY")
+        .circle(outer_radius)
+        .circle(max(inner_diameter / 2.0, 1.0))
+        .extrude(band_width)
+    )
+    if relief_depth > 0:
+        signet = (
+            cq.Workplane("XY")
+            .ellipse(max(outer_radius * 0.42, 2.0), max(band_thickness * 1.2, 1.4))
+            .extrude(band_width + relief_depth)
+            .translate((0, outer_radius - band_thickness * 0.15, 0))
+        )
+        ring = ring.union(signet)
+    if stone_seat > 0:
+        cutter = (
+            cq.Workplane("XY")
+            .circle(stone_seat / 2.0)
+            .extrude(band_width + relief_depth + 1.0)
+            .translate((0, outer_radius - band_thickness * 0.15, -0.5))
+        )
+        ring = ring.cut(cutter)
+    return ring
+
+
 def _build_perforated_disc(spec: Dict[str, Any]) -> trimesh.Trimesh:
     params = _perforated_disc_params(spec)
     points, _, _ = _perforated_disc_layout(spec)
@@ -900,6 +1162,12 @@ def _cadquery_workplane_for_spec(spec: Dict[str, Any]):
         return _build_cylindrical_holder_cadquery(spec)
     if template_id == "wall_mount":
         return _build_wall_mount_cadquery(spec)
+    if template_id == "jewelry_piece":
+        return _build_jewelry_piece_cadquery(spec)
+    if template_id == "jewelry_pendant":
+        return _build_jewelry_pendant_cadquery(spec)
+    if template_id == "jewelry_ring":
+        return _build_jewelry_ring_cadquery(spec)
     raise ValueError(f"CadQuery template not implemented: {template_id}")
 
 
@@ -1027,6 +1295,66 @@ def _build_wall_mount(spec: Dict[str, Any]) -> trimesh.Trimesh:
     return _apply_union([plate, arm, lip], [])
 
 
+def _build_jewelry_piece(spec: Dict[str, Any]) -> trimesh.Trimesh:
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    width = float(dims["width"])
+    height = float(dims["height"])
+    thickness = max(float(dims["thickness"]), 1.0)
+    loop_outer = max(float(constraints.get("loop_outer_diameter_mm", 7.0)), 3.0)
+    profile = str(constraints.get("shape_profile", "oval"))
+    attachment_count = max(0, int(round(float(constraints.get("attachment_count", 1.0) or 0.0))))
+
+    if profile == "round":
+        body = trimesh.creation.cylinder(radius=min(width, height) / 2.0, height=thickness, sections=96)
+    elif profile == "necklace_arc":
+        count = max(3, attachment_count)
+        radius = width / 2.0
+        parts = []
+        for index in range(count):
+            t = 0.0 if count == 1 else index / (count - 1)
+            angle = math.radians(205 + t * 130)
+            bead = trimesh.creation.uv_sphere(radius=max(width / (count * 2.4), 2.0), count=[24, 12])
+            bead.apply_scale((1.2, 0.8, max(thickness / 4.0, 0.45)))
+            bead.apply_translation((math.cos(angle) * radius, math.sin(angle) * height * 0.42 + height * 0.35, 0))
+            parts.append(bead)
+        return _apply_union(parts, [])
+    else:
+        body = trimesh.creation.uv_sphere(radius=1.0, count=[48, 24])
+        body.apply_scale((width / 2.0, height / 2.0, thickness / 2.0))
+
+    parts = [body]
+    if attachment_count > 0:
+        loop = trimesh.creation.torus(
+            major_radius=loop_outer / 2.0,
+            minor_radius=max((loop_outer - float(constraints.get("loop_inner_diameter_mm", 3.2))) / 4.0, 0.6),
+            major_segments=48,
+            minor_segments=12,
+        )
+        loop.apply_translation((0, height / 2.0 + loop_outer * 0.32, 0))
+        parts.append(loop)
+    return _apply_union(parts, [])
+
+
+def _build_jewelry_ring(spec: Dict[str, Any]) -> trimesh.Trimesh:
+    dims = spec["dimensions_mm"]
+    constraints = spec["constraints"]
+    inner_diameter = float(dims["inner_diameter"])
+    band_width = max(float(dims["band_width"]), 1.2)
+    band_thickness = max(float(constraints.get("band_thickness_mm", 1.8)), 1.0)
+    outer_radius = inner_diameter / 2.0 + band_thickness
+    outer = trimesh.creation.cylinder(radius=outer_radius, height=band_width, sections=128)
+    inner = trimesh.creation.cylinder(radius=inner_diameter / 2.0, height=band_width * 1.4, sections=96)
+    ring = _apply_subtract(outer, inner, [])
+    relief_depth = max(float(constraints.get("relief_depth_mm", 0.6)), 0.0)
+    if relief_depth > 0:
+        boss = trimesh.creation.uv_sphere(radius=max(band_thickness * 1.4, 1.6), count=[32, 16])
+        boss.apply_scale((1.5, 0.7, max(relief_depth / 2.0, 0.3)))
+        boss.apply_translation((0, outer_radius - band_thickness * 0.15, band_width / 2.0))
+        ring = _apply_union([ring, boss], [])
+    return ring
+
+
 def mesh_from_structured_spec(spec: Dict[str, Any]) -> trimesh.Trimesh:
     template_id = spec["template_id"]
     if template_id == "perforated_disc":
@@ -1047,6 +1375,10 @@ def mesh_from_structured_spec(spec: Dict[str, Any]) -> trimesh.Trimesh:
         return _build_cylindrical_holder(spec)
     if template_id == "wall_mount":
         return _build_wall_mount(spec)
+    if template_id in {"jewelry_piece", "jewelry_pendant"}:
+        return _build_jewelry_piece(spec)
+    if template_id == "jewelry_ring":
+        return _build_jewelry_ring(spec)
     return _build_phone_stand(spec)
 
 

@@ -874,6 +874,56 @@ code {
   background: rgba(255, 241, 222, 0.94);
 }
 
+.model-appearance-panel {
+  width: 178px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(20, 28, 37, 0.9);
+  color: #eef3f7;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.model-appearance-panel summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 800;
+  list-style-position: inside;
+}
+
+.model-appearance-controls {
+  display: grid;
+  gap: 9px;
+  padding: 0 10px 10px;
+  font-size: 11px;
+}
+
+.model-appearance-segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.model-appearance-segmented button {
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 4px;
+  background: transparent;
+  color: rgba(238, 243, 247, 0.66);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.model-appearance-segmented button[data-active="true"] {
+  background: rgba(125, 211, 199, 0.16);
+  color: #9de4da;
+}
+
 .viewer-selection-badge {
   display: inline-flex;
   align-items: center;

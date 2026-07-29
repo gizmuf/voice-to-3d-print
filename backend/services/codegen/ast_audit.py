@@ -11,8 +11,8 @@ shell commands, fork. We reject anything that even looks like it.
 
 What we allow:
 - All build123d / cadquery / OCP imports and calls
-- math, numpy, dataclasses, typing, statistics, copy, itertools, functools,
-  json (read-only-feeling stdlib utilities), random, enum
+- math, numpy, shapely, dataclasses, typing, statistics, copy, itertools,
+  functools, json (read-only-feeling stdlib utilities), random, enum
 - Standard arithmetic, control flow, comprehensions, classes, functions
 - The `pulsai` shim module (provided by the runner) for parameter exposure
 
@@ -58,6 +58,7 @@ ALLOWED_TOP_LEVEL_MODULES: frozenset[str] = frozenset(
         "collections",
         "operator",
         "trimesh",  # mesh ops on imported STLs
+        "shapely",  # traced 2D jewelry regions extruded via trimesh
         "manifold3d",  # trimesh's boolean engine
         "pulsai",  # the runner-provided helper (see runner/host.py)
     }

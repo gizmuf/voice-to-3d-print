@@ -326,7 +326,17 @@ def main() -> int:
                 bbox = (float(bbox_vec[0]), float(bbox_vec[1]), float(bbox_vec[2]))
                 if "glb" in targets:
                     glb_path = workdir / "model.glb"
-                    trimesh.Scene(mesh).export(glb_path)
+                    # CAD scripts and STEP/STL use Z-up, while glTF viewers use
+                    # Y-up.  Export a rotated copy so an upright part does not
+                    # appear lying on its back in the browser.
+                    glb_mesh = mesh.copy()
+                    glb_mesh.apply_transform(
+                        trimesh.transformations.rotation_matrix(
+                            -0.5 * 3.141592653589793,
+                            [1.0, 0.0, 0.0],
+                        )
+                    )
+                    trimesh.Scene(glb_mesh).export(glb_path)
                     artifacts["glb"] = str(glb_path)
         except Exception as exc:
             result_path.write_text(

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatMessage from "../Chat/ChatMessage";
 import ModelViewer from "../ModelViewer";
 import SelectionChip from "../SelectionChip";
+import SpeechToTextButton from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { useDesignStream } from "../../lib/useDesignStream";
@@ -14,11 +15,98 @@ import type { Design, DesignTemplate, ManufacturabilityIssue } from "../../types
 import type { SelectionPayload } from "../ModelViewer";
 
 const TEMPLATE_PROMPTS: { label: string; prompt: string }[] = [
-  { label: "Speaker grill 200mm", prompt: "speaker grill 200mm with 8 rings" },
-  { label: "Phone stand", prompt: "phone stand 65 degrees, cable hole" },
-  { label: "Pen holder", prompt: "cylindrical pen holder 60mm wide" },
-  { label: "Box 80x60x30", prompt: "simple box 80x60x30, wall 3mm" },
+  { label: "Maskownica głośnika 200 mm", prompt: "speaker grill 200mm with 8 rings" },
+  { label: "Stojak na telefon", prompt: "phone stand 65 degrees, cable hole" },
+  { label: "Pojemnik na długopisy", prompt: "cylindrical pen holder 60mm wide" },
+  { label: "Pudełko 80×60×30", prompt: "simple box 80x60x30, wall 3mm" },
 ];
+
+const JEWELRY_CONTEXTS = [
+  "Brooch",
+  "Charm",
+  "Earring",
+  "Medallion",
+  "Pendant",
+  "Relief plate",
+  "Freeform jewelry",
+];
+
+const JEWELRY_TRACE_MODES = [
+  { value: "auto", label: "Auto trace" },
+  { value: "bright_metal_connected", label: "Shop photo" },
+  { value: "bright_metal", label: "Bright metal" },
+  { value: "dark_ink", label: "Clean sketch" },
+];
+
+const JEWELRY_TRACE_DETAILS = [
+  { value: "fine", label: "Fine" },
+  { value: "medium", label: "Medium" },
+  { value: "bold", label: "Bold" },
+];
+
+type JewelryRole = "base_metal" | "cutout" | "raised_relief" | "engraving" | "ignore";
+
+type JewelryContour = {
+  id: string;
+  role: JewelryRole;
+  points: number[][];
+  parent_id?: string | null;
+  area_mm2?: number;
+  min_width_mm?: number;
+};
+
+type JewelryTracePreview = {
+  trace_id: string;
+  context: string;
+  brief: string;
+  profile_id: string;
+  reference_mm: number;
+  reference_label: string;
+  contours: JewelryContour[];
+  graph: {
+    nodes: { id: string; role: string; parent_id?: string | null; children?: string[]; disconnected?: boolean; min_width_mm?: number }[];
+    edges: { from: string; to: string; type: string; distance_mm?: number }[];
+  };
+  attachments: Record<string, unknown>[];
+  warnings: { severity: string; code: string; contour_id?: string; message: string; suggestion?: string }[];
+  repair_suggestions: { id: string; label: string }[];
+  score: { value: number; reasons: string[] };
+  preview_svg?: string;
+  trace_mode?: string;
+  trace_detail?: string;
+  trace_polygon_count?: number;
+};
+
+type JewelryProfile = {
+  id: string;
+  label: string;
+  build_intent: string;
+  min_width_mm: number;
+  min_cutout_mm: number;
+  base_thickness_mm: number;
+};
+
+type JewelryConcept = {
+  id: string;
+  image_url: string;
+  prompt: string;
+  score?: { value: number; reasons: string[] } | null;
+  score_reasons?: string[];
+};
+
+const fetchWithTimeout = async (
+  url: string,
+  options: RequestInit | undefined,
+  timeoutMs: number,
+) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
 
 export default function DesignStudio() {
   const backendUrl = resolveBackendUrl();
@@ -29,6 +117,21 @@ export default function DesignStudio() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [jewelryContext, setJewelryContext] = useState(JEWELRY_CONTEXTS[0]);
+  const [jewelryBrief, setJewelryBrief] = useState("");
+  const [jewelryReferenceLabel, setJewelryReferenceLabel] = useState("overall width");
+  const [jewelryReferenceMm, setJewelryReferenceMm] = useState("");
+  const [jewelryReferenceImage, setJewelryReferenceImage] = useState<File | null>(null);
+  const [jewelryReferencePreview, setJewelryReferencePreview] = useState<string | null>(null);
+  const [jewelryStatus, setJewelryStatus] = useState<"idle" | "concepts" | "tracing" | "creating">("idle");
+  const [jewelryError, setJewelryError] = useState<string | null>(null);
+  const [jewelryProfiles, setJewelryProfiles] = useState<JewelryProfile[]>([]);
+  const [jewelryProfileId, setJewelryProfileId] = useState("resin_print");
+  const [jewelryTrace, setJewelryTrace] = useState<JewelryTracePreview | null>(null);
+  const [jewelryConcepts, setJewelryConcepts] = useState<JewelryConcept[]>([]);
+  const [jewelryRepairs, setJewelryRepairs] = useState<string[]>([]);
+  const [jewelryTraceMode, setJewelryTraceMode] = useState("auto");
+  const [jewelryTraceDetail, setJewelryTraceDetail] = useState("bold");
   const [onshapeStatus, setOnshapeStatus] = useState<{
     configured: boolean;
     api_key_configured: boolean;
@@ -49,6 +152,7 @@ export default function DesignStudio() {
   const firstPromptFiredForRef = useRef<string | null>(null);
   const [updatingParam, setUpdatingParam] = useState<string | null>(null);
   const [livePreview, setLivePreview] = useState<boolean>(false);
+  const [showAllParameters, setShowAllParameters] = useState(false);
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
   const [selectedFeaturePoint, setSelectedFeaturePoint] = useState<{ x: number; y: number; z: number } | null>(null);
   const [selectedManufacturabilityIssueIndex, setSelectedManufacturabilityIssueIndex] = useState<number | null>(null);
@@ -73,6 +177,21 @@ export default function DesignStudio() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    setJewelryTrace(null);
+    if (!jewelryReferenceImage) {
+      setJewelryReferencePreview(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(jewelryReferenceImage);
+    setJewelryReferencePreview(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [jewelryReferenceImage]);
+
+  useEffect(() => {
+    setJewelryTrace(null);
+  }, [jewelryTraceMode, jewelryTraceDetail, jewelryReferenceLabel, jewelryReferenceMm, jewelryContext]);
   const [flagships, setFlagships] = useState<{ id: string; name: string; description: string }[]>([]);
   const [recentDesigns, setRecentDesigns] = useState<
     {
@@ -229,6 +348,16 @@ export default function DesignStudio() {
       .catch(() => undefined);
   }, [backendUrl]);
 
+  useEffect(() => {
+    fetch(`${backendUrl}/design/jewelry/profiles`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (payload?.profiles) setJewelryProfiles(payload.profiles);
+        if (payload?.default) setJewelryProfileId(payload.default);
+      })
+      .catch(() => undefined);
+  }, [backendUrl]);
+
   // Deep-link: ?design=<id> auto-loads an existing design (and its chat
   // history). Lets users bookmark / share work in progress.
   useEffect(() => {
@@ -322,11 +451,16 @@ export default function DesignStudio() {
   }, [design, pendingFirstPrompt, stream]);
 
   const onCreate = useCallback(
-    async (creationPrompt: string, templateId?: string | null) => {
+    async (
+      creationPrompt: string,
+      templateId?: string | null,
+      processOverride?: typeof process,
+    ) => {
       setCreating(true);
       setCreateError(null);
       try {
-        const body: Record<string, unknown> = { process };
+        const targetProcess = processOverride ?? process;
+        const body: Record<string, unknown> = { process: targetProcess };
         if (templateId) body.template_id = templateId;
         else body.prompt = creationPrompt;
         const res = await fetch(`${backendUrl}/design/create`, {
@@ -355,7 +489,7 @@ export default function DesignStudio() {
           design_id: payload.design_id,
           revision_id: payload.revision_id,
           name: payload.name,
-          process: payload.process ?? process,
+          process: payload.process ?? targetProcess,
           script: payload.script,
           parameters: payload.parameters ?? [],
           features: payload.features ?? [],
@@ -367,10 +501,12 @@ export default function DesignStudio() {
         if (!templateId && creationPrompt && creationPrompt.trim()) {
           setPendingFirstPrompt(creationPrompt.trim());
         }
+        return true;
       } catch (error) {
         setCreateError(
           error instanceof Error ? error.message : "Failed to create design.",
         );
+        return false;
       } finally {
         setCreating(false);
       }
@@ -473,9 +609,205 @@ export default function DesignStudio() {
         error instanceof Error ? error.message : "Failed to import from Onshape.",
       );
     } finally {
-      setOnshapeImporting(false);
+    setOnshapeImporting(false);
     }
   }, [backendUrl, onshapeElementKind, onshapeUrl, process]);
+
+  const onTraceJewelrySketch = useCallback(async (repairsOverride?: string[]) => {
+    const referenceMm = Number(jewelryReferenceMm);
+    setJewelryError(null);
+    setCreateError(null);
+    if (!jewelryReferenceImage) {
+      setJewelryError("Upload a sketch/photo or generate a concept first.");
+      return;
+    }
+    if (!Number.isFinite(referenceMm) || referenceMm <= 0) {
+      setJewelryError("Add one real measurement in millimeters before tracing.");
+      return;
+    }
+
+    const form = new FormData();
+    form.append("image", jewelryReferenceImage);
+    form.append("reference_mm", String(referenceMm));
+    form.append("reference_label", jewelryReferenceLabel.trim() || "overall width");
+    form.append("context", jewelryContext.trim() || "Freeform jewelry");
+    form.append("brief", jewelryBrief.trim() || prompt.trim());
+    form.append("profile_id", jewelryProfileId);
+    form.append("repairs", (repairsOverride ?? jewelryRepairs).join(","));
+    form.append("trace_mode", jewelryTraceMode);
+    form.append("detail", jewelryTraceDetail);
+    setJewelryStatus("tracing");
+    try {
+      const res = await fetchWithTimeout(
+        `${backendUrl}/design/jewelry/trace-preview`,
+        { method: "POST", body: form },
+        60000,
+      );
+      if (!res.ok) {
+        let detail = `Jewelry trace failed: ${res.status}`;
+        try {
+          const payload = await res.json();
+          detail =
+            typeof payload?.detail === "string"
+              ? payload.detail
+              : payload?.detail?.message ?? detail;
+        } catch {
+          // keep status detail
+        }
+        throw new Error(detail);
+      }
+      setJewelryTrace((await res.json()) as JewelryTracePreview);
+    } catch (error) {
+      setJewelryTrace(null);
+      setJewelryError(error instanceof Error ? error.message : "Failed to trace jewelry sketch.");
+    } finally {
+      setJewelryStatus("idle");
+    }
+  }, [
+    backendUrl,
+    jewelryBrief,
+    jewelryContext,
+    jewelryProfileId,
+    jewelryReferenceImage,
+    jewelryReferenceLabel,
+    jewelryReferenceMm,
+    jewelryRepairs,
+    jewelryTraceDetail,
+    jewelryTraceMode,
+    prompt,
+  ]);
+
+  const onGenerateJewelryConcepts = useCallback(async () => {
+    const brief = jewelryBrief.trim() || prompt.trim();
+    setJewelryError(null);
+    if (!brief) {
+      setJewelryError("Describe the jewelry idea first.");
+      return;
+    }
+    setJewelryStatus("concepts");
+    try {
+      const res = await fetchWithTimeout(
+        `${backendUrl}/design/jewelry/concepts`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            prompt: brief,
+            context: jewelryContext,
+            profile_id: jewelryProfileId,
+            count: 3,
+          }),
+        },
+        150000,
+      );
+      if (!res.ok) {
+        let detail = `Concept generation failed: ${res.status}`;
+        try {
+          const payload = await res.json();
+          detail = typeof payload?.detail === "string" ? payload.detail : detail;
+        } catch {
+          // keep
+        }
+        throw new Error(detail);
+      }
+      const payload = await res.json();
+      if (payload.configured === false) {
+        throw new Error(payload.message || "OpenAI image generation is not configured.");
+      }
+      setJewelryConcepts(payload.concepts ?? []);
+    } catch (error) {
+      setJewelryError(error instanceof Error ? error.message : "Failed to generate concepts.");
+    } finally {
+      setJewelryStatus("idle");
+    }
+  }, [backendUrl, jewelryBrief, jewelryContext, jewelryProfileId, prompt]);
+
+  const onUseJewelryConcept = useCallback(async (concept: JewelryConcept) => {
+    try {
+      const res = await fetch(concept.image_url);
+      const blob = await res.blob();
+      const file = new File([blob], `${concept.id}.png`, { type: blob.type || "image/png" });
+      setJewelryReferenceImage(file);
+      setJewelryTrace(null);
+    } catch {
+      setJewelryError("Could not load the generated concept as a trace image.");
+    }
+  }, []);
+
+  const onApplyJewelryRepair = useCallback(
+    async (repairId: string) => {
+      const next = Array.from(new Set([...jewelryRepairs, repairId]));
+      setJewelryRepairs(next);
+      await onTraceJewelrySketch(next);
+    },
+    [jewelryRepairs, onTraceJewelrySketch],
+  );
+
+  const onSetContourRole = useCallback((contourId: string, role: JewelryRole) => {
+    setJewelryTrace((current) =>
+      current
+        ? {
+            ...current,
+            contours: current.contours.map((contour) =>
+              contour.id === contourId ? { ...contour, role } : contour,
+            ),
+          }
+        : current,
+    );
+  }, []);
+
+  const onCreateJewelryCad = useCallback(async () => {
+    if (!jewelryTrace) return;
+    setJewelryStatus("creating");
+    setCreating(true);
+    setJewelryError(null);
+    try {
+      const res = await fetch(`${backendUrl}/design/jewelry/create-from-trace`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          trace: jewelryTrace,
+          process: "either",
+          name: `${jewelryContext || "Jewelry"} relief`,
+        }),
+      });
+      if (!res.ok) {
+        let detail = `Jewelry CAD creation failed: ${res.status}`;
+        try {
+          const payload = await res.json();
+          detail =
+            typeof payload?.detail === "string"
+              ? payload.detail
+              : payload?.detail?.message ?? detail;
+        } catch {
+          // keep
+        }
+        throw new Error(detail);
+      }
+      const payload = await res.json();
+      setDesign({
+        design_id: payload.design_id,
+        revision_id: payload.revision_id,
+        name: payload.name,
+        process: payload.process ?? "either",
+        script: payload.script,
+        parameters: payload.parameters ?? [],
+        features: payload.features ?? [],
+        latest_build: payload.initial_build ?? null,
+        printer_profile_id: payload.printer_profile_id ?? null,
+      });
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("design", payload.design_id);
+        window.history.replaceState({}, "", url.toString());
+      }
+    } catch (error) {
+      setJewelryError(error instanceof Error ? error.message : "Failed to create jewelry CAD.");
+    } finally {
+      setCreating(false);
+      setJewelryStatus("idle");
+    }
+  }, [backendUrl, jewelryContext, jewelryTrace]);
 
   const buildArtifactUrl = useMemo(() => {
     const glb = design?.latest_build?.artifacts?.glb as
@@ -536,40 +868,226 @@ export default function DesignStudio() {
   if (!design) {
     return (
       <main style={shellStyle}>
+        <style>{responsiveCss}</style>
         <header style={headerStyle}>
           <div>
             <p style={eyebrowStyle}>PULSAI · DESIGN STUDIO (BETA)</p>
-            <h1 style={titleStyle}>Code-driven CAD with Claude</h1>
+            <h1 style={titleStyle}>Zaprojektuj. Zobacz. Wydrukuj.</h1>
             <p style={subtitleStyle}>
-              Describe the part. Pulsai writes a build123d Python script,
-              executes it in a sandbox, and shows you a printable / millable
-              model. Edit by chatting; every change rewrites or patches the
-              script.
+              Rozmawiaj z Pulsai jak z projektantem. Model, rozmowa i parametry pozostają razem od pierwszego pomysłu do wydruku.
             </p>
           </div>
         </header>
 
-        <section style={createCardStyle}>
-          <h2 style={{ margin: 0, fontSize: 18 }}>Start a new design</h2>
+        <details style={{ ...jewelryCardStyle, order: 2 }}>
+          <summary style={advancedSummaryStyle}>Jewelry, relief and sketch workflow</summary>
+          <div style={jewelryHeaderStyle}>
+            <div>
+              <p style={eyebrowStyle}>JEWELRY / RELIEF CAD</p>
+              <h2 style={{ margin: 0, fontSize: 18 }}>Sketch or concept to editable relief</h2>
+            </div>
+            <span style={jewelryBadgeStyle}>Preview before CAD</span>
+          </div>
+          <p style={{ margin: 0, fontSize: 12, opacity: 0.72, lineHeight: 1.45 }}>
+            Use this for pendants, charms, earrings, medallions, brooches, and flat relief art. Confirm the 2D trace before Pulsai creates the 3D model.
+          </p>
+
+          <div style={jewelryGridStyle}>
+            <label style={fieldLabelStyle}>
+              Type
+              <select value={jewelryContext} onChange={(e) => setJewelryContext(e.target.value)} style={compactInputStyle} disabled={creating}>
+                {JEWELRY_CONTEXTS.map((context) => (
+                  <option key={context} value={context}>{context}</option>
+                ))}
+              </select>
+            </label>
+            <label style={fieldLabelStyle}>
+              Profile
+              <select value={jewelryProfileId} onChange={(e) => setJewelryProfileId(e.target.value)} style={compactInputStyle} disabled={creating}>
+                {(jewelryProfiles.length ? jewelryProfiles : [{ id: "resin_print", label: "Resin print", build_intent: "resin_print", min_width_mm: 0.8, min_cutout_mm: 0.6, base_thickness_mm: 2 }]).map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.label}</option>
+                ))}
+              </select>
+            </label>
+            <label style={fieldLabelStyle}>
+              Reference
+              <input value={jewelryReferenceLabel} onChange={(e) => setJewelryReferenceLabel(e.target.value)} style={compactInputStyle} disabled={creating} />
+            </label>
+            <label style={fieldLabelStyle}>
+              mm
+              <input value={jewelryReferenceMm} onChange={(e) => setJewelryReferenceMm(e.target.value)} inputMode="decimal" placeholder="35" style={compactInputStyle} disabled={creating} />
+            </label>
+          </div>
+
           <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={3}
-            placeholder="E.g. 'speaker grill 240mm, 10 rings, 4mm holes'"
+            value={jewelryBrief}
+            onChange={(e) => setJewelryBrief(e.target.value)}
+            rows={2}
+            placeholder="Art nouveau tree pendant with flowers, readable at 35mm, strong connected branches"
             style={textareaStyle}
             disabled={creating}
           />
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <label style={{ fontSize: 12, opacity: 0.75 }}>
-              Target process:
+
+          <div style={jewelryUploadRowStyle}>
+            <label style={{ ...chipButtonStyle, cursor: creating ? "wait" : "pointer" }}>
+              {jewelryReferenceImage ? "Change image" : "Upload sketch/photo"}
+              <input
+                type="file"
+                accept="image/*"
+                disabled={creating}
+                onChange={(e) => {
+                  setJewelryReferenceImage(e.target.files?.[0] ?? null);
+                  setJewelryTrace(null);
+                  e.target.value = "";
+                }}
+                style={{ display: "none" }}
+              />
+            </label>
+            <button type="button" onClick={onGenerateJewelryConcepts} disabled={creating || jewelryStatus !== "idle"} style={chipButtonStyle}>
+              {jewelryStatus === "concepts" ? "Generating…" : "Generate concepts"}
+            </button>
+            {jewelryReferenceImage ? (
+              <>
+                <select
+                  value={jewelryTraceMode}
+                  onChange={(e) => setJewelryTraceMode(e.target.value)}
+                  disabled={creating || jewelryStatus !== "idle"}
+                  style={compactInputStyle}
+                  aria-label="Trace mode"
+                >
+                  {JEWELRY_TRACE_MODES.map((mode) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={jewelryTraceDetail}
+                  onChange={(e) => setJewelryTraceDetail(e.target.value)}
+                  disabled={creating || jewelryStatus !== "idle"}
+                  style={compactInputStyle}
+                  aria-label="Trace detail"
+                >
+                  {JEWELRY_TRACE_DETAILS.map((detail) => (
+                    <option key={detail.value} value={detail.value}>
+                      {detail.label}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
+            <button type="button" onClick={() => onTraceJewelrySketch()} disabled={!jewelryReferenceImage || creating || jewelryStatus !== "idle"} style={primaryButtonStyle}>
+              {jewelryStatus === "tracing" ? "Tracing…" : "Trace preview"}
+            </button>
+            {jewelryReferenceImage ? (
+              <button type="button" onClick={() => { setJewelryReferenceImage(null); setJewelryTrace(null); }} disabled={creating} style={chipButtonStyle}>
+                Remove image
+              </button>
+            ) : null}
+          </div>
+
+          {jewelryConcepts.length > 0 ? (
+            <div style={conceptGridStyle}>
+              {jewelryConcepts.map((concept) => (
+                <button key={concept.id} type="button" onClick={() => onUseJewelryConcept(concept)} style={conceptCardStyle}>
+                  <img src={concept.image_url} alt="Generated jewelry concept" style={conceptImageStyle} />
+                  <span>Use concept</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {jewelryTrace ? (
+            <div style={tracePreviewPanelStyle}>
+              <div style={tracePreviewMetaStyle}>
+                <strong>Score {jewelryTrace.score.value}/100</strong>
+                <span>{jewelryTrace.contours.length} contours</span>
+                <span>{jewelryTrace.graph.nodes.filter((n) => n.disconnected).length} islands</span>
+                {jewelryTrace.trace_mode ? <span>{jewelryTrace.trace_mode.replaceAll("_", " ")}</span> : null}
+                {jewelryTrace.trace_detail ? <span>{jewelryTrace.trace_detail}</span> : null}
+              </div>
+              <JewelryTraceSvg trace={jewelryTrace} />
+              {jewelryTrace.warnings.length > 0 ? (
+                <div style={traceWarningListStyle}>
+                  {jewelryTrace.warnings.slice(0, 3).map((warning, idx) => (
+                    <span key={`${warning.code}-${idx}`}>{warning.message}</span>
+                  ))}
+                </div>
+              ) : (
+                <p style={jewelryStatusStyle}>Trace looks usable for the selected profile.</p>
+              )}
+              <div style={jewelryUploadRowStyle}>
+                {jewelryTrace.repair_suggestions.map((repair) => (
+                  <button key={repair.id} type="button" onClick={() => onApplyJewelryRepair(repair.id)} disabled={creating || jewelryStatus !== "idle"} style={chipButtonStyle}>
+                    {repair.label}
+                  </button>
+                ))}
+                <button type="button" onClick={onCreateJewelryCad} disabled={creating || jewelryStatus !== "idle"} style={primaryButtonStyle}>
+                  {jewelryStatus === "creating" ? "Creating CAD…" : "Create editable CAD"}
+                </button>
+              </div>
+              <div style={contourRoleGridStyle}>
+                {jewelryTrace.contours.slice(0, 10).map((contour) => (
+                  <label key={contour.id} style={contourRoleStyle}>
+                    <span>{contour.id}</span>
+                    <select value={contour.role} onChange={(e) => onSetContourRole(contour.id, e.target.value as JewelryRole)} style={compactInputStyle}>
+                      <option value="base_metal">metal</option>
+                      <option value="cutout">cutout</option>
+                      <option value="raised_relief">raised</option>
+                      <option value="engraving">engrave</option>
+                      <option value="ignore">ignore</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {jewelryStatus !== "idle" ? (
+            <p style={jewelryStatusStyle}>
+              {jewelryStatus === "concepts" ? "Generating clean black/white concept cards." : jewelryStatus === "tracing" ? "Extracting semantic contours." : "Building editable 2.5D CAD."}
+            </p>
+          ) : null}
+
+          {jewelryError ? <p style={jewelryErrorStyle}>{jewelryError}</p> : null}
+
+          {jewelryReferencePreview ? (
+            <img src={jewelryReferencePreview} alt="Jewelry sketch reference" style={jewelryPreviewStyle} />
+          ) : null}
+        </details>
+
+        <div className="pulsai-start-studio-grid" style={startStudioGridStyle}>
+        <section className="pulsai-start-chat-pane" style={startChatPaneStyle}>
+          <div>
+            <p style={{ ...eyebrowStyle, color: "#70c6ff", opacity: 1 }}>PULSAI COPILOT</p>
+            <h2 style={{ margin: "5px 0 5px", fontSize: 22 }}>Co chcesz zaprojektować?</h2>
+            <p style={{ margin: 0, fontSize: 12, color: "rgba(238,243,247,0.66)", lineHeight: 1.45 }}>
+              Napisz albo powiedz po polsku. Model pojawi się obok, a rozmowa zostanie w tym samym miejscu.
+            </p>
+          </div>
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={4}
+            placeholder="Np. uchwyt na telefon szeroki na 80 mm, z otworem na kabel…"
+            style={startChatTextareaStyle}
+            disabled={creating}
+          />
+          <div style={startChatFooterStyle}>
+            <SpeechToTextButton
+              disabled={creating}
+              onTranscript={(text) => setPrompt((current) => [current.trim(), text].filter(Boolean).join(" "))}
+            />
+            <label style={{ fontSize: 11, color: "rgba(238,243,247,0.62)" }}>
+              Wykonanie
               <select
                 value={process}
                 onChange={(e) => setProcess(e.target.value as typeof process)}
-                style={{ marginLeft: 6 }}
+                style={startDarkSelectStyle}
               >
-                <option value="fdm">3D printing (FDM)</option>
-                <option value="cnc">CNC milling</option>
-                <option value="either">Either</option>
+                <option value="fdm">Druk 3D</option>
+                <option value="cnc">CNC</option>
+                <option value="either">Jeszcze nie wiem</option>
               </select>
             </label>
             <button
@@ -578,10 +1096,10 @@ export default function DesignStudio() {
               disabled={creating || !prompt.trim()}
               style={primaryButtonStyle}
             >
-              {creating ? "Generating…" : "Generate"}
+              {creating ? "Projektuję…" : "Utwórz model"}
             </button>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "none" }}>
             {TEMPLATE_PROMPTS.map((p) => (
               <button
                 key={p.label}
@@ -598,6 +1116,9 @@ export default function DesignStudio() {
             ))}
           </div>
 
+          <details style={{ display: "none" }}>
+            <summary style={advancedSummaryStyle}>Import STEP/STL or connect CAD</summary>
+            <div style={advancedStartBodyStyle}>
           <div
             style={{
               display: "flex",
@@ -625,13 +1146,13 @@ export default function DesignStudio() {
                 value={onshapeUrl}
                 onChange={(e) => setOnshapeUrl(e.target.value)}
                 placeholder="https://cad.onshape.com/documents/d/.../w/.../e/..."
-                style={onshapeInputStyle}
+                style={compactInputStyle}
                 disabled={onshapeImporting || creating}
               />
               <select
                 value={onshapeElementKind}
                 onChange={(e) => setOnshapeElementKind(e.target.value as typeof onshapeElementKind)}
-                style={onshapeInputStyle}
+                style={compactInputStyle}
                 disabled={onshapeImporting || creating}
               >
                 <option value="partstudio">Part Studio</option>
@@ -689,6 +1210,11 @@ export default function DesignStudio() {
               />
             </label>
           </div>
+            </div>
+          </details>
+          <details style={{ display: "none" }}>
+            <summary style={advancedSummaryStyle}>Browse templates and starter models</summary>
+            <div style={advancedStartBodyStyle}>
           {flagships.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <span style={{ fontSize: 11, opacity: 0.65 }}>
@@ -729,15 +1255,89 @@ export default function DesignStudio() {
               ))}
             </div>
           ) : null}
+            </div>
+          </details>
           {createError ? (
-            <p style={{ color: "rgba(244,67,54,0.95)", fontSize: 12 }}>
+            <p style={{ color: "#ff9d9d", fontSize: 12 }}>
               {createError}
             </p>
           ) : null}
         </section>
 
+        <section className="pulsai-start-viewer-pane" style={startViewerPaneStyle} aria-label="Podgląd modelu 3D">
+          <div style={startViewerGridStyle} aria-hidden="true" />
+          <div style={startViewerAxisStyle} aria-hidden="true">
+            <span style={{ color: "#ff7676" }}>X</span>
+            <span style={{ color: "#71d28d" }}>Y</span>
+            <span style={{ color: "#6ea8ff" }}>Z</span>
+          </div>
+          <div style={startViewerEmptyStyle}>
+            <div style={startViewerObjectStyle} aria-hidden="true" />
+            <strong>Tu pojawi się Twój model</strong>
+            <span>Podgląd pozostaje widoczny podczas całej rozmowy i każdej poprawki.</span>
+          </div>
+          <span style={startViewerModeStyle}>TRYB: ORBITA</span>
+        </section>
+
+        <aside className="pulsai-start-tools-pane" style={startToolsPaneStyle}>
+          <div>
+            <p style={eyebrowStyle}>SZYBKI START</p>
+            <h3 style={{ margin: "4px 0 3px", fontSize: 17 }}>Przykładowe projekty</h3>
+            <p style={{ margin: 0, fontSize: 11, opacity: 0.58 }}>Kliknij przykład albo opisz własny pomysł w czacie.</p>
+          </div>
+          <div style={startToolsListStyle}>
+            {TEMPLATE_PROMPTS.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                onClick={() => setPrompt(item.prompt)}
+                disabled={creating}
+                style={startToolButtonStyle}
+              >
+                <span>{item.label}</span><span aria-hidden="true">→</span>
+              </button>
+            ))}
+          </div>
+          <details style={startToolsDetailsStyle}>
+            <summary style={advancedSummaryStyle}>Importuj STEP lub STL</summary>
+            <div style={advancedStartBodyStyle}>
+              <label style={{ ...startToolButtonStyle, cursor: creating ? "wait" : "pointer" }}>
+                {creating ? "Importuję…" : "Wybierz plik CAD"}
+                <input
+                  type="file"
+                  accept=".step,.stp,.stl,application/STEP,application/x-step,application/sla,model/stl"
+                  disabled={creating}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) onImportCAD(file);
+                    event.target.value = "";
+                  }}
+                  style={{ display: "none" }}
+                />
+              </label>
+            </div>
+          </details>
+          <details style={startToolsDetailsStyle}>
+            <summary style={advancedSummaryStyle}>Szablony parametryczne</summary>
+            <div style={advancedStartBodyStyle}>
+              {templates.map((template) => (
+                <button key={template.template_id} type="button" onClick={() => onCreate("", template.template_id)} disabled={creating} style={startToolButtonStyle}>
+                  {template.name}
+                </button>
+              ))}
+            </div>
+          </details>
+          {recentDesigns.length > 0 ? (
+            <button type="button" onClick={() => openDesign(recentDesigns[0].design_id)} style={startRecentButtonStyle}>
+              <span>Ostatni projekt</span>
+              <strong>{recentDesigns[0].name || "Bez nazwy"}</strong>
+            </button>
+          ) : null}
+        </aside>
+        </div>
+
         {recentDesigns.length > 0 ? (
-          <section style={createCardStyle}>
+          <section style={{ ...createCardStyle, order: 3 }}>
             <h2 style={{ margin: 0, fontSize: 16 }}>Your designs</h2>
             <p style={{ margin: 0, fontSize: 12, opacity: 0.65 }}>
               {recentDesigns.length} saved on this device. Click to reopen — your edit history travels with each one.
@@ -782,7 +1382,7 @@ export default function DesignStudio() {
           </section>
         ) : null}
 
-        <section style={infoCardStyle}>
+        <section style={{ ...infoCardStyle, order: 4 }}>
           <strong>Why this is different</strong>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18, lineHeight: 1.55 }}>
             <li>The design is a build123d Python script Claude can read and rewrite — no fixed templates.</li>
@@ -861,6 +1461,9 @@ export default function DesignStudio() {
             </label>
           ) : null}
           <button type="button" style={backButtonStyle} onClick={returnToStart}>
+            New jewelry sketch
+          </button>
+          <button type="button" style={backButtonStyle} onClick={returnToStart}>
             ← Back to designs
           </button>
         </div>
@@ -873,10 +1476,13 @@ export default function DesignStudio() {
         refreshKey={design.revision_id}
       />
 
-      <section style={threePaneStyle}>
-        <aside style={parametersPaneStyle}>
+      <section style={threePaneStyle} className="pulsai-studio-grid">
+        <aside style={parametersPaneStyle} className="pulsai-parameters-pane">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <h3 style={{ ...paneHeaderStyle, margin: "0 0 4px" }}>Parameters</h3>
+            <div>
+              <h3 style={{ ...paneHeaderStyle, margin: "0 0 2px" }}>Controls</h3>
+              <span style={paneHintStyle}>Change the model without writing a prompt.</span>
+            </div>
             <label style={liveToggleStyle} title="Live preview re-renders the model on slider drag (uses more compute)">
               <input
                 type="checkbox"
@@ -887,7 +1493,7 @@ export default function DesignStudio() {
             </label>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {design.parameters.map((p) => (
+            {design.parameters.slice(0, showAllParameters ? design.parameters.length : 4).map((p) => (
               <ParameterControl
                 key={p.name}
                 param={p}
@@ -938,6 +1544,17 @@ export default function DesignStudio() {
               <span style={{ fontSize: 12, opacity: 0.55 }}>
                 The script declared no parameters via <code>pulsai.param</code>.
               </span>
+            ) : null}
+            {design.parameters.length > 4 ? (
+              <button
+                type="button"
+                onClick={() => setShowAllParameters((current) => !current)}
+                style={showMoreParametersStyle}
+              >
+                {showAllParameters
+                  ? "Show fewer controls"
+                  : `Show ${design.parameters.length - 4} more controls`}
+              </button>
             ) : null}
           </div>
 
@@ -1168,7 +1785,7 @@ export default function DesignStudio() {
           ) : null}
         </aside>
 
-        <section style={canvasPaneStyle}>
+        <section style={canvasPaneStyle} className="pulsai-canvas-pane">
           {buildArtifactUrl ? (
             <ModelViewer
               src={buildArtifactUrl}
@@ -1189,11 +1806,8 @@ export default function DesignStudio() {
                   : null
               }
               focusTarget={
-                activeMarkerPoint
-                  ? {
-                      point: activeMarkerPoint,
-                      distance: 42,
-                    }
+                selectedManufacturabilityPoint
+                  ? { point: selectedManufacturabilityPoint }
                   : null
               }
               selectionChip={
@@ -1243,8 +1857,16 @@ export default function DesignStudio() {
           </div>
         </section>
 
-        <aside style={chatPaneStyle}>
-          <h3 style={paneHeaderStyle}>Chat with Pulsai</h3>
+        <aside style={chatPaneStyle} className="pulsai-chat-pane">
+          <div style={chatPaneHeaderStyle}>
+            <div>
+              <p style={{ ...eyebrowStyle, color: "#7dd3c7", opacity: 1 }}>PULSAI COPILOT</p>
+              <h3 style={{ ...paneHeaderStyle, margin: "2px 0 0", color: "#f5f7fa", opacity: 1 }}>
+                Design by conversation
+              </h3>
+            </div>
+            <span style={chatOnlineStyle}>ready</span>
+          </div>
           <div style={historyStyle}>
             {stream.history.length === 0 ? (
               <p style={{ fontSize: 12, opacity: 0.6 }}>
@@ -1381,7 +2003,9 @@ function ParameterControl({
   return (
     <div style={paramRowStyle}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-        <span style={{ fontSize: 12, opacity: 0.85 }}>{param.name}</span>
+        <span style={{ fontSize: 12, opacity: 0.9 }} title={param.name}>
+          {humanizeParameterName(param.name)}
+        </span>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={paramValueStyle}>{String(param.value)}{param.type === "length_mm" ? " mm" : param.type === "angle_deg" ? "°" : ""}</span>
           <button
@@ -1525,7 +2149,7 @@ function DesignChatInput({
         rows={2}
         placeholder="Describe an edit…"
         disabled={disabled}
-        style={textareaStyle}
+        style={chatTextareaStyle}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && draft.trim() && !disabled) {
             onSend(draft.trim());
@@ -1534,9 +2158,16 @@ function DesignChatInput({
         }}
       />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 11, opacity: 0.55 }}>
-          {selectedFeature ? `Target: ${selectedFeature.name}` : "⌘/Ctrl+Enter to send."}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+          <SpeechToTextButton
+            compact
+            disabled={disabled || applying}
+            onTranscript={(text) => setDraft((current) => [current.trim(), text].filter(Boolean).join(" "))}
+          />
+          <span style={{ fontSize: 11, opacity: 0.6 }}>
+            {selectedFeature ? `Target: ${selectedFeature.name}` : "Speak or type an edit"}
+          </span>
+        </div>
         {routeBadge ? (
           <span style={routeBadgeStyle(routeBadge.tone)} title={routeBadge.title}>
             {routeBadge.label} · {routeBadge.costEstimate}
@@ -1567,6 +2198,14 @@ function DesignChatInput({
       </div>
     </form>
   );
+}
+
+function humanizeParameterName(name: string) {
+  return name
+    .replace(/_mm$/i, "")
+    .replace(/_deg$/i, " angle")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 type DesignEditBadge = {
@@ -1769,6 +2408,60 @@ function inferFeatureFromPoint(design: Design, point: { x: number; y: number; z:
   return findFeature("cylinder", "body") ?? features[0]?.id ?? null;
 }
 
+function JewelryTraceSvg({ trace }: { trace: JewelryTracePreview }) {
+  if (trace.contours.length === 0) {
+    return (
+      <svg viewBox="-20 -20 40 40" style={tracePreviewSvgStyle} role="img" aria-label="Jewelry semantic trace preview">
+        <rect x="-20" y="-20" width="40" height="40" fill="#151515" />
+      </svg>
+    );
+  }
+  const boxes = trace.contours.map((contour) => {
+    const xs = contour.points.map((p) => p[0]);
+    const ys = contour.points.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  });
+  const minX = Math.min(...boxes.map((b) => b[0]));
+  const minY = Math.min(...boxes.map((b) => b[1]));
+  const maxX = Math.max(...boxes.map((b) => b[2]));
+  const maxY = Math.max(...boxes.map((b) => b[3]));
+  const pad = Math.max(2, Math.max(maxX - minX, maxY - minY) * 0.08);
+  const colors: Record<JewelryRole, string> = {
+    base_metal: "#f7f3e8",
+    cutout: "#151515",
+    raised_relief: "#f2c14e",
+    engraving: "none",
+    ignore: "#cccccc",
+  };
+  const strokes: Record<JewelryRole, string> = {
+    base_metal: "#2f3432",
+    cutout: "#000000",
+    raised_relief: "#7a5300",
+    engraving: "#1f6f62",
+    ignore: "#888888",
+  };
+  return (
+    <svg
+      viewBox={`${minX - pad} ${-maxY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`}
+      style={tracePreviewSvgStyle}
+      role="img"
+      aria-label="Jewelry semantic trace preview"
+    >
+      <rect x={minX - pad} y={-maxY - pad} width={maxX - minX + pad * 2} height={maxY - minY + pad * 2} fill="#151515" />
+      {trace.contours.map((contour) => (
+        <polygon
+          key={contour.id}
+          points={contour.points.map((p) => `${p[0]},${-p[1]}`).join(" ")}
+          fill={colors[contour.role]}
+          stroke={strokes[contour.role]}
+          strokeWidth={contour.role === "engraving" ? 0.28 : 0.16}
+          opacity={contour.role === "ignore" ? 0.35 : 1}
+        />
+      ))}
+    </svg>
+  );
+}
+
 const shellStyle: React.CSSProperties = {
   minHeight: "100vh",
   padding: "24px 32px",
@@ -1806,6 +2499,174 @@ const subtitleStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
+const fieldLabelStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  fontSize: 12,
+  fontWeight: 700,
+  opacity: 0.82,
+};
+
+const compactInputStyle: React.CSSProperties = {
+  border: "1px solid rgba(0,0,0,0.12)",
+  borderRadius: 10,
+  padding: "9px 10px",
+  fontSize: 13,
+  fontFamily: "inherit",
+  background: "rgba(255,255,255,0.92)",
+};
+
+const jewelryCardStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+  padding: 18,
+  background: "linear-gradient(180deg, rgba(255,255,255,0.92), rgba(247,251,249,0.86))",
+  border: "1px solid rgba(43,140,122,0.22)",
+  borderRadius: 14,
+};
+
+const jewelryHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: 12,
+};
+
+const jewelryBadgeStyle: React.CSSProperties = {
+  padding: "6px 9px",
+  borderRadius: 999,
+  background: "rgba(43,140,122,0.1)",
+  color: "#1f6f62",
+  fontSize: 11,
+  fontWeight: 800,
+  whiteSpace: "nowrap",
+};
+
+const jewelryGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+  gap: 10,
+};
+
+const jewelryUploadRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 8,
+  alignItems: "center",
+  flexWrap: "wrap",
+};
+
+const jewelryPreviewStyle: React.CSSProperties = {
+  width: "100%",
+  maxHeight: 180,
+  objectFit: "cover",
+  borderRadius: 12,
+  border: "1px solid rgba(0,0,0,0.1)",
+};
+
+const tracePreviewPanelStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(160px, 1fr)",
+  gap: 8,
+  padding: 10,
+  borderRadius: 12,
+  border: "1px solid rgba(43,140,122,0.22)",
+  background: "rgba(255,255,255,0.72)",
+};
+
+const tracePreviewMetaStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flexWrap: "wrap",
+  fontSize: 12,
+  color: "#255f57",
+};
+
+const tracePreviewSvgStyle: React.CSSProperties = {
+  width: "100%",
+  height: 220,
+  background: "#151515",
+  borderRadius: 8,
+  border: "1px solid rgba(0,0,0,0.08)",
+};
+
+const conceptGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+  gap: 8,
+};
+
+const conceptCardStyle: React.CSSProperties = {
+  border: "1px solid rgba(0,0,0,0.1)",
+  borderRadius: 10,
+  padding: 8,
+  background: "rgba(255,255,255,0.82)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  alignItems: "center",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const conceptImageStyle: React.CSSProperties = {
+  width: "100%",
+  aspectRatio: "1 / 1",
+  objectFit: "cover",
+  borderRadius: 8,
+  background: "#f7f7f7",
+};
+
+const traceWarningListStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  padding: "8px 10px",
+  borderRadius: 10,
+  color: "#8a5c00",
+  background: "rgba(255,193,7,0.12)",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const contourRoleGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+  gap: 6,
+};
+
+const contourRoleStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 96px",
+  alignItems: "center",
+  gap: 6,
+  fontSize: 11,
+  fontWeight: 800,
+  color: "rgba(0,0,0,0.62)",
+};
+
+const jewelryStatusStyle: React.CSSProperties = {
+  margin: 0,
+  padding: "9px 10px",
+  borderRadius: 10,
+  background: "rgba(33,150,243,0.08)",
+  color: "#185a9d",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const jewelryErrorStyle: React.CSSProperties = {
+  margin: 0,
+  padding: "9px 10px",
+  borderRadius: 10,
+  background: "rgba(244,67,54,0.08)",
+  color: "rgba(180,30,30,0.95)",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
 const createCardStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -1814,6 +2675,247 @@ const createCardStyle: React.CSSProperties = {
   background: "rgba(255,255,255,0.8)",
   border: "1px solid rgba(0,0,0,0.08)",
   borderRadius: 14,
+};
+
+const startComposerStyle: React.CSSProperties = {
+  width: "min(860px, 100%)",
+  alignSelf: "center",
+  padding: 24,
+  gap: 14,
+  borderRadius: 20,
+  boxShadow: "0 18px 50px rgba(56, 43, 30, 0.09)",
+};
+
+const startStudioGridStyle: React.CSSProperties = {
+  order: 1,
+  display: "grid",
+  gridTemplateColumns: "minmax(290px, 0.82fr) minmax(440px, 1.65fr) minmax(280px, 0.9fr)",
+  gap: 12,
+  minHeight: 620,
+};
+
+const startChatPaneStyle: React.CSSProperties = {
+  gridColumn: "1",
+  gridRow: "1",
+  background: "linear-gradient(180deg, #1a222c 0%, #121820 100%)",
+  color: "#eef3f7",
+  border: "1px solid rgba(255,255,255,0.08)",
+  borderRadius: 12,
+  display: "flex",
+  flexDirection: "column",
+  minHeight: 620,
+  maxHeight: "none",
+  padding: 18,
+  gap: 16,
+  boxShadow: "0 16px 36px rgba(19,29,40,0.14)",
+};
+
+const startChatTextareaStyle: React.CSSProperties = {
+  width: "100%",
+  flex: 1,
+  minHeight: 260,
+  resize: "none",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 14,
+  padding: "15px 16px",
+  background: "rgba(255,255,255,0.055)",
+  color: "#f3f7fa",
+  font: "inherit",
+  fontSize: 14,
+  lineHeight: 1.5,
+  outlineColor: "#4aa3ff",
+};
+
+const startChatFooterStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 9,
+  flexWrap: "wrap",
+};
+
+const startDarkSelectStyle: React.CSSProperties = {
+  marginLeft: 6,
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 8,
+  background: "#252f3b",
+  color: "#eef3f7",
+  padding: "6px 7px",
+  font: "inherit",
+  fontSize: 11,
+};
+
+const startViewerPaneStyle: React.CSSProperties = {
+  position: "relative",
+  minHeight: 620,
+  overflow: "hidden",
+  borderRadius: 12,
+  border: "1px solid rgba(15,23,32,0.24)",
+  background: "radial-gradient(circle at 50% 42%, #283542 0%, #18232e 46%, #111820 100%)",
+  boxShadow: "0 16px 36px rgba(19,29,40,0.14)",
+};
+
+const startViewerGridStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  opacity: 0.34,
+  backgroundImage:
+    "linear-gradient(rgba(117,151,180,.28) 1px, transparent 1px), linear-gradient(90deg, rgba(117,151,180,.28) 1px, transparent 1px)",
+  backgroundSize: "58px 58px",
+  transform: "perspective(520px) rotateX(58deg) scale(1.35)",
+  transformOrigin: "center 68%",
+};
+
+const startViewerEmptyStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 10,
+  padding: 32,
+  textAlign: "center",
+  color: "#e8eef3",
+};
+
+const startViewerObjectStyle: React.CSSProperties = {
+  width: 130,
+  height: 130,
+  marginBottom: 8,
+  borderRadius: "31% 44% 35% 42%",
+  border: "1px solid rgba(174,196,216,0.28)",
+  background: "linear-gradient(145deg, rgba(191,207,220,0.34), rgba(95,116,135,0.14))",
+  boxShadow: "inset 18px 16px 28px rgba(255,255,255,0.08), 0 28px 48px rgba(0,0,0,0.22)",
+  transform: "rotate(-13deg)",
+};
+
+const startViewerAxisStyle: React.CSSProperties = {
+  position: "absolute",
+  left: 16,
+  bottom: 14,
+  display: "flex",
+  gap: 7,
+  fontSize: 10,
+  fontWeight: 900,
+};
+
+const startViewerModeStyle: React.CSSProperties = {
+  position: "absolute",
+  top: 14,
+  right: 14,
+  padding: "6px 9px",
+  borderRadius: 999,
+  background: "rgba(226,242,242,0.92)",
+  color: "#24424b",
+  fontSize: 10,
+  fontWeight: 900,
+};
+
+const startToolsPaneStyle: React.CSSProperties = {
+  minHeight: 620,
+  padding: 16,
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+  overflowY: "auto",
+  borderRadius: 12,
+  border: "1px solid rgba(0,0,0,0.08)",
+  background: "rgba(255,255,255,0.86)",
+};
+
+const startToolsListStyle: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 7 };
+
+const startToolButtonStyle: React.CSSProperties = {
+  width: "100%",
+  minHeight: 38,
+  padding: "9px 11px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  border: "1px solid rgba(0,0,0,0.09)",
+  borderRadius: 9,
+  background: "rgba(0,0,0,0.025)",
+  color: "#27313b",
+  font: "inherit",
+  fontSize: 12,
+  fontWeight: 750,
+  textAlign: "left",
+  cursor: "pointer",
+};
+
+const startToolsDetailsStyle: React.CSSProperties = {
+  padding: "10px 11px",
+  border: "1px solid rgba(0,0,0,0.08)",
+  borderRadius: 10,
+  background: "rgba(0,0,0,0.018)",
+};
+
+const startRecentButtonStyle: React.CSSProperties = {
+  marginTop: "auto",
+  padding: "11px 12px",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-start",
+  gap: 3,
+  border: "1px solid rgba(25,118,210,0.18)",
+  borderRadius: 10,
+  background: "rgba(25,118,210,0.06)",
+  color: "#214b75",
+  font: "inherit",
+  fontSize: 11,
+  cursor: "pointer",
+};
+
+const startTextareaStyle: React.CSSProperties = {
+  width: "100%",
+  minHeight: 120,
+  resize: "vertical",
+  border: "1px solid rgba(25, 31, 38, 0.16)",
+  borderRadius: 16,
+  padding: "16px 18px",
+  background: "rgba(255,255,255,0.96)",
+  color: "#17202a",
+  font: "inherit",
+  fontSize: 16,
+  lineHeight: 1.45,
+  boxShadow: "inset 0 1px 2px rgba(0,0,0,0.03)",
+};
+
+const startComposerFooterStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const advancedStartStyle: React.CSSProperties = {
+  border: "1px solid rgba(0,0,0,0.08)",
+  borderRadius: 12,
+  background: "rgba(0,0,0,0.025)",
+  padding: "10px 12px",
+};
+
+const starterLibraryStyle: React.CSSProperties = {
+  border: "1px solid rgba(0,0,0,0.07)",
+  borderRadius: 12,
+  background: "rgba(255,255,255,0.58)",
+  padding: "10px 12px",
+};
+
+const advancedSummaryStyle: React.CSSProperties = {
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 800,
+  color: "rgba(25,32,42,0.72)",
+};
+
+const advancedStartBodyStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 9,
+  paddingTop: 10,
 };
 
 const infoCardStyle: React.CSSProperties = {
@@ -1825,10 +2927,10 @@ const infoCardStyle: React.CSSProperties = {
 
 const threePaneStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "260px 1fr 360px",
-  gap: 16,
+  gridTemplateColumns: "minmax(290px, 0.82fr) minmax(440px, 1.65fr) minmax(290px, 0.9fr)",
+  gap: 12,
   flex: 1,
-  minHeight: 540,
+  minHeight: 600,
 };
 
 // CSS injected via a <style> tag — three-column on desktop, single column
@@ -1836,10 +2938,16 @@ const threePaneStyle: React.CSSProperties = {
 const responsiveCss = `
 @media (max-width: 900px) {
   main { padding: 16px !important; }
-  section[style*="grid-template-columns"] {
+  .pulsai-studio-grid {
     grid-template-columns: 1fr !important;
   }
-  /* Stack: viewer first, then chat, then parameters (collapsible later) */
+  .pulsai-chat-pane { grid-column: 1 !important; grid-row: auto !important; order: 1; }
+  .pulsai-canvas-pane { grid-column: 1 !important; grid-row: auto !important; order: 2; min-height: 480px !important; }
+  .pulsai-parameters-pane { grid-column: 1 !important; grid-row: auto !important; order: 3; }
+  .pulsai-start-studio-grid { grid-template-columns: 1fr !important; }
+  .pulsai-start-chat-pane { grid-column: 1 !important; min-height: 480px !important; }
+  .pulsai-start-viewer-pane { grid-column: 1 !important; min-height: 480px !important; }
+  .pulsai-start-tools-pane { grid-column: 1 !important; min-height: auto !important; }
   aside { max-height: none !important; }
 }
 @media (max-width: 600px) {
@@ -1849,6 +2957,8 @@ const responsiveCss = `
 `;
 
 const parametersPaneStyle: React.CSSProperties = {
+  gridColumn: "3",
+  gridRow: "1",
   background: "rgba(255,255,255,0.85)",
   border: "1px solid rgba(0,0,0,0.08)",
   borderRadius: 12,
@@ -1857,27 +2967,61 @@ const parametersPaneStyle: React.CSSProperties = {
   flexDirection: "column",
   gap: 6,
   overflowY: "auto",
-  maxHeight: "70vh",
+  maxHeight: "76vh",
 };
 
 const canvasPaneStyle: React.CSSProperties = {
+  gridColumn: "2",
+  gridRow: "1",
   position: "relative",
-  background: "rgba(0,0,0,0.04)",
-  border: "1px solid rgba(0,0,0,0.08)",
+  background: "#11171e",
+  border: "1px solid rgba(15,23,32,0.2)",
   borderRadius: 12,
   overflow: "hidden",
-  minHeight: 540,
+  minHeight: 600,
+  boxShadow: "0 16px 36px rgba(19,29,40,0.14)",
 };
 
 const chatPaneStyle: React.CSSProperties = {
-  background: "rgba(255,255,255,0.85)",
-  border: "1px solid rgba(0,0,0,0.08)",
+  gridColumn: "1",
+  gridRow: "1",
+  background: "linear-gradient(180deg, #1a222c 0%, #121820 100%)",
+  color: "#eef3f7",
+  border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 12,
-  padding: 12,
+  padding: 14,
   display: "flex",
   flexDirection: "column",
   gap: 8,
-  maxHeight: "70vh",
+  maxHeight: "76vh",
+  boxShadow: "0 16px 36px rgba(19,29,40,0.14)",
+};
+
+const chatPaneHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: 10,
+  paddingBottom: 8,
+  borderBottom: "1px solid rgba(255,255,255,0.08)",
+};
+
+const chatOnlineStyle: React.CSSProperties = {
+  padding: "3px 8px",
+  borderRadius: 999,
+  background: "rgba(63,183,155,0.14)",
+  border: "1px solid rgba(63,183,155,0.28)",
+  color: "#7dd3c7",
+  fontSize: 10,
+  fontWeight: 800,
+};
+
+const paneHintStyle: React.CSSProperties = {
+  display: "block",
+  maxWidth: 180,
+  fontSize: 10,
+  lineHeight: 1.3,
+  opacity: 0.5,
 };
 
 const paneHeaderStyle: React.CSSProperties = {
@@ -1906,6 +3050,17 @@ const paramValueStyle: React.CSSProperties = {
 const paramDocStyle: React.CSSProperties = {
   fontSize: 11,
   opacity: 0.6,
+};
+
+const showMoreParametersStyle: React.CSSProperties = {
+  border: "1px solid rgba(0,0,0,0.1)",
+  borderRadius: 8,
+  padding: "8px 10px",
+  background: "rgba(0,0,0,0.03)",
+  color: "rgba(0,0,0,0.64)",
+  fontSize: 11,
+  fontWeight: 800,
+  cursor: "pointer",
 };
 
 const lockButtonStyle = (locked: boolean): React.CSSProperties => ({
@@ -1959,15 +3114,6 @@ const historyStyle: React.CSSProperties = {
   minHeight: 200,
 };
 
-const onshapeInputStyle: React.CSSProperties = {
-  border: "1px solid rgba(0,0,0,0.12)",
-  borderRadius: 8,
-  padding: "8px 10px",
-  fontSize: 13,
-  fontFamily: "inherit",
-  background: "rgba(255,255,255,0.92)",
-};
-
 const textareaStyle: React.CSSProperties = {
   width: "100%",
   resize: "vertical",
@@ -1978,6 +3124,21 @@ const textareaStyle: React.CSSProperties = {
   font: "inherit",
   fontSize: 13,
   color: "inherit",
+};
+
+const chatTextareaStyle: React.CSSProperties = {
+  width: "100%",
+  minHeight: 76,
+  resize: "vertical",
+  background: "rgba(255,255,255,0.07)",
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 12,
+  padding: "10px 12px",
+  font: "inherit",
+  fontSize: 13,
+  lineHeight: 1.4,
+  color: "#f5f7fa",
+  outline: "none",
 };
 
 const primaryButtonStyle: React.CSSProperties = {

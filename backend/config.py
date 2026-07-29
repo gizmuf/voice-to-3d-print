@@ -68,7 +68,7 @@ def _resolve_slicer_path(value: str | None) -> str:
 class Settings:
     deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "")
     deepgram_base_url: str = os.getenv("DEEPGRAM_BASE_URL", "https://api.deepgram.com")
-    deepgram_model: str = os.getenv("DEEPGRAM_MODEL", "nova-2")
+    deepgram_model: str = os.getenv("DEEPGRAM_MODEL", "nova-3")
     gemini_proxy_url: str = os.getenv(
         "GEMINI_PROXY_URL",
         "https://gut-feeling-api-242245666842.us-central1.run.app/generate",
@@ -84,6 +84,8 @@ class Settings:
         "ANTHROPIC_CLASSIFY_MODEL", "claude-haiku-4-5-20251001"
     )
     anthropic_max_output_tokens: int = _env_int("ANTHROPIC_MAX_OUTPUT_TOKENS", 1500)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     default_printer_profile_id: str = os.getenv(
         "DEFAULT_PRINTER_PROFILE_ID", "prusa_mk4_default"
     )

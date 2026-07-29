@@ -49,10 +49,20 @@ type ModelViewerProps = {
 type LoadedModelProps = {
   src: string;
   ghost?: boolean;
+  viewerTheme?: "workbench" | "light";
   hoveredObjectId: string | null;
   selectedObjectId: string | null;
   onHover?: (objectId: string | null) => void;
   onSelect?: (payload: SelectionPayload, objectId: string) => void;
+};
+
+type ModelLoadState =
+  | { status: "idle" | "checking" | "ready"; message?: undefined }
+  | { status: "error"; message: string };
+
+type ViewerCommand = {
+  id: number;
+  type: "zoom-in" | "zoom-out";
 };
 
 const GHOST_OPACITY = 0.25;
@@ -81,6 +91,7 @@ const cloneMaterial = (material: Material) => {
 function LoadedModel({
   src,
   ghost = false,
+  viewerTheme = "workbench",
   hoveredObjectId,
   selectedObjectId,
   onHover,
@@ -129,6 +140,19 @@ function LoadedModel({
       const tint = isSelected ? SELECTED_COLOR : isHovered ? HOVER_COLOR : BASE_EMISSIVE;
 
       materials.forEach((material) => {
+        if (
+          "color" in material &&
+          material.color instanceof Color &&
+          (!material.name || material.name === "DefaultMaterial")
+        ) {
+          material.color.set(viewerTheme === "workbench" ? "#9aa6b4" : "#777777");
+        }
+        if ("roughness" in material && typeof material.roughness === "number") {
+          material.roughness = viewerTheme === "workbench" ? 0.72 : 0.82;
+        }
+        if ("metalness" in material && typeof material.metalness === "number") {
+          material.metalness = 0.04;
+        }
         if ("transparent" in material) {
           material.transparent = ghost;
         }
@@ -144,7 +168,7 @@ function LoadedModel({
         }
       });
     }
-  }, [ghost, hoveredObjectId, meshes, selectedObjectId]);
+  }, [ghost, hoveredObjectId, meshes, selectedObjectId, viewerTheme]);
 
   const handlePointerMove = (event: ThreeEvent<PointerEvent>) => {
     if (ghost) return;
@@ -272,6 +296,31 @@ function CameraTargetController({
   return null;
 }
 
+function CameraCommandController({
+  command,
+  controlsRef,
+}: {
+  command: ViewerCommand | null;
+  controlsRef: MutableRefObject<{ target: Vector3; update: () => void } | null>;
+}) {
+  const { camera, invalidate } = useThree();
+
+  useEffect(() => {
+    if (!command) return;
+    const target = controlsRef.current?.target?.clone() ?? new Vector3(0, 0, 0);
+    const offset = camera.position.clone().sub(target);
+    const currentDistance = Math.max(offset.length(), 0.001);
+    const factor = command.type === "zoom-in" ? 0.72 : 1.4;
+    const nextDistance = Math.min(Math.max(currentDistance * factor, 6), 2400);
+    camera.position.copy(target.clone().add(offset.normalize().multiplyScalar(nextDistance)));
+    camera.updateProjectionMatrix();
+    controlsRef.current?.update();
+    invalidate();
+  }, [camera, command, controlsRef, invalidate]);
+
+  return null;
+}
+
 export default function ModelViewer({
   src,
   ghostModelUrl,
@@ -292,7 +341,13 @@ export default function ModelViewer({
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [interactionMode, setInteractionMode] = useState<"orbit" | "pan">(defaultInteractionMode);
+  const [viewerTheme, setViewerTheme] = useState<"workbench" | "light">("workbench");
+  const [showGrid, setShowGrid] = useState(true);
+  const [loadState, setLoadState] = useState<ModelLoadState>({ status: "idle" });
+  const [internalResetSignal, setInternalResetSignal] = useState(0);
+  const [viewerCommand, setViewerCommand] = useState<ViewerCommand | null>(null);
   const controlsRef = useRef<{ target: Vector3; update: () => void } | null>(null);
+  const commandIdRef = useRef(0);
 
   useEffect(() => {
     setHoveredObjectId(null);
@@ -316,10 +371,58 @@ export default function ModelViewer({
   const cameraPosition =
     defaultCameraPreset === "front"
       ? (normalizedCamera
-          ? ([normalizedCamera.x * 3.6, normalizedCamera.y * 3.6, normalizedCamera.z * 3.6] as const)
-          : ([0, 0, 3.6] as const))
-      : ([2.8, 2.2, 2.8] as const);
-  const viewerKey = `${src || "empty"}:${ghostModelUrl || "noghost"}:${defaultCameraPreset}:${normalizedCamera?.x || 0}:${normalizedCamera?.y || 0}:${normalizedCamera?.z || 0}:${resetViewSignal}`;
+          ? ([normalizedCamera.x * 360, normalizedCamera.y * 360, normalizedCamera.z * 360] as const)
+          : ([0, 0, 360] as const))
+      : ([240, 180, 240] as const);
+  const viewerKey = `${src || "empty"}:${ghostModelUrl || "noghost"}:${defaultCameraPreset}:${normalizedCamera?.x || 0}:${normalizedCamera?.y || 0}:${normalizedCamera?.z || 0}:${resetViewSignal}:${internalResetSignal}`;
+
+  const issueViewerCommand = (type: ViewerCommand["type"]) => {
+    commandIdRef.current += 1;
+    setViewerCommand({ id: commandIdRef.current, type });
+  };
+
+  const resetView = () => {
+    setHoveredObjectId(null);
+    setSelectedObjectId(null);
+    setViewerCommand(null);
+    setInteractionMode(defaultInteractionMode);
+    setInternalResetSignal((value) => value + 1);
+    onClearSelection?.();
+  };
+
+  useEffect(() => {
+    if (!src) {
+      setLoadState({ status: "idle" });
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoadState({ status: "checking" });
+    fetch(src, {
+      method: "HEAD",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Model artifact returned ${response.status}.`);
+        }
+        setLoadState({ status: "ready" });
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : "Could not reach the generated model artifact.";
+        setLoadState({
+          status: "error",
+          message: `${message} Make sure the backend is running and try rebuilding or refreshing.`,
+        });
+      });
+
+    return () => controller.abort();
+  }, [src]);
 
   if (!src) {
     return (
@@ -328,6 +431,24 @@ export default function ModelViewer({
         <div className="placeholder-body">
           Describe a design or import STEP/STP to start an editable workspace.
         </div>
+      </div>
+    );
+  }
+
+  if (loadState.status === "checking") {
+    return (
+      <div className="model-placeholder">
+        <div className="placeholder-title">Loading model</div>
+        <div className="placeholder-body">Checking the generated GLB artifact.</div>
+      </div>
+    );
+  }
+
+  if (loadState.status === "error") {
+    return (
+      <div className="model-placeholder">
+        <div className="placeholder-title">Model unavailable</div>
+        <div className="placeholder-body">{loadState.message}</div>
       </div>
     );
   }
@@ -345,10 +466,16 @@ export default function ModelViewer({
           onClearSelection?.();
         }}
       >
-        {createElement("color", { attach: "background", args: ["#fff8ef"] })}
-        {createElement("ambientLight", { intensity: 0.9 })}
-        {createElement("directionalLight", { position: [5, 8, 4], intensity: 1.25 })}
-        {createElement("directionalLight", { position: [-4, 3, -5], intensity: 0.4 })}
+        {createElement("color", { attach: "background", args: [viewerTheme === "workbench" ? "#18212b" : "#fff8ef"] })}
+        {createElement("ambientLight", { intensity: viewerTheme === "workbench" ? 1.15 : 0.9 })}
+        {createElement("directionalLight", { position: [5, 8, 4], intensity: viewerTheme === "workbench" ? 1.6 : 1.25 })}
+        {createElement("directionalLight", { position: [-4, 3, -5], intensity: viewerTheme === "workbench" ? 0.75 : 0.4 })}
+        {showGrid
+          ? createElement("gridHelper", {
+              args: [180, 36, viewerTheme === "workbench" ? "#536274" : "#ccbfae", viewerTheme === "workbench" ? "#293746" : "#eadfce"],
+              position: [0, -0.04, 0],
+            })
+          : null}
         <Suspense fallback={null}>
           <Bounds fit clip margin={1.2}>
             <>
@@ -356,12 +483,14 @@ export default function ModelViewer({
                 <LoadedModel
                   src={ghostModelUrl}
                   ghost
+                  viewerTheme={viewerTheme}
                   hoveredObjectId={hoveredObjectId}
                   selectedObjectId={selectedObjectId}
                 />
               ) : null}
               <LoadedModel
                 src={src}
+                viewerTheme={viewerTheme}
                 hoveredObjectId={hoveredObjectId}
                 selectedObjectId={selectedObjectId}
                 onHover={setHoveredObjectId}
@@ -376,6 +505,7 @@ export default function ModelViewer({
           </Bounds>
         </Suspense>
         <CameraTargetController focusTarget={focusTarget} controlsRef={controlsRef} />
+        <CameraCommandController command={viewerCommand} controlsRef={controlsRef} />
         <OrbitControls
           ref={controlsRef as never}
           enableDamping
@@ -394,6 +524,33 @@ export default function ModelViewer({
 
       <div className="model-overlay">
         {hasGhost ? <div className="model-overlay-chip subtle">Showing changes</div> : null}
+        <div className="model-overlay-chip subtle">Drag to orbit · wheel to zoom</div>
+        <button
+          type="button"
+          aria-label="Zoom in"
+          title="Zoom in"
+          className="model-overlay-chip model-overlay-button"
+          onClick={() => issueViewerCommand("zoom-in")}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          aria-label="Zoom out"
+          title="Zoom out"
+          className="model-overlay-chip model-overlay-button"
+          onClick={() => issueViewerCommand("zoom-out")}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          aria-label="Reset view"
+          className="model-overlay-chip model-overlay-button"
+          onClick={resetView}
+        >
+          Reset view
+        </button>
         <button
           type="button"
           className="model-overlay-chip model-overlay-button subtle"
@@ -401,6 +558,19 @@ export default function ModelViewer({
         >
           {interactionMode === "orbit" ? "Mode: orbit" : "Mode: pan"}
         </button>
+        <details className="model-appearance-panel">
+          <summary>Appearance</summary>
+          <div className="model-appearance-controls">
+            <div className="model-appearance-segmented" aria-label="Viewer theme">
+              <button type="button" data-active={viewerTheme === "workbench"} onClick={() => setViewerTheme("workbench")}>Workbench</button>
+              <button type="button" data-active={viewerTheme === "light"} onClick={() => setViewerTheme("light")}>Light</button>
+            </div>
+            <label>
+              <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
+              Grid
+            </label>
+          </div>
+        </details>
       </div>
 
       {selectionChip ? <div className="model-selection-chip-slot">{selectionChip}</div> : null}
