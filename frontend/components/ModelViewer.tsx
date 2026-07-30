@@ -428,7 +428,6 @@ export default function ModelViewer({
   useEffect(() => {
     setHoveredObjectId(null);
     setSelectedObjectId(null);
-    setMotionAvailable(false);
     setMotionRunning(false);
   }, [src, ghostModelUrl]);
 
