@@ -23,6 +23,7 @@ export default function SpeechToTextButton({
   language = "pl",
   onStateChange,
 }: SpeechToTextButtonProps) {
+  const t = (polish: string, english: string) => language === "en" ? english : polish;
   const sttUrl = resolveSttUrl();
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -69,12 +70,12 @@ export default function SpeechToTextButton({
       const payload = (await response.json().catch(() => null)) as
         | { transcript?: string; detail?: string }
         | null;
-      if (!response.ok) throw new Error(payload?.detail || "Nie udało się rozpoznać nagrania.");
+      if (!response.ok) throw new Error(payload?.detail || t("Nie udało się rozpoznać nagrania.", "Could not transcribe the recording."));
       const transcript = payload?.transcript?.trim();
-      if (!transcript) throw new Error("Nie usłyszałem wyraźnej komendy. Spróbuj ponownie.");
+      if (!transcript) throw new Error(t("Nie usłyszałem wyraźnej komendy. Spróbuj ponownie.", "I could not hear a clear command. Try again."));
       onTranscript(transcript);
     } catch (uploadError) {
-      const message = uploadError instanceof Error ? uploadError.message : "Nie udało się rozpoznać nagrania.";
+      const message = uploadError instanceof Error ? uploadError.message : t("Nie udało się rozpoznać nagrania.", "Could not transcribe the recording.");
       setError(message);
       finalMessage = message;
     } finally {
@@ -113,17 +114,17 @@ export default function SpeechToTextButton({
         if (event.data.size > 0) chunksRef.current.push(event.data);
       };
       recorder.onerror = () => {
-        setError("Nagrywanie zostało przerwane. Spróbuj ponownie.");
+        setError(t("Nagrywanie zostało przerwane. Spróbuj ponownie.", "Recording was interrupted. Try again."));
         releaseMicrophone();
-        updateVoiceState("idle", "Nagrywanie zostało przerwane. Spróbuj ponownie.");
+        updateVoiceState("idle", t("Nagrywanie zostało przerwane. Spróbuj ponownie.", "Recording was interrupted. Try again."));
       };
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
         chunksRef.current = [];
         if (blob.size === 0) {
-          setError("Nagranie jest puste. Spróbuj ponownie.");
+          setError(t("Nagranie jest puste. Spróbuj ponownie.", "The recording is empty. Try again."));
           releaseMicrophone();
-          updateVoiceState("idle", "Nagranie jest puste. Spróbuj ponownie.");
+          updateVoiceState("idle", t("Nagranie jest puste. Spróbuj ponownie.", "The recording is empty. Try again."));
           return;
         }
         void uploadRecording(blob);
@@ -135,8 +136,8 @@ export default function SpeechToTextButton({
       releaseMicrophone();
       const message =
         microphoneError instanceof DOMException && microphoneError.name === "NotAllowedError"
-          ? "Zezwól Pulsai na dostęp do mikrofonu."
-          : "Nie udało się uruchomić mikrofonu.";
+          ? t("Zezwól Pulsai na dostęp do mikrofonu.", "Allow Pulsai to access the microphone.")
+          : t("Nie udało się uruchomić mikrofonu.", "Could not start the microphone.");
       setError(message);
       updateVoiceState("idle", message);
     }
@@ -144,12 +145,12 @@ export default function SpeechToTextButton({
 
   const label =
     voiceState === "recording"
-      ? "Zatrzymaj i przepisz"
+      ? t("Zatrzymaj i przepisz", "Stop and transcribe")
       : voiceState === "requesting"
-        ? "Uruchamiam mikrofon"
+        ? t("Uruchamiam mikrofon", "Starting microphone")
         : voiceState === "transcribing"
-        ? "Przepisuję nagranie"
-        : "Powiedz po polsku";
+        ? t("Przepisuję nagranie", "Transcribing recording")
+        : t("Powiedz po polsku", "Speak in English");
 
   return (
     <div style={wrapperStyle}>
@@ -158,23 +159,23 @@ export default function SpeechToTextButton({
         onClick={voiceState === "recording" ? stop : start}
         disabled={disabled || !supported || voiceState === "transcribing" || voiceState === "requesting"}
         aria-label={label}
-        title={supported ? `${label} — model Nova-3, język polski` : "Nagrywanie audio jest niedostępne w tej przeglądarce"}
+        title={supported ? `${label} — Nova-3` : t("Nagrywanie audio jest niedostępne w tej przeglądarce", "Audio recording is unavailable in this browser")}
         style={buttonStyle(voiceState, compact)}
       >
         <MicrophoneIcon />
         {compact ? null : (
           <span>
             {voiceState === "recording"
-              ? "Zakończ"
+              ? t("Zakończ", "Stop")
               : voiceState === "requesting"
                 ? "Uruchamiam…"
                 : voiceState === "transcribing"
                   ? "Przepisuję…"
-                  : "Mów"}
+                : t("Mów", "Speak")}
           </span>
         )}
       </button>
-      {!compact && voiceState === "recording" ? <span style={statusStyle}>Słucham po polsku…</span> : null}
+      {!compact && voiceState === "recording" ? <span style={statusStyle}>{t("Słucham po polsku…", "Listening in English…")}</span> : null}
       {!compact && voiceState === "requesting" ? <span style={statusStyle}>Uruchamiam…</span> : null}
       {!compact && voiceState === "transcribing" ? <span style={statusStyle}>Przepisuję…</span> : null}
       {error && !compact ? <span style={errorStyle}>{error}</span> : null}

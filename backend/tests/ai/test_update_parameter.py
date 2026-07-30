@@ -49,6 +49,11 @@ def test_wheel_prompt_distinguishes_rungs_from_spokes() -> None:
     assert "Never map a requested rung count" in SYSTEM_PROMPT
 
 
+def test_chat_follows_language_of_latest_user_message() -> None:
+    assert "language of the user's most recent message" in SYSTEM_PROMPT
+    assert "independently of the interface language" in SYSTEM_PROMPT
+
+
 def test_turn_context_exposes_parameter_range() -> None:
     design = Design(
         id="wheel",

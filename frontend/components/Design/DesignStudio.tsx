@@ -9,17 +9,18 @@ import SpeechToTextButton, { type VoiceState } from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { displayModelName, formatUsd } from "../../lib/ai-cost";
+import { uiText, useUiLanguage, type UiLanguage } from "../../lib/ui-language";
 import { useDesignStream } from "../../lib/useDesignStream";
 import { useHealth } from "../../lib/useHealth";
 import { usePrinterProfiles } from "../../lib/usePrinterProfiles";
 import type { Design, DesignTemplate, ManufacturabilityIssue } from "../../types/design";
 import type { SelectionPayload } from "../ModelViewer";
 
-const TEMPLATE_PROMPTS: { label: string; prompt: string }[] = [
-  { label: "Maskownica głośnika 200 mm", prompt: "speaker grill 200mm with 8 rings" },
-  { label: "Stojak na telefon", prompt: "phone stand 65 degrees, cable hole" },
-  { label: "Pojemnik na długopisy", prompt: "cylindrical pen holder 60mm wide" },
-  { label: "Pudełko 80×60×30", prompt: "simple box 80x60x30, wall 3mm" },
+const TEMPLATE_PROMPTS: { labelPl: string; labelEn: string; prompt: string }[] = [
+  { labelPl: "Maskownica głośnika 200 mm", labelEn: "Speaker grille 200 mm", prompt: "speaker grill 200mm with 8 rings" },
+  { labelPl: "Stojak na telefon", labelEn: "Phone stand", prompt: "phone stand 65 degrees, cable hole" },
+  { labelPl: "Pojemnik na długopisy", labelEn: "Pen holder", prompt: "cylindrical pen holder 60mm wide" },
+  { labelPl: "Pudełko 80×60×30", labelEn: "Box 80×60×30", prompt: "simple box 80x60x30, wall 3mm" },
 ];
 
 const JEWELRY_CONTEXTS = [
@@ -109,8 +110,21 @@ const fetchWithTimeout = async (
   }
 };
 
+const resolveArtifactUrl = (
+  backendUrl: string,
+  artifact: { url?: string } | string | undefined,
+) => {
+  const raw = typeof artifact === "string" ? artifact : artifact?.url;
+  return raw ? resolveUrl(backendUrl, raw) : null;
+};
+
 export default function DesignStudio() {
   const backendUrl = resolveBackendUrl();
+  const { language: uiLanguage, setLanguage: setUiLanguage } = useUiLanguage();
+  const tx = useCallback(
+    (polish: string, english: string) => uiText(uiLanguage, polish, english),
+    [uiLanguage],
+  );
   const health = useHealth();
   const printerCatalog = usePrinterProfiles();
   const [templates, setTemplates] = useState<DesignTemplate[]>([]);
@@ -933,10 +947,16 @@ export default function DesignStudio() {
         <header style={headerStyle}>
           <div>
             <p style={eyebrowStyle}>PULSAI · DESIGN STUDIO (BETA)</p>
-            <h1 style={titleStyle}>Zaprojektuj. Zobacz. Wydrukuj.</h1>
+            <h1 style={titleStyle}>{tx("Zaprojektuj. Zobacz. Wydrukuj.", "Design. Preview. Print.")}</h1>
             <p style={subtitleStyle}>
-              Rozmawiaj z Pulsai jak z projektantem. Model, rozmowa i parametry pozostają razem od pierwszego pomysłu do wydruku.
+              {tx(
+                "Rozmawiaj z Pulsai jak z projektantem. Model, rozmowa i parametry pozostają razem od pierwszego pomysłu do wydruku.",
+                "Talk to Pulsai like a designer. Your model, conversation and parameters stay together from the first idea to the final print.",
+              )}
             </p>
+          </div>
+          <div style={headerActionsStyle}>
+            <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
           </div>
         </header>
 
@@ -1121,34 +1141,35 @@ export default function DesignStudio() {
         <section className="pulsai-start-chat-pane" style={startChatPaneStyle}>
           <div>
             <p style={{ ...eyebrowStyle, color: "#70c6ff", opacity: 1 }}>PULSAI COPILOT</p>
-            <h2 style={{ margin: "5px 0 5px", fontSize: 22 }}>Co chcesz zaprojektować?</h2>
+            <h2 style={{ margin: "5px 0 5px", fontSize: 22 }}>{tx("Co chcesz zaprojektować?", "What do you want to design?")}</h2>
             <p style={{ margin: 0, fontSize: 12, color: "rgba(238,243,247,0.66)", lineHeight: 1.45 }}>
-              Napisz albo powiedz po polsku. Model pojawi się obok, a rozmowa zostanie w tym samym miejscu.
+              {tx("Napisz lub powiedz, czego potrzebujesz. Możesz użyć dowolnego języka.", "Type or say what you need. You can use any language.")}
             </p>
           </div>
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={4}
-            placeholder="Np. uchwyt na telefon szeroki na 80 mm, z otworem na kabel…"
+            placeholder={tx("Np. uchwyt na telefon szeroki na 80 mm, z otworem na kabel…", "E.g. an 80 mm phone holder with a cable opening…")}
             style={startChatTextareaStyle}
             disabled={creating}
           />
           <div style={startChatFooterStyle}>
             <SpeechToTextButton
               disabled={creating}
+              language={uiLanguage}
               onTranscript={(text) => setPrompt((current) => [current.trim(), text].filter(Boolean).join(" "))}
             />
             <label style={{ fontSize: 11, color: "rgba(238,243,247,0.62)" }}>
-              Wykonanie
+              {tx("Wykonanie", "Process")}
               <select
                 value={process}
                 onChange={(e) => setProcess(e.target.value as typeof process)}
                 style={startDarkSelectStyle}
               >
-                <option value="fdm">Druk 3D</option>
+                <option value="fdm">{tx("Druk 3D", "3D printing")}</option>
                 <option value="cnc">CNC</option>
-                <option value="either">Jeszcze nie wiem</option>
+                <option value="either">{tx("Jeszcze nie wiem", "Not sure yet")}</option>
               </select>
             </label>
             <button
@@ -1157,13 +1178,13 @@ export default function DesignStudio() {
               disabled={creating || !prompt.trim()}
               style={primaryButtonStyle}
             >
-              {creating ? "Projektuję…" : "Utwórz model"}
+              {creating ? tx("Projektuję…", "Designing…") : tx("Utwórz model", "Create model")}
             </button>
           </div>
           <div style={{ display: "none" }}>
             {TEMPLATE_PROMPTS.map((p) => (
               <button
-                key={p.label}
+                key={p.labelEn}
                 type="button"
                 onClick={() => {
                   setPrompt(p.prompt);
@@ -1172,7 +1193,7 @@ export default function DesignStudio() {
                 disabled={creating}
                 style={chipButtonStyle}
               >
-                {p.label}
+                {uiLanguage === "pl" ? p.labelPl : p.labelEn}
               </button>
             ))}
           </div>
@@ -1325,7 +1346,7 @@ export default function DesignStudio() {
           ) : null}
         </section>
 
-        <section className="pulsai-start-viewer-pane" style={startViewerPaneStyle} aria-label="Podgląd modelu 3D">
+        <section className="pulsai-start-viewer-pane" style={startViewerPaneStyle} aria-label={tx("Podgląd modelu 3D", "3D model preview")}>
           <div style={startViewerGridStyle} aria-hidden="true" />
           <div style={startViewerAxisStyle} aria-hidden="true">
             <span style={{ color: "#ff7676" }}>X</span>
@@ -1335,49 +1356,49 @@ export default function DesignStudio() {
           {creating ? (
             <div style={startCreatingStyle} role="status" aria-live="polite">
               <span style={startCreatingSpinnerStyle} aria-hidden />
-              <strong>Buduję parametryczny model…</strong>
-              <span>Interpretuję wymiary, tworzę geometrię i przygotowuję podgląd GLB.</span>
-              <small>Przy złożonych częściach może to potrwać kilkadziesiąt sekund.</small>
+              <strong>{tx("Buduję parametryczny model…", "Building a parametric model…")}</strong>
+              <span>{tx("Interpretuję wymiary, tworzę geometrię i przygotowuję podgląd GLB.", "Interpreting dimensions, creating geometry and preparing the 3D preview.")}</span>
+              <small>{tx("Przy złożonych częściach może to potrwać kilkadziesiąt sekund.", "Complex parts may take several dozen seconds.")}</small>
             </div>
           ) : openingDeepLink ? (
             <div style={startCreatingStyle} role="status" aria-live="polite">
               <span style={startCreatingSpinnerStyle} aria-hidden />
-              <strong>Otwieram zapisany projekt…</strong>
+              <strong>{tx("Otwieram zapisany projekt…", "Opening saved design…")}</strong>
             </div>
           ) : (
             <div style={startViewerEmptyStyle}>
               <div style={startViewerObjectStyle} aria-hidden="true" />
-              <strong>Tu pojawi się Twój model</strong>
-              <span>Podgląd pozostaje widoczny podczas całej rozmowy i każdej poprawki.</span>
+              <strong>{tx("Tu pojawi się Twój model", "Your model will appear here")}</strong>
+              <span>{tx("Podgląd pozostaje widoczny podczas całej rozmowy i każdej poprawki.", "The preview stays visible throughout the conversation and every edit.")}</span>
             </div>
           )}
-          <span style={startViewerModeStyle}>TRYB: ORBITA</span>
+          <span style={startViewerModeStyle}>{tx("TRYB: ORBITA", "MODE: ORBIT")}</span>
         </section>
 
         <aside className="pulsai-start-tools-pane" style={startToolsPaneStyle}>
           <div>
-            <p style={eyebrowStyle}>SZYBKI START</p>
-            <h3 style={{ margin: "4px 0 3px", fontSize: 17 }}>Przykładowe projekty</h3>
-            <p style={{ margin: 0, fontSize: 11, opacity: 0.58 }}>Kliknij przykład albo opisz własny pomysł w czacie.</p>
+            <p style={eyebrowStyle}>{tx("SZYBKI START", "QUICK START")}</p>
+            <h3 style={{ margin: "4px 0 3px", fontSize: 17 }}>{tx("Przykładowe projekty", "Example designs")}</h3>
+            <p style={{ margin: 0, fontSize: 11, opacity: 0.58 }}>{tx("Kliknij przykład albo opisz własny pomysł w czacie.", "Choose an example or describe your own idea in chat.")}</p>
           </div>
           <div style={startToolsListStyle}>
             {TEMPLATE_PROMPTS.map((item) => (
               <button
-                key={item.label}
+                key={item.labelEn}
                 type="button"
                 onClick={() => setPrompt(item.prompt)}
                 disabled={creating}
                 style={startToolButtonStyle}
               >
-                <span>{item.label}</span><span aria-hidden="true">→</span>
+                <span>{uiLanguage === "pl" ? item.labelPl : item.labelEn}</span><span aria-hidden="true">→</span>
               </button>
             ))}
           </div>
           <details style={startToolsDetailsStyle}>
-            <summary style={advancedSummaryStyle}>Importuj STEP lub STL</summary>
+            <summary style={advancedSummaryStyle}>{tx("Importuj STEP lub STL", "Import STEP or STL")}</summary>
             <div style={advancedStartBodyStyle}>
               <label style={{ ...startToolButtonStyle, cursor: creating ? "wait" : "pointer" }}>
-                {creating ? "Importuję…" : "Wybierz plik CAD"}
+                {creating ? tx("Importuję…", "Importing…") : tx("Wybierz plik CAD", "Choose CAD file")}
                 <input
                   type="file"
                   accept=".step,.stp,.stl,application/STEP,application/x-step,application/sla,model/stl"
@@ -1393,7 +1414,7 @@ export default function DesignStudio() {
             </div>
           </details>
           <details style={startToolsDetailsStyle}>
-            <summary style={advancedSummaryStyle}>Szablony parametryczne</summary>
+            <summary style={advancedSummaryStyle}>{tx("Szablony parametryczne", "Parametric templates")}</summary>
             <div style={advancedStartBodyStyle}>
               {templates.map((template) => (
                 <button key={template.template_id} type="button" onClick={() => onCreate("", template.template_id)} disabled={creating} style={startToolButtonStyle}>
@@ -1404,8 +1425,8 @@ export default function DesignStudio() {
           </details>
           {recentDesigns.length > 0 ? (
             <button type="button" onClick={() => openDesign(recentDesigns[0].design_id)} style={startRecentButtonStyle}>
-              <span>Ostatni projekt</span>
-              <strong>{recentDesigns[0].name || "Bez nazwy"}</strong>
+              <span>{tx("Ostatni projekt", "Latest design")}</span>
+              <strong>{recentDesigns[0].name || tx("Bez nazwy", "Untitled")}</strong>
             </button>
           ) : null}
         </aside>
@@ -1413,9 +1434,12 @@ export default function DesignStudio() {
 
         {recentDesigns.length > 0 ? (
           <section style={{ ...createCardStyle, order: 3 }}>
-            <h2 style={{ margin: 0, fontSize: 16 }}>Your designs</h2>
+            <h2 style={{ margin: 0, fontSize: 16 }}>{tx("Twoje projekty", "Your designs")}</h2>
             <p style={{ margin: 0, fontSize: 12, opacity: 0.65 }}>
-              {recentDesigns.length} saved on this device. Click to reopen — your edit history travels with each one.
+              {tx(
+                `${recentDesigns.length} zapisanych na tym urządzeniu. Kliknij, aby otworzyć wraz z historią zmian.`,
+                `${recentDesigns.length} saved on this device. Click to reopen with its edit history.`,
+              )}
             </p>
             <div style={recentGridStyle}>
               {recentDesigns.slice(0, 12).map((d) => (
@@ -1458,7 +1482,7 @@ export default function DesignStudio() {
         ) : null}
 
         <section style={{ ...infoCardStyle, order: 4 }}>
-          <strong>Why this is different</strong>
+          <strong>{tx("Co wyróżnia Pulsai", "Why this is different")}</strong>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18, lineHeight: 1.55 }}>
             <li>The design is a build123d Python script Claude can read and rewrite — no fixed templates.</li>
             <li>Triangular holes, hex grids, fillets, shells, threads — anything build123d expresses, the AI can build.</li>
@@ -1479,16 +1503,16 @@ export default function DesignStudio() {
           <p style={eyebrowStyle}>PULSAI · DESIGN STUDIO</p>
           <h1 style={titleStyle}>{design.name}</h1>
           <p style={subtitleStyle}>
-            revision <code>{design.revision_id.slice(0, 8)}</code> ·
+            {tx("wersja", "revision")} <code>{design.revision_id.slice(0, 8)}</code> ·
             {" "}
-            {design.parameters.length} parameters · {design.features.length} feature
-            blocks · target: <strong>{design.process}</strong>
+            {design.parameters.length} {tx("parametrów", "parameters")} · {design.features.length} {tx("cech", "features")} · {tx("proces", "target")}: <strong>{design.process}</strong>
           </p>
         </div>
         <div style={headerActionsStyle}>
+          <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
           {printerCatalog && printerCatalog.profiles.length > 0 ? (
             <label style={printerPickerStyle} title="Manufacturability checks and slicer profile use this printer.">
-              <span style={printerPickerLabelStyle}>Printer</span>
+              <span style={printerPickerLabelStyle}>{tx("Drukarka", "Printer")}</span>
               <select
                 value={
                   design.printer_profile_id || printerCatalog.defaultId || ""
@@ -1531,15 +1555,15 @@ export default function DesignStudio() {
                 ))}
               </select>
               <span style={printerPickerHintStyle}>
-                Missing yours? Use the closest bed/nozzle match or Generic 0.4mm.
+                {tx("Nie ma Twojej? Wybierz najbliższy rozmiar stołu i dyszy.", "Missing yours? Pick the closest bed and nozzle size.")}
               </span>
             </label>
           ) : null}
           <button type="button" style={backButtonStyle} onClick={returnToStart}>
-            New jewelry sketch
+            {tx("Nowy szkic biżuterii", "New jewelry sketch")}
           </button>
           <button type="button" style={backButtonStyle} onClick={returnToStart}>
-            ← Back to designs
+            {tx("← Wróć do projektów", "← Back to designs")}
           </button>
         </div>
       </header>
@@ -1548,8 +1572,8 @@ export default function DesignStudio() {
         <aside style={parametersPaneStyle} className="pulsai-parameters-pane">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
-              <h3 style={{ ...paneHeaderStyle, margin: "0 0 2px" }}>Controls</h3>
-              <span style={paneHintStyle}>Change the model without writing a prompt.</span>
+              <h3 style={{ ...paneHeaderStyle, margin: "0 0 2px" }}>{tx("Parametry", "Controls")}</h3>
+              <span style={paneHintStyle}>{tx("Zmień model bez pisania promptu.", "Change the model without writing a prompt.")}</span>
             </div>
             <label style={liveToggleStyle} title="Live preview re-renders the model on slider drag (uses more compute)">
               <input
@@ -1557,7 +1581,7 @@ export default function DesignStudio() {
                 checked={livePreview}
                 onChange={(e) => setLivePreview(e.target.checked)}
               />
-              live
+              {tx("na żywo", "live")}
             </label>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1620,13 +1644,13 @@ export default function DesignStudio() {
                 style={showMoreParametersStyle}
               >
                 {showAllParameters
-                  ? "Show fewer controls"
-                  : `Show ${design.parameters.length - 4} more controls`}
+                  ? tx("Pokaż mniej", "Show fewer controls")
+                  : tx(`Pokaż jeszcze ${design.parameters.length - 4}`, `Show ${design.parameters.length - 4} more controls`)}
               </button>
             ) : null}
           </div>
 
-          <h3 style={paneHeaderStyle}>Features</h3>
+          <h3 style={paneHeaderStyle}>{tx("Cechy modelu", "Features")}</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {design.features.map((f) => {
               const isSelected = selectedFeatureId === f.id;
@@ -1656,7 +1680,7 @@ export default function DesignStudio() {
             ) : null}
           </div>
 
-          <h3 style={paneHeaderStyle}>Manufacturability</h3>
+          <h3 style={paneHeaderStyle}>{tx("Przygotowanie do druku", "Print readiness")}</h3>
           {health && !health.slicer_ready ? (
             <div style={slicerHintStyle} role="note">
               Przygotowanie G-code jest chwilowo niedostępne. Nadal możesz pobrać STL.
@@ -1863,8 +1887,8 @@ export default function DesignStudio() {
 
           {design.latest_build?.print_estimate ? (
             <>
-              <h3 style={paneHeaderStyle}>Print estimate</h3>
-              <PrintEstimatePanel estimate={design.latest_build.print_estimate} />
+              <h3 style={paneHeaderStyle}>{tx("Szacowany wydruk", "Print estimate")}</h3>
+              <PrintEstimatePanel estimate={design.latest_build.print_estimate} language={uiLanguage} />
             </>
           ) : null}
         </aside>
@@ -1875,6 +1899,7 @@ export default function DesignStudio() {
               src={buildArtifactUrl}
               label={design.name}
               isUpdating={Boolean(stream.state.previewUpdating)}
+              language={uiLanguage}
               defaultCameraPreset="iso"
               onSelect={handleViewerSelect}
               onClearSelection={() => {
@@ -1914,6 +1939,14 @@ export default function DesignStudio() {
           ) : (
             <div style={emptyCanvasStyle}>Build artifact missing.</div>
           )}
+          {design.latest_build?.print_estimate ? (
+            <PrintResultCard
+              estimate={design.latest_build.print_estimate}
+              language={uiLanguage}
+              gcodeUrl={resolveArtifactUrl(backendUrl, design.latest_build.artifacts?.gcode)}
+              bundleUrl={makePrintable.bundleUrl}
+            />
+          ) : null}
           <div style={artifactBarStyle}>
             <ExportMenu
               designId={design.design_id}
@@ -1950,15 +1983,15 @@ export default function DesignStudio() {
               <span style={chatBrandMarkStyle} aria-hidden>P</span>
               <div>
                 <strong style={chatTitleStyle}>Pulsai</strong>
-                <span style={chatSubtitleStyle}>Projektant CAD</span>
+                <span style={chatSubtitleStyle}>{tx("Projektant CAD", "CAD designer")}</span>
               </div>
             </div>
             <div style={chatHeaderMetaStyle}>
               <span style={sessionCostStyle} title="Dokładny koszt tokenów Claude w tej sesji">
-                Sesja {formatUsd(sessionCost)}
+                {tx("Sesja", "Session")} {formatUsd(sessionCost)}
               </span>
               <span style={chatOnlineStyle} role="status" aria-live="polite">
-                {stream.state.status === "streaming" ? "pracuje" : stream.state.status === "error" ? "błąd" : "gotowy"}
+                {stream.state.status === "streaming" ? tx("pracuje", "working") : stream.state.status === "error" ? tx("błąd", "error") : tx("gotowy", "ready")}
               </span>
             </div>
           </div>
@@ -1967,20 +2000,20 @@ export default function DesignStudio() {
               <span style={agentProgressDotStyle} aria-hidden />
               <strong>{displayModelName(stream.state.model)}</strong>
               <span style={{ opacity: 0.62 }}>·</span>
-              <span>{stream.state.activity ?? "Pracuje nad projektem…"}</span>
+              <span>{stream.state.activity ?? tx("Pracuję nad projektem…", "Working on the design…")}</span>
             </div>
           ) : null}
           <div style={historyStyle}>
             {!stream.hydrated ? (
               <div style={emptyChatStyle} role="status">
                 <span style={agentProgressDotStyle} aria-hidden />
-                <p>Wczytuję rozmowę…</p>
+                <p>{tx("Wczytuję rozmowę…", "Loading conversation…")}</p>
               </div>
             ) : stream.history.length === 0 ? (
               <div style={emptyChatStyle}>
                 <span style={emptyChatMarkStyle} aria-hidden>P</span>
-                <strong>Co zmieniamy?</strong>
-                <p>Opisz zmianę, wskaż element w modelu albo dodaj zdjęcie referencyjne.</p>
+                <strong>{tx("Co zmieniamy?", "What should we change?")}</strong>
+                <p>{tx("Opisz zmianę, wskaż element w modelu albo dodaj zdjęcie referencyjne.", "Describe a change, select a model feature, or add a reference image.")}</p>
               </div>
             ) : (
               stream.history.map((entry, idx) => (
@@ -1996,6 +2029,7 @@ export default function DesignStudio() {
             disabled={stream.state.status === "streaming"}
             selectedFeature={selectedFeature}
             parameters={design.parameters}
+            language={uiLanguage}
             onCancel={stream.cancel}
             onSend={(text) =>
               stream.send(text, {
@@ -2215,6 +2249,7 @@ function DesignChatInput({
   isStreaming,
   selectedFeature,
   parameters,
+  language,
 }: {
   backendUrl: string;
   designId: string;
@@ -2226,6 +2261,7 @@ function DesignChatInput({
   isStreaming: boolean;
   selectedFeature: Design["features"][number] | null;
   parameters: Design["parameters"];
+  language: UiLanguage;
 }) {
   const [draft, setDraft] = useState("");
   const [applying, setApplying] = useState(false);
@@ -2356,7 +2392,7 @@ function DesignChatInput({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           rows={3}
-          placeholder="Napisz do Pulsai…"
+          placeholder={uiText(language, "Napisz do Pulsai…", "Message Pulsai…")}
           disabled={applying}
           aria-describedby={isStreaming ? "chat-streaming-hint" : undefined}
           style={chatTextareaStyle}
@@ -2397,16 +2433,17 @@ function DesignChatInput({
           <SpeechToTextButton
             compact
             disabled={applying}
+            language={language}
             onTranscript={(text) => {
               setDraft((current) => [current.trim(), text].filter(Boolean).join(" "));
-              setVoiceHint("Gotowe — kliknij Wyślij");
+              setVoiceHint(uiText(language, "Gotowe — kliknij Wyślij", "Ready — click Send"));
             }}
             onStateChange={(state: VoiceState, message?: string) => {
               if (message) setVoiceHint(message);
-              else if (state === "requesting") setVoiceHint("Uruchamiam mikrofon…");
-              else if (state === "recording") setVoiceHint("Słucham — kliknij, aby zakończyć");
-              else if (state === "transcribing") setVoiceHint("Przepisuję mowę…");
-              else setVoiceHint((current) => current?.startsWith("Gotowe") ? current : null);
+              else if (state === "requesting") setVoiceHint(uiText(language, "Uruchamiam mikrofon…", "Starting microphone…"));
+              else if (state === "recording") setVoiceHint(uiText(language, "Słucham — kliknij, aby zakończyć", "Listening — click to stop"));
+              else if (state === "transcribing") setVoiceHint(uiText(language, "Przepisuję mowę…", "Transcribing…"));
+              else setVoiceHint((current) => current?.startsWith("Gotowe") || current?.startsWith("Ready") ? current : null);
             }}
           />
           </div>
@@ -2414,7 +2451,7 @@ function DesignChatInput({
             {imageState === "analyzing" ? imageMessage : voiceHint ? voiceHint : selectedFeature ? `Cel: ${selectedFeature.name}` : routeBadge?.label}
           </span>
           {isStreaming ? (
-            <button type="button" onClick={onCancel} style={composerSendButtonStyle} aria-label="Zatrzymaj" title="Zatrzymaj">
+            <button type="button" onClick={onCancel} style={composerSendButtonStyle} aria-label={uiText(language, "Zatrzymaj", "Stop")} title={uiText(language, "Zatrzymaj", "Stop")}>
               ■
             </button>
           ) : routeBadge?.directEdit ? (
@@ -2432,15 +2469,15 @@ function DesignChatInput({
               type="submit"
               disabled={disabled || !draft.trim() || imageState === "analyzing"}
               style={composerSendButtonStyle}
-              aria-label="Wyślij"
-              title="Wyślij"
+              aria-label={uiText(language, "Wyślij", "Send")}
+              title={uiText(language, "Wyślij", "Send")}
             >
               ↑
             </button>
           )}
         </div>
         {isStreaming ? (
-          <span id="chat-streaming-hint" style={composerBelowHintStyle}>Możesz przygotować następną wiadomość w trakcie pracy.</span>
+          <span id="chat-streaming-hint" style={composerBelowHintStyle}>{uiText(language, "Możesz przygotować następną wiadomość w trakcie pracy.", "You can prepare the next message while Pulsai works.")}</span>
         ) : routeBadge && !routeBadge.directEdit ? (
           <span style={composerBelowHintStyle}>{routeBadge.title} · ok. {routeBadge.costEstimate}</span>
         ) : null}
@@ -3795,6 +3832,47 @@ const artifactBarStyle: React.CSSProperties = {
   gap: 6,
 };
 
+const printResultOverlayStyle: React.CSSProperties = {
+  position: "absolute",
+  left: 14,
+  bottom: 14,
+  zIndex: 3,
+  width: "min(330px, calc(100% - 150px))",
+  padding: "10px 12px",
+  borderRadius: 12,
+  color: "#eef3f7",
+  background: "rgba(17,23,30,0.88)",
+  border: "1px solid rgba(112,198,255,0.22)",
+  boxShadow: "0 12px 28px rgba(0,0,0,0.28)",
+  backdropFilter: "blur(12px)",
+};
+
+const printResultLinksStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 12,
+  marginTop: 7,
+  fontSize: 11,
+};
+
+const languageSwitcherStyle: React.CSSProperties = {
+  display: "flex",
+  padding: 2,
+  borderRadius: 999,
+  background: "rgba(0,0,0,0.06)",
+  border: "1px solid rgba(0,0,0,0.1)",
+};
+
+const languageButtonStyle = (active: boolean): React.CSSProperties => ({
+  border: 0,
+  borderRadius: 999,
+  padding: "5px 8px",
+  background: active ? "#1a222c" : "transparent",
+  color: active ? "#eef3f7" : "rgba(0,0,0,0.58)",
+  fontSize: 10,
+  fontWeight: 800,
+  cursor: "pointer",
+});
+
 const emptyCanvasStyle: React.CSSProperties = {
   width: "100%",
   height: "100%",
@@ -3940,8 +4018,10 @@ function ExportMenu({
 
 function PrintEstimatePanel({
   estimate,
+  language,
 }: {
   estimate: import("../../types/design").PrintEstimate;
+  language: UiLanguage;
 }) {
   const fmtTime = (m: number | null | undefined) => {
     if (m == null) return "—";
@@ -3957,22 +4037,77 @@ function PrintEstimatePanel({
   return (
     <div style={estimateGridStyle}>
       <div style={estimateCellStyle}>
-        <span style={estimateLabelStyle}>weight</span>
+        <span style={estimateLabelStyle}>{uiText(language, "materiał", "material")}</span>
         <span style={estimateValueStyle}>{fmtMass(estimate.filament_g)}</span>
       </div>
       <div style={estimateCellStyle}>
-        <span style={estimateLabelStyle}>time</span>
+        <span style={estimateLabelStyle}>{uiText(language, "czas", "time")}</span>
         <span style={estimateValueStyle}>{fmtTime(estimate.print_minutes)}</span>
       </div>
       <div style={estimateCellStyle}>
-        <span style={estimateLabelStyle}>cost</span>
+        <span style={estimateLabelStyle}>{uiText(language, "koszt", "cost")}</span>
         <span style={estimateValueStyle}>{fmtCost(estimate.cost_usd)}</span>
       </div>
       {estimate.cost_usd_per_g ? (
         <span style={{ fontSize: 10, opacity: 0.5, gridColumn: "1 / -1" }}>
-          @ ${estimate.cost_usd_per_g.toFixed(3)}/g filament
+          @ ${estimate.cost_usd_per_g.toFixed(3)}/g {uiText(language, "filamentu", "filament")}
         </span>
       ) : null}
+    </div>
+  );
+}
+
+function PrintResultCard({
+  estimate,
+  language,
+  gcodeUrl,
+  bundleUrl,
+}: {
+  estimate: import("../../types/design").PrintEstimate;
+  language: UiLanguage;
+  gcodeUrl: string | null;
+  bundleUrl?: string;
+}) {
+  return (
+    <div style={printResultOverlayStyle} role="status" aria-label={uiText(language, "Podsumowanie wydruku", "Print summary")}>
+      <strong>{uiText(language, "Gotowe do druku", "Ready to print")}</strong>
+      <PrintEstimatePanel estimate={estimate} language={language} />
+      <div style={printResultLinksStyle}>
+        {gcodeUrl ? (
+          <a href={gcodeUrl} target="_blank" rel="noopener noreferrer">
+            {uiText(language, "Pobierz G-code", "Download G-code")}
+          </a>
+        ) : null}
+        {bundleUrl ? (
+          <a href={bundleUrl} target="_blank" rel="noopener noreferrer">
+            {uiText(language, "Pełny pakiet", "Full bundle")}
+          </a>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function LanguageSwitcher({
+  language,
+  onChange,
+}: {
+  language: UiLanguage;
+  onChange: (language: UiLanguage) => void;
+}) {
+  return (
+    <div style={languageSwitcherStyle} aria-label="Interface language">
+      {(["pl", "en"] as const).map((value) => (
+        <button
+          key={value}
+          type="button"
+          aria-pressed={language === value}
+          onClick={() => onChange(value)}
+          style={languageButtonStyle(language === value)}
+        >
+          {value.toUpperCase()}
+        </button>
+      ))}
     </div>
   );
 }

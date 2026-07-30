@@ -5,6 +5,7 @@ import { Html, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import type { Material, Mesh, PerspectiveCamera } from "three";
 import { Box3, Color, MOUSE, MathUtils, Sphere, Vector3 } from "three";
+import { uiText, type UiLanguage } from "../lib/ui-language";
 
 export type SelectionPayload = {
   objectName: string;
@@ -46,6 +47,7 @@ type ModelViewerProps = {
   focusTarget?: ViewerFocusTarget | null;
   selectionChip?: ReactNode;
   annotations?: ReactNode;
+  language?: UiLanguage;
 };
 
 type LoadedModelProps = {
@@ -409,6 +411,7 @@ export default function ModelViewer({
   focusTarget = null,
   selectionChip,
   annotations,
+  language = "pl",
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
@@ -421,6 +424,7 @@ export default function ModelViewer({
   const [viewerCommand, setViewerCommand] = useState<ViewerCommand | null>(null);
   const [motionAvailable, setMotionAvailable] = useState(false);
   const [motionRunning, setMotionRunning] = useState(false);
+  const [updateElapsedSeconds, setUpdateElapsedSeconds] = useState(0);
   const controlsRef = useRef<{ target: Vector3; update: () => void } | null>(null);
   const appearanceRef = useRef<HTMLDivElement | null>(null);
   const commandIdRef = useRef(0);
@@ -430,6 +434,19 @@ export default function ModelViewer({
     setSelectedObjectId(null);
     setMotionRunning(false);
   }, [src, ghostModelUrl]);
+
+  useEffect(() => {
+    if (!isUpdating) {
+      setUpdateElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setUpdateElapsedSeconds(0);
+    const timer = window.setInterval(() => {
+      setUpdateElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isUpdating]);
 
   useEffect(() => {
     setInteractionMode(defaultInteractionMode);
@@ -523,9 +540,9 @@ export default function ModelViewer({
   if (!src) {
     return (
       <div className="model-placeholder">
-        <div className="placeholder-title">No model yet</div>
+        <div className="placeholder-title">{uiText(language, "Brak modelu", "No model yet")}</div>
         <div className="placeholder-body">
-          Describe a design or import STEP/STP to start an editable workspace.
+          {uiText(language, "Opisz projekt lub zaimportuj STEP/STP.", "Describe a design or import STEP/STP to start.")}
         </div>
       </div>
     );
@@ -534,8 +551,8 @@ export default function ModelViewer({
   if (loadState.status === "checking") {
     return (
       <div className="model-placeholder">
-        <div className="placeholder-title">Loading model</div>
-        <div className="placeholder-body">Checking the generated GLB artifact.</div>
+        <div className="placeholder-title">{uiText(language, "Wczytuję model", "Loading model")}</div>
+        <div className="placeholder-body">{uiText(language, "Sprawdzam podgląd GLB.", "Checking the GLB preview.")}</div>
       </div>
     );
   }
@@ -543,7 +560,7 @@ export default function ModelViewer({
   if (loadState.status === "error") {
     return (
       <div className="model-placeholder">
-        <div className="placeholder-title">Model unavailable</div>
+        <div className="placeholder-title">{uiText(language, "Model niedostępny", "Model unavailable")}</div>
         <div className="placeholder-body">{loadState.message}</div>
       </div>
     );
@@ -623,7 +640,7 @@ export default function ModelViewer({
 
       <div className="model-overlay">
         {hasGhost ? <div className="model-overlay-chip subtle">Showing changes</div> : null}
-        <div className="model-overlay-chip subtle">Drag to orbit · wheel to zoom</div>
+        <div className="model-overlay-chip subtle">{uiText(language, "Przeciągnij: obrót · kółko: zoom", "Drag to orbit · wheel to zoom")}</div>
         <button
           type="button"
           aria-label="Zoom in"
@@ -648,14 +665,14 @@ export default function ModelViewer({
           className="model-overlay-chip model-overlay-button"
           onClick={resetView}
         >
-          Reset view
+          {uiText(language, "Resetuj widok", "Reset view")}
         </button>
         <button
           type="button"
           className="model-overlay-chip model-overlay-button subtle"
           onClick={() => setInteractionMode((mode) => (mode === "orbit" ? "pan" : "orbit"))}
         >
-          {interactionMode === "orbit" ? "Mode: orbit" : "Mode: pan"}
+          {interactionMode === "orbit" ? uiText(language, "Tryb: obrót", "Mode: orbit") : uiText(language, "Tryb: przesuń", "Mode: pan")}
         </button>
         {motionAvailable ? (
           <button
@@ -665,7 +682,7 @@ export default function ModelViewer({
             title="Podgląd ruchu zespołu — bez symulacji tarcia i obciążeń"
             onClick={() => setMotionRunning((running) => !running)}
           >
-            {motionRunning ? "Zatrzymaj koło" : "Test obrotu"}
+            {motionRunning ? uiText(language, "Zatrzymaj koło", "Stop wheel") : uiText(language, "Test obrotu", "Test rotation")}
           </button>
         ) : null}
         <div ref={appearanceRef} className="model-appearance-panel">
@@ -676,7 +693,7 @@ export default function ModelViewer({
             aria-controls="model-appearance-controls"
             onClick={() => setAppearanceOpen((current) => !current)}
           >
-            <span aria-hidden>{appearanceOpen ? "▾" : "▸"}</span> Appearance
+            <span aria-hidden>{appearanceOpen ? "▾" : "▸"}</span> {uiText(language, "Wygląd", "Appearance")}
           </button>
           {appearanceOpen ? (
             <div id="model-appearance-controls" className="model-appearance-controls">
@@ -686,7 +703,7 @@ export default function ModelViewer({
               </div>
               <label>
                 <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
-                Grid
+                {uiText(language, "Siatka", "Grid")}
               </label>
             </div>
           ) : null}
@@ -698,7 +715,10 @@ export default function ModelViewer({
       {isUpdating ? (
         <div className="model-loading">
           <div className="model-loading-spinner" />
-          <span>Przeliczam model 3D…</span>
+          <span>
+            {uiText(language, "Przeliczam model 3D", "Rebuilding 3D model")}… {updateElapsedSeconds}s
+            {updateElapsedSeconds >= 45 ? ` · ${uiText(language, "to trwa dłużej niż zwykle", "taking longer than usual")}` : ""}
+          </span>
         </div>
       ) : null}
     </div>

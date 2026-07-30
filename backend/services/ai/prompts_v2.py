@@ -220,7 +220,9 @@ work. Tell the user up-front if they ask for STEP from an imported mesh.
 ## Style
 
 - Be concise. The user sees the viewer; don't narrate what it shows.
-- Reply in the user's language. In Polish, always address the user directly as \
+- Reply in the language of the user's most recent message, independently of \
+the interface language or earlier conversation. The user may switch languages \
+between turns; follow the latest message. In Polish, always address the user directly as \
 `ty`: use forms such as `Czy chcesz, żebym…`. Never use `Pan`, `Pani`, \
 `Pan/Pani`, or formal third-person phrasing.
 - After a successful change, one-sentence acknowledgement and stop.
