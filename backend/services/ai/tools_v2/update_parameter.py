@@ -34,24 +34,19 @@ TOOL_DEFINITION = {
 }
 
 
-def execute(payload: dict, ctx: DesignContext) -> dict:
-    try:
-        params = UpdateParameterInput.model_validate(payload)
-    except Exception as exc:
-        return {"error": f"Invalid input: {exc}"}
-
-    design = ctx.design
-    target = next((p for p in design.parameters if p.name == params.name), None)
+def _validated_change(params: UpdateParameterInput, ctx: DesignContext) -> tuple[object | None, object | None, dict | None]:
+    """Validate one requested change without mutating the design."""
+    target = next((p for p in ctx.design.parameters if p.name == params.name), None)
     if target is None:
-        return {
+        return None, None, {
             "error": (
                 f"No parameter named '{params.name}'. Known parameters: "
-                + ", ".join(p.name for p in design.parameters)
+                + ", ".join(p.name for p in ctx.design.parameters)
                 + "."
             ),
         }
     if target.locked and not params.override_locked:
-        return {
+        return None, None, {
             "error": (
                 f"Parameter '{params.name}' is locked by the user. Do not change it "
                 "unless the user explicitly asks to unlock or override the lock."
@@ -67,7 +62,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
 
     if isinstance(new_value, (int, float)) and not isinstance(new_value, bool):
         if target.min is not None and float(new_value) < target.min:
-            return {
+            return None, None, {
                 "error": (
                     f"Parameter '{params.name}' cannot be set to {new_value}; "
                     f"its declared minimum is {target.min}. Do not clamp silently — "
@@ -79,7 +74,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
                 "rejected_value": new_value,
             }
         if target.max is not None and float(new_value) > target.max:
-            return {
+            return None, None, {
                 "error": (
                     f"Parameter '{params.name}' cannot be set to {new_value}; "
                     f"its declared maximum is {target.max}. Do not clamp silently — "
@@ -91,7 +86,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
                 "rejected_value": new_value,
             }
     if target.choices and str(new_value) not in target.choices:
-        return {
+        return None, None, {
             "error": (
                 f"Parameter '{params.name}' must be one of: "
                 + ", ".join(target.choices)
@@ -101,11 +96,53 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
             "choices": target.choices,
             "rejected_value": new_value,
         }
+    return target, new_value, None
 
-    previous_value = target.value
+
+def execute_many(payloads: list[dict], ctx: DesignContext) -> list[dict]:
+    """Apply several independent parameter edits transactionally in one build.
+
+    Claude commonly emits multiple ``update_parameter`` calls in one response.
+    Building after each call made a two-dimension edit take twice as long and
+    created an intermediate revision the user never asked for. Validate every
+    value first, then commit all values and create one preview revision.
+    """
+    if not payloads:
+        return [{"error": "No parameter changes supplied."}]
+
+    parsed: list[UpdateParameterInput] = []
+    prepared: list[tuple[object, object]] = []
+    seen_names: set[str] = set()
+    for index, payload in enumerate(payloads):
+        try:
+            params = UpdateParameterInput.model_validate(payload)
+        except Exception as exc:
+            error = {"error": f"Invalid input: {exc}", "code": "batch_validation_failed"}
+            return [error if i == index else {"error": "Parameter batch was not applied."} for i in range(len(payloads))]
+        if params.name in seen_names:
+            error = {
+                "error": f"Parameter '{params.name}' was requested more than once in the same batch.",
+                "code": "duplicate_parameter_change",
+            }
+            return [error if i == index else {"error": "Parameter batch was not applied."} for i in range(len(payloads))]
+        seen_names.add(params.name)
+        target, new_value, validation_error = _validated_change(params, ctx)
+        if validation_error is not None:
+            return [
+                validation_error if i == index else {"error": "Parameter batch was not applied."}
+                for i in range(len(payloads))
+            ]
+        assert target is not None
+        parsed.append(params)
+        prepared.append((target, new_value))
+
+    design = ctx.design
+    previous_values = [(target, target.value) for target, _ in prepared]
     previous_revision = design.revision_id
-    target.value = new_value
-    design.parent_revision_id = design.revision_id
+    previous_parent_revision = design.parent_revision_id
+    for target, new_value in prepared:
+        target.value = new_value
+    design.parent_revision_id = previous_revision
     from services.codegen.store import new_revision_id
 
     design.revision_id = new_revision_id()
@@ -117,22 +154,23 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
             printer_profile_id=ctx.printer_profile_id,
         )
     except DesignBuildError as exc:
-        target.value = previous_value
+        for target, previous_value in previous_values:
+            target.value = previous_value
         design.revision_id = previous_revision
-        design.parent_revision_id = None
-        return {
-            "error": f"Parameter change rejected: build failed with new value. {exc}",
-            "previous_value": previous_value,
-            "rejected_value": params.new_value,
-        }
+        design.parent_revision_id = previous_parent_revision
+        return [
+            {
+                "error": f"Parameter change rejected: build failed with the requested values. {exc}",
+                "previous_value": previous_value,
+                "rejected_value": params.new_value,
+            }
+            for params, (_, previous_value) in zip(parsed, previous_values, strict=True)
+        ]
 
     save_design(design)
     save_build(design.id, build)
     ctx.last_build = build
-    return {
-        "ok": True,
-        "name": params.name,
-        "new_value": new_value,
+    common = {
         "new_revision_id": design.revision_id,
         "snapshot": parameter_snapshot(design),
         "mesh_hash": build.mesh_hash,
@@ -141,7 +179,16 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         "manufacturability_status": (
             build.manufacturability.status if build.manufacturability else None
         ),
+        "batched_change_count": len(prepared),
     }
+    return [
+        {"ok": True, "name": params.name, "new_value": new_value, **common}
+        for params, (_, new_value) in zip(parsed, prepared, strict=True)
+    ]
+
+
+def execute(payload: dict, ctx: DesignContext) -> dict:
+    return execute_many([payload], ctx)[0]
 
 
 def _coerce(existing_value, new_value):
@@ -173,4 +220,4 @@ def _coerce(existing_value, new_value):
         return new_value
 
 
-__all__ = ["TOOL_DEFINITION", "UpdateParameterInput", "execute"]
+__all__ = ["TOOL_DEFINITION", "UpdateParameterInput", "execute", "execute_many"]

@@ -336,7 +336,54 @@ def main() -> int:
                             [1.0, 0.0, 0.0],
                         )
                     )
-                    trimesh.Scene(glb_mesh).export(glb_path)
+                    # Preserve a small, labelled top-level assembly when the
+                    # CAD result provides one. A flattened STL is correct for
+                    # printing, but it makes interactive motion impossible:
+                    # the viewer cannot rotate the wheel without also rotating
+                    # its stand. Labelled GLB nodes keep those parts separate.
+                    glb_scene = None
+                    top_children = list(getattr(result_obj, "children", []) or [])
+                    if type(result_obj).__name__ == "Compound" and 1 < len(top_children) <= 16:
+                        candidate_scene = trimesh.Scene()
+                        exported_parts = 0
+                        used_labels = set()
+                        for child_index, child in enumerate(top_children):
+                            label = str(getattr(child, "label", "") or "").strip()
+                            if not label or label in used_labels:
+                                continue
+                            used_labels.add(label)
+                            part_path = workdir / f".glb-part-{child_index}.stl"
+                            try:
+                                export_stl(
+                                    child,
+                                    str(part_path),
+                                    tolerance=0.05,
+                                    angular_tolerance=0.08,
+                                )
+                                part_mesh = trimesh.load_mesh(part_path, force="mesh")
+                                if not isinstance(part_mesh, trimesh.Trimesh):
+                                    part_mesh = trimesh.util.concatenate(tuple(part_mesh.dump()))
+                                part_mesh.apply_transform(
+                                    trimesh.transformations.rotation_matrix(
+                                        -0.5 * 3.141592653589793,
+                                        [1.0, 0.0, 0.0],
+                                    )
+                                )
+                                center = part_mesh.bounding_box.centroid
+                                part_mesh.apply_translation(-center)
+                                node_transform = trimesh.transformations.translation_matrix(center)
+                                candidate_scene.add_geometry(
+                                    part_mesh,
+                                    node_name=label,
+                                    geom_name=label,
+                                    transform=node_transform,
+                                )
+                                exported_parts += 1
+                            finally:
+                                part_path.unlink(missing_ok=True)
+                        if exported_parts == len(top_children):
+                            glb_scene = candidate_scene
+                    (glb_scene if glb_scene is not None else trimesh.Scene(glb_mesh)).export(glb_path)
                     artifacts["glb"] = str(glb_path)
         except Exception as exc:
             result_path.write_text(

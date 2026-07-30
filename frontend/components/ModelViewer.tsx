@@ -59,6 +59,8 @@ type LoadedModelProps = {
   controlsRef?: MutableRefObject<{ target: Vector3; update: () => void } | null>;
   fitDirection?: readonly [number, number, number];
   fitView?: boolean;
+  motionRunning?: boolean;
+  onMotionAvailable?: (available: boolean) => void;
 };
 
 type ModelLoadState =
@@ -104,10 +106,21 @@ function LoadedModel({
   controlsRef,
   fitDirection = [1, 0.75, 1],
   fitView = false,
+  motionRunning = false,
+  onMotionAvailable,
 }: LoadedModelProps) {
   const gltf = useGLTF(src);
   const { camera, size, invalidate } = useThree();
   const scene = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
+  const motionNode = useMemo(() => {
+    let match = scene.getObjectByName("wheel") ?? null;
+    if (!match) {
+      scene.traverse((child) => {
+        if (!match && child.name.toLowerCase() === "wheel") match = child;
+      });
+    }
+    return match;
+  }, [scene]);
   const meshes = useMemo(() => {
     const collected: Mesh[] = [];
     scene.traverse((child) => {
@@ -122,6 +135,19 @@ function LoadedModel({
     });
     return collected;
   }, [scene]);
+
+  useEffect(() => {
+    if (!ghost) onMotionAvailable?.(Boolean(motionNode));
+    return () => {
+      if (!ghost) onMotionAvailable?.(false);
+    };
+  }, [ghost, motionNode, onMotionAvailable]);
+
+  useFrame((_, delta) => {
+    if (!motionRunning || !motionNode) return;
+    motionNode.rotation.z += delta * 1.8;
+    invalidate();
+  });
 
   useEffect(() => {
     if (!fitView) return;
@@ -393,6 +419,8 @@ export default function ModelViewer({
   const [loadState, setLoadState] = useState<ModelLoadState>({ status: "idle" });
   const [internalResetSignal, setInternalResetSignal] = useState(0);
   const [viewerCommand, setViewerCommand] = useState<ViewerCommand | null>(null);
+  const [motionAvailable, setMotionAvailable] = useState(false);
+  const [motionRunning, setMotionRunning] = useState(false);
   const controlsRef = useRef<{ target: Vector3; update: () => void } | null>(null);
   const appearanceRef = useRef<HTMLDivElement | null>(null);
   const commandIdRef = useRef(0);
@@ -400,6 +428,8 @@ export default function ModelViewer({
   useEffect(() => {
     setHoveredObjectId(null);
     setSelectedObjectId(null);
+    setMotionAvailable(false);
+    setMotionRunning(false);
   }, [src, ghostModelUrl]);
 
   useEffect(() => {
@@ -562,6 +592,8 @@ export default function ModelViewer({
               controlsRef={controlsRef}
               fitDirection={cameraPosition}
               fitView
+              motionRunning={motionRunning}
+              onMotionAvailable={setMotionAvailable}
               onHover={setHoveredObjectId}
               onSelect={(payload, objectId) => {
                 setSelectedObjectId(objectId);
@@ -626,6 +658,17 @@ export default function ModelViewer({
         >
           {interactionMode === "orbit" ? "Mode: orbit" : "Mode: pan"}
         </button>
+        {motionAvailable ? (
+          <button
+            type="button"
+            className="model-overlay-chip model-overlay-button subtle"
+            aria-pressed={motionRunning}
+            title="Podgląd ruchu zespołu — bez symulacji tarcia i obciążeń"
+            onClick={() => setMotionRunning((running) => !running)}
+          >
+            {motionRunning ? "Zatrzymaj koło" : "Test obrotu"}
+          </button>
+        ) : null}
         <div ref={appearanceRef} className="model-appearance-panel">
           <button
             type="button"
@@ -656,7 +699,7 @@ export default function ModelViewer({
       {isUpdating ? (
         <div className="model-loading">
           <div className="model-loading-spinner" />
-          <span>Updating preview…</span>
+          <span>Przeliczam model 3D…</span>
         </div>
       ) : null}
     </div>

@@ -12,6 +12,7 @@ type StreamState = {
   errorMessage?: string;
   activity?: string;
   model?: string;
+  previewUpdating?: boolean;
 };
 
 type SendOptions = {
@@ -146,7 +147,7 @@ export function useDesignStream(designId: string | null) {
           if (controller.signal.aborted) break;
           if (ev.event === "turn_start") {
             const model = typeof ev.data.model === "string" ? ev.data.model : undefined;
-            setState({ status: "streaming", activity: "Planning the CAD changes…", model });
+            setState({ status: "streaming", activity: "Rozumiem zmianę…", model, previewUpdating: false });
             updateAssistant((entry) => ({ ...entry, model: model ?? entry.model }));
           } else if (ev.event === "model_activity") {
             setState((current) => ({
@@ -155,13 +156,20 @@ export function useDesignStream(designId: string | null) {
               model: typeof ev.data.model === "string" ? ev.data.model : current.model,
             }));
           } else if (ev.event === "tool_call_start") {
+            const toolName = String(ev.data.name ?? "");
             setState((current) => ({
               status: "streaming",
-              activity: activityForTool(String(ev.data.name ?? "")),
+              activity: activityForTool(toolName),
               model: typeof ev.data.model === "string" ? ev.data.model : current.model,
+              previewUpdating: toolUpdatesPreview(toolName) || current.previewUpdating,
             }));
           } else if (ev.event === "tool_call_end") {
-            setState((current) => ({ ...current, status: "streaming", activity: "Checking the result…" }));
+            setState((current) => ({
+              ...current,
+              status: "streaming",
+              activity: "Sprawdzam rezultat…",
+              previewUpdating: false,
+            }));
           }
           if (ev.event === "error") {
             const errorMessage = String(ev.data.message ?? "The CAD agent could not complete this edit.");
@@ -207,15 +215,19 @@ export function useDesignStream(designId: string | null) {
 
 function activityForTool(toolName: string): string {
   const labels: Record<string, string> = {
-    read_design: "Reading the current design…",
-    query_library: "Looking up a reliable CAD pattern…",
-    update_parameter: "Updating dimensions…",
-    replace_feature: "Rebuilding the requested feature…",
-    rewrite_design: "Rewriting the parametric model…",
-    run_build: "Building the new 3D model…",
-    check_manufacturability: "Checking printability…",
+    read_design: "Czytam bieżący projekt…",
+    query_library: "Dobieram sprawdzony wzorzec CAD…",
+    update_parameter: "Aktualizuję wymiary i model 3D…",
+    replace_feature: "Przebudowuję wybrany element…",
+    rewrite_design: "Przebudowuję model parametryczny…",
+    run_build: "Buduję nowy model 3D…",
+    check_manufacturability: "Sprawdzam przygotowanie do druku…",
   };
-  return labels[toolName] ?? "Applying CAD changes…";
+  return labels[toolName] ?? "Wprowadzam zmianę CAD…";
+}
+
+function toolUpdatesPreview(toolName: string): boolean {
+  return ["update_parameter", "replace_feature", "append_feature", "rewrite_design", "run_build"].includes(toolName);
 }
 
 // `normalizeError` was hoisted to ../lib/backend.ts as `normalizeFetchError`
@@ -267,6 +279,9 @@ function handleEvent(
           : c,
       ),
     }));
+    const result = data.result as Record<string, unknown> | undefined;
+    const revisionId = typeof result?.new_revision_id === "string" ? result.new_revision_id : null;
+    if (revisionId) helpers.setLatestRevisionId(revisionId);
   } else if (event === "turn_end") {
     const revisionId = typeof data.revision_id === "string" ? data.revision_id : null;
     if (revisionId) helpers.setLatestRevisionId(revisionId);

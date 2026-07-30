@@ -871,6 +871,8 @@ export default function DesignStudio() {
 
   const issues = design?.latest_build?.manufacturability?.issues ?? [];
   const status = design?.latest_build?.manufacturability?.status;
+  const hardPrintIssues = issues.filter((issue) => issue.severity === "error");
+  const autoHandledPrintIssues = issues.filter((issue) => issue.severity !== "error");
   const controlParameters = useMemo(() => {
     const priority = [
       "wheel_diameter",
@@ -1701,7 +1703,14 @@ export default function DesignStudio() {
           })()}
           {status ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={statusBadgeStyle(status)}>{status}</span>
+              <span style={statusBadgeStyle(status)}>{printStatusLabel(status)}</span>
+              <span style={printReadinessCopyStyle}>
+                {status === "safe"
+                  ? "Model przeszedł kontrolę i jest gotowy do przygotowania."
+                  : status === "warn"
+                    ? `Możesz drukować. Pulsai obsłuży ${autoHandledPrintIssues.length === 1 ? "to ostrzeżenie" : "te ostrzeżenia"} w ustawieniach slicera.`
+                    : "Jeszcze nie drukuj. Pulsai musi najpierw usunąć błąd geometrii."}
+              </span>
               {issues.map((issue, i) => {
                 const fixDisabled =
                   stream.state.status === "streaming" || makePrintable.busy;
@@ -1750,17 +1759,17 @@ export default function DesignStudio() {
                             Locate
                           </button>
                         ) : null}
-                        <button
-                          type="button"
-                          style={issueFixButtonStyle(fixDisabled)}
-                          disabled={fixDisabled}
-                          title="Ask Pulsai to fix this issue via chat"
-                          onClick={fixThisIssue}
-                        >
-                          {stream.state.status === "streaming"
-                            ? "Asking…"
-                            : "Fix this"}
-                        </button>
+                        {issue.severity === "error" ? (
+                          <button
+                            type="button"
+                            style={issueFixButtonStyle(fixDisabled)}
+                            disabled={fixDisabled}
+                            title="Poproś Pulsai o kontrolowaną poprawkę"
+                            onClick={fixThisIssue}
+                          >
+                            {stream.state.status === "streaming" ? "Naprawiam…" : "Napraw"}
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -1773,8 +1782,18 @@ export default function DesignStudio() {
           <button
             type="button"
             style={primaryButtonStyle}
-            disabled={makePrintable.busy}
+            disabled={makePrintable.busy || stream.state.status === "streaming"}
             onClick={async () => {
+              if (status === "unprintable" && hardPrintIssues.length > 0) {
+                const problemList = hardPrintIssues
+                  .map((issue) => `${issue.code}: ${issue.message}`)
+                  .join("; ");
+                stream.send(
+                  `Przygotuj model do bezpiecznego druku i usuń te potwierdzone błędy: ${problemList}. ` +
+                    `Najpierw wybierz najmniejszą odwracalną poprawkę. Nie zmieniaj wymiarów funkcjonalnych ani przeznaczenia modelu bez mojej zgody; jeśli to konieczne, wyjaśnij krótko zmianę i zapytaj przed jej wykonaniem. Po poprawce zbuduj model raz i ponownie sprawdź drukowalność.`,
+                );
+                return;
+              }
               setMakePrintable({ busy: true });
               try {
                 const res = await fetch(`${backendUrl}/design/${design.design_id}/print-bundle`, {
@@ -1801,10 +1820,16 @@ export default function DesignStudio() {
               }
             }}
           >
-            {makePrintable.busy ? "Przygotowuję…" : "Przygotuj do druku"}
+            {makePrintable.busy
+              ? "Przygotowuję…"
+              : status === "unprintable"
+                ? "Napraw przed drukiem"
+                : "Przygotuj do druku"}
           </button>
           <span style={exportHintStyle}>
-            Sprawdzę model, wygeneruję G-code oraz podam czas i zużycie materiału.
+            {status === "warn"
+              ? "Automatycznie dodam potrzebne podpory, wygeneruję G-code oraz podam czas i materiał."
+              : "Sprawdzę model, wygeneruję G-code oraz podam czas i zużycie materiału."}
           </span>
           {makePrintable.summary ? (
             <span style={makePrintableResultStyle(makePrintable.status)}>
@@ -1848,7 +1873,7 @@ export default function DesignStudio() {
             <ModelViewer
               src={buildArtifactUrl}
               label={design.name}
-              isUpdating={stream.state.status === "streaming"}
+              isUpdating={Boolean(stream.state.previewUpdating)}
               defaultCameraPreset="iso"
               onSelect={handleViewerSelect}
               onClearSelection={() => {
@@ -3481,6 +3506,12 @@ const exportHintStyle: React.CSSProperties = {
   color: "rgba(0,0,0,0.48)",
 };
 
+const printReadinessCopyStyle: React.CSSProperties = {
+  fontSize: 11,
+  lineHeight: 1.4,
+  color: "rgba(0,0,0,0.62)",
+};
+
 const historyStyle: React.CSSProperties = {
   flex: 1,
   display: "flex",
@@ -4079,6 +4110,14 @@ const estimateValueStyle: React.CSSProperties = {
   fontFamily:
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
 };
+
+function printStatusLabel(status: "safe" | "warn" | "unprintable"): string {
+  return {
+    safe: "Gotowy",
+    warn: "Wymaga przygotowania",
+    unprintable: "Wymaga poprawy",
+  }[status];
+}
 
 function statusBadgeStyle(status: "safe" | "warn" | "unprintable"): React.CSSProperties {
   const palette = {

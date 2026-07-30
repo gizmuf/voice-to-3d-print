@@ -673,17 +673,36 @@ def _fdm_checks(
                 )
                 if len(ray_index):
                     distances = np.linalg.norm(locations - origins[ray_index], axis=1)
-                    thinnest = float(distances.min())
-                    if thinnest < threshold:
-                        severity = "error" if thinnest < profile.nozzle_mm * 1.5 else "warn"
-                        worst = int(np.argmin(distances))
-                        location = tuple(float(c) for c in points[ray_index[worst]])
+                    # A compound mesh has tangent contacts and shared edges.
+                    # One grazing ray can report a fictitious 0.1 mm "wall"
+                    # even when the surrounding feature is several mm thick.
+                    # Require the thin measurement to recur across at least
+                    # 3% of samples (minimum eight) before blocking a print.
+                    finite = np.flatnonzero(np.isfinite(distances) & (distances > 0))
+                    support_rank = max(8, int(math.ceil(len(distances) * 0.03)))
+                    if len(finite) < support_rank:
+                        robust_index = None
+                    else:
+                        ordered = finite[np.argsort(distances[finite])]
+                        robust_index = int(ordered[support_rank - 1])
+                    robust_thickness = (
+                        float(distances[robust_index]) if robust_index is not None else None
+                    )
+                    if robust_thickness is not None and robust_thickness < threshold:
+                        severity = (
+                            "error"
+                            if robust_thickness < profile.nozzle_mm * 1.5
+                            else "warn"
+                        )
+                        location = tuple(
+                            float(c) for c in points[ray_index[robust_index]]
+                        )
                         issues.append(
                             ManufacturabilityIssue(
                                 severity=severity,  # type: ignore[arg-type]
                                 code="min_wall_thin",
                                 message=(
-                                    f"Wall thickness as low as {thinnest:.2f} mm; "
+                                    f"Repeated wall thickness near {robust_thickness:.2f} mm; "
                                     f"{profile.label} needs at least "
                                     f"{threshold:.2f} mm with a {profile.nozzle_mm} mm nozzle."
                                 ),

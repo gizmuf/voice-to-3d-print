@@ -25,6 +25,7 @@ from services.ai.direct_route import ambiguity_question, parse_direct_parameter_
 from services.ai.prompts_v2 import SYSTEM_PROMPT, render_turn_context
 from services.ai.telemetry import record_tool_call
 from services.ai.tools_v2 import DesignContext, TOOL_DEFINITIONS, execute as execute_tool
+from services.ai.tools_v2.update_parameter import execute_many as execute_parameter_changes
 from services.codegen.store import (
     get_build,
     get_design,
@@ -330,14 +331,45 @@ def stream_turn(
                 break
 
             tool_results: list[dict[str, Any]] = []
-            for use in tool_uses:
+            batched_parameter_results: dict[str, dict] = {}
+            batched_parameter_duration_ms = 0
+            if len(tool_uses) > 1 and all(use["name"] == "update_parameter" for use in tool_uses):
                 yield _sse(
-                    "tool_call_start",
-                    {"id": use["id"], "name": use["name"], "input": use["input"]},
+                    "model_activity",
+                    {
+                        "activity": f"Aktualizuję {len(tool_uses)} wymiary w jednym przebudowaniu…",
+                        "model": settings.anthropic_chat_model,
+                    },
                 )
-                tool_started = time.perf_counter()
-                result = execute_tool(use["name"], use["input"], ctx)
-                tool_ms = int((time.perf_counter() - tool_started) * 1000)
+                for use in tool_uses:
+                    yield _sse(
+                        "tool_call_start",
+                        {"id": use["id"], "name": use["name"], "input": use["input"]},
+                    )
+                batch_started = time.perf_counter()
+                batch_results = execute_parameter_changes(
+                    [use["input"] for use in tool_uses], ctx
+                )
+                batched_parameter_duration_ms = int(
+                    (time.perf_counter() - batch_started) * 1000
+                )
+                batched_parameter_results = {
+                    use["id"]: result
+                    for use, result in zip(tool_uses, batch_results, strict=True)
+                }
+
+            for use in tool_uses:
+                if use["id"] in batched_parameter_results:
+                    result = batched_parameter_results[use["id"]]
+                    tool_ms = batched_parameter_duration_ms if use is tool_uses[0] else 0
+                else:
+                    yield _sse(
+                        "tool_call_start",
+                        {"id": use["id"], "name": use["name"], "input": use["input"]},
+                    )
+                    tool_started = time.perf_counter()
+                    result = execute_tool(use["name"], use["input"], ctx)
+                    tool_ms = int((time.perf_counter() - tool_started) * 1000)
                 is_error = bool(result.get("error"))
                 if is_error:
                     failed_tool_calls += 1

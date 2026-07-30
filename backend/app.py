@@ -463,6 +463,7 @@ def health() -> dict:
     trellis2_image_enabled = bool(settings.trellis2_api_url and settings.trellis2_image_endpoint)
     triposr_enabled = bool(settings.triposr_root and Path(settings.triposr_root).exists())
     slicer_ready = Path(settings.prusaslicer_path).exists()
+    gcode_ready = "gcode" in (manifest.get("artifacts") or {})
     providers = {
         "meshy": {"enabled": bool(settings.meshy_api_key), "cost": "paid", "modes": ["text", "image"]},
         "tripo": {"enabled": bool(settings.tripo_api_key), "cost": "paid", "modes": ["text", "image"]},
@@ -2743,8 +2744,12 @@ def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) ->
     slicer_ready = Path(settings.prusaslicer_path).exists()
     mass = estimate.get("filament_g")
     minutes = estimate.get("print_minutes")
-    if status == "safe":
-        summary_bits = ["Exported FDM bundle", "no manufacturability warnings"]
+    if status == "safe" and gcode_ready:
+        summary_bits = ["Gotowe do druku", "kontrola zakończona pomyślnie"]
+    elif status == "warn" and gcode_ready:
+        summary_bits = ["Gotowe do druku", "slicer uwzględnił podpory"]
+    elif status == "unprintable":
+        summary_bits = ["G-code zablokowany", "model wymaga poprawy"]
     else:
         labels: list[str] = []
         for issue in remaining_issues:
@@ -2757,11 +2762,7 @@ def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) ->
                 truncated = str(message).strip().splitlines()[0]
                 labels.append(truncated[:50] + ("…" if len(truncated) > 50 else ""))
         issue_summary = ", ".join(labels) or "manufacturability checks"
-        severity = "UNPRINTABLE" if status == "unprintable" else "WARN"
-        summary_bits = [
-            "Exported FDM bundle",
-            f"still {severity}: {issue_summary}",
-        ]
+        summary_bits = ["Pakiet STL jest gotowy", f"sprawdź: {issue_summary}"]
     if not slicer_ready:
         summary_bits.append("slicer not configured, STL/GLB only")
     if mass is not None:
@@ -2773,6 +2774,7 @@ def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) ->
         "status": status,
         "remaining_issues": remaining_issues,
         "slicer_ready": slicer_ready,
+        "gcode_ready": gcode_ready,
         "summary": " · ".join(summary_bits),
     }
 

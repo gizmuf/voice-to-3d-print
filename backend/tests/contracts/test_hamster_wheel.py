@@ -34,6 +34,7 @@ def test_hamster_wheel_seed_builds_at_requested_default_diameter() -> None:
     glb_extents = glb.bounds[1] - glb.bounds[0]
     assert glb_extents[1] >= 120.0  # glTF preview is Y-up, so the wheel stays upright.
     assert glb_extents[2] < 60.0
+    assert {"wheel", "stand", "axle"}.issubset(set(glb.graph.nodes_geometry))
 
 
 def test_unknown_prompt_is_not_reported_as_a_matched_box() -> None:
@@ -72,3 +73,4 @@ def test_polish_rung_wheel_prompt_is_fully_parameterized_without_an_agent() -> N
         printer_profile_id="prusa_mk4_default",
     )
     assert not any(issue.code == "non_watertight" for issue in report.issues)
+    assert not any(issue.code == "min_wall_thin" for issue in report.issues)

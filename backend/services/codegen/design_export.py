@@ -81,7 +81,11 @@ def export_preset_bundle(
 
     # FDM: also slice G-code
     gcode_path: Path | None = None
-    if preset in ("fdm", "all") and "stl" in build.artifacts:
+    hard_print_block = bool(
+        build.manufacturability
+        and build.manufacturability.status == "unprintable"
+    )
+    if preset in ("fdm", "all") and "stl" in build.artifacts and not hard_print_block:
         from slicer_service import _slice_mesh
 
         stl_path = Path(build.artifacts["stl"].path)
