@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 
@@ -373,6 +374,43 @@ def save_conversation(design_id: str, messages: list[dict]) -> None:
     cloud_store.save_conversation_payload(design_id, messages)
 
 
+def record_ai_usage(design_id: str, entry: dict) -> dict:
+    """Persist an append-only, compact cost ledger with the design."""
+    design = get_design(design_id)
+    metadata = design.metadata
+    events = metadata.setdefault("ai_usage_events", [])
+    if not isinstance(events, list):
+        events = []
+        metadata["ai_usage_events"] = events
+    clean = {
+        "provider": str(entry.get("provider") or "unknown"),
+        "model": str(entry.get("model") or "unknown"),
+        "input_tokens": int(entry.get("input_tokens") or 0),
+        "output_tokens": int(entry.get("output_tokens") or 0),
+        "cache_read_tokens": int(entry.get("cache_read_tokens") or 0),
+        "cache_creation_tokens": int(entry.get("cache_creation_tokens") or 0),
+        "cost_usd": float(entry.get("cost_usd") or 0),
+        "ts": float(entry.get("ts") or time.time()),
+    }
+    events.append(clean)
+    metadata["ai_usage_events"] = events[-200:]
+    totals = metadata.setdefault("ai_usage_totals", {})
+    if not isinstance(totals, dict):
+        totals = {}
+    totals.update(
+        {
+            "input_tokens": int(totals.get("input_tokens") or 0) + clean["input_tokens"],
+            "output_tokens": int(totals.get("output_tokens") or 0) + clean["output_tokens"],
+            "cache_read_tokens": int(totals.get("cache_read_tokens") or 0) + clean["cache_read_tokens"],
+            "cache_creation_tokens": int(totals.get("cache_creation_tokens") or 0) + clean["cache_creation_tokens"],
+            "cost_usd": float(totals.get("cost_usd") or 0) + clean["cost_usd"],
+        }
+    )
+    metadata["ai_usage_totals"] = totals
+    save_design(design)
+    return totals
+
+
 def list_revisions(design_id: str) -> list[dict]:
     """Enumerate the persisted revisions for a design, newest first.
 
@@ -546,6 +584,7 @@ __all__ = [
     "update_design_script",
     "load_conversation",
     "save_conversation",
+    "record_ai_usage",
     "new_design_id",
     "new_revision_id",
 ]

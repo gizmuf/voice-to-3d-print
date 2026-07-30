@@ -29,12 +29,26 @@ from services.codegen.store import (
     get_build,
     get_design,
     load_conversation,
+    record_ai_usage,
     save_conversation,
 )
 
 
 MAX_TOOL_ITERATIONS = 10
 MAX_FAILED_TOOL_CALLS = 2
+
+
+def _anthropic_cost_usd(
+    *, input_tokens: int, output_tokens: int, cache_read_tokens: int, cache_creation_tokens: int
+) -> float:
+    promo = settings.anthropic_chat_model == "claude-sonnet-5" and time.time() < 1788220800
+    input_rate, output_rate = (2.0, 10.0) if promo else (3.0, 15.0)
+    return (
+        input_tokens * input_rate
+        + output_tokens * output_rate
+        + cache_read_tokens * (input_rate * 0.1)
+        + cache_creation_tokens * (input_rate * 1.25)
+    ) / 1_000_000
 
 
 def _system_blocks(
@@ -227,6 +241,7 @@ def stream_turn(
     failed_tool_calls = 0
     persisted = False
     recovery_announced = False
+    turn_cost_usd = 0.0
 
     def _persist_history() -> None:
         nonlocal persisted
@@ -376,6 +391,28 @@ def stream_turn(
         # The dangling-tool-use repair on the next load patches any in-flight
         # tool_use blocks left without matching results.
         _persist_history()
+        if total_in or total_out or cache_read or cache_write:
+            turn_cost_usd = _anthropic_cost_usd(
+                input_tokens=total_in,
+                output_tokens=total_out,
+                cache_read_tokens=cache_read,
+                cache_creation_tokens=cache_write,
+            )
+            try:
+                record_ai_usage(
+                    design_id,
+                    {
+                        "provider": "anthropic",
+                        "model": settings.anthropic_chat_model,
+                        "input_tokens": total_in,
+                        "output_tokens": total_out,
+                        "cache_read_tokens": cache_read,
+                        "cache_creation_tokens": cache_write,
+                        "cost_usd": turn_cost_usd,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - accounting must not break the turn
+                logger.warning("AI usage persistence failed for design %s: %s", design_id, exc)
 
     yield _sse(
         "turn_end",
@@ -387,6 +424,8 @@ def stream_turn(
             "output_tokens": total_out,
             "cache_read_tokens": cache_read,
             "cache_creation_tokens": cache_write,
+            "cost_usd": turn_cost_usd,
+            "model": settings.anthropic_chat_model,
         },
     )
 

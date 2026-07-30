@@ -57,6 +57,8 @@ export function useDesignStream(designId: string | null) {
   const backendUrl = resolveBackendUrl();
   const [history, setHistory] = useState<ChatTurnEntry[]>([]);
   const [state, setState] = useState<StreamState>({ status: "idle" });
+  const [hydrated, setHydrated] = useState(false);
+  const [lifetimeCost, setLifetimeCost] = useState(0);
   const [latestRevisionId, setLatestRevisionId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -65,6 +67,8 @@ export function useDesignStream(designId: string | null) {
       setHistory([]);
       setLatestRevisionId(null);
       setState({ status: "idle" });
+      setHydrated(false);
+      setLifetimeCost(0);
       return;
     }
     // A newly created design starts with an empty local history. Clear any
@@ -73,6 +77,8 @@ export function useDesignStream(designId: string | null) {
     setHistory([]);
     setLatestRevisionId(null);
     setState({ status: "idle" });
+    setHydrated(false);
+    setLifetimeCost(0);
     let cancelled = false;
     fetch(`${backendUrl}/design/${designId}/conversation`)
       .then((res) => (res.ok ? res.json() : null))
@@ -80,8 +86,12 @@ export function useDesignStream(designId: string | null) {
         if (cancelled || !payload) return;
         const hydrated = hydrate(payload.messages || []);
         setHistory((current) => (current.length > 0 ? current : hydrated));
+        setLifetimeCost(Number(payload.usage_totals?.cost_usd ?? 0));
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setHydrated(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -158,7 +168,7 @@ export function useDesignStream(designId: string | null) {
             streamFailed = true;
             setState({ status: "error", errorMessage });
           }
-          handleEvent(ev, { updateAssistant, setLatestRevisionId });
+          handleEvent(ev, { updateAssistant, setLatestRevisionId, setLifetimeCost });
         }
         if (!streamFailed) setState((current) => ({ status: "idle", model: current.model }));
       } catch (error) {
@@ -192,7 +202,7 @@ export function useDesignStream(designId: string | null) {
     [],
   );
 
-  return { history, state, latestRevisionId, send, cancel, appendLocalTurn };
+  return { history, hydrated, lifetimeCost, state, latestRevisionId, send, cancel, appendLocalTurn };
 }
 
 function activityForTool(toolName: string): string {
@@ -221,6 +231,7 @@ function handleEvent(
       ) => Extract<ChatTurnEntry, { kind: "assistant" }>,
     ) => void;
     setLatestRevisionId: (rev: string) => void;
+    setLifetimeCost: (update: (current: number) => number) => void;
   },
 ) {
   const { event, data } = ev;
@@ -269,6 +280,10 @@ function handleEvent(
         cacheCreation: Number(data.cache_creation_tokens ?? 0),
       },
     }));
+    const cost = Number(data.cost_usd ?? 0);
+    if (Number.isFinite(cost) && cost > 0) {
+      helpers.setLifetimeCost((current) => current + cost);
+    }
   } else if (event === "error") {
     const message = String(data.message ?? "Unknown error");
     helpers.updateAssistant((entry) => ({

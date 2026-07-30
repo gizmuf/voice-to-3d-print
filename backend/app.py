@@ -50,6 +50,7 @@ from services.codegen.store import (
     get_record,
     list_designs,
     load_conversation as load_design_conversation,
+    record_ai_usage,
     save_build,
     save_conversation as save_design_conversation,
 )
@@ -1289,6 +1290,7 @@ async def generate_image(
     project_id: str | None = Form(None),
     parent_job_id: str | None = Form(None),
     edit_mode: str | None = Form(None),
+    design_id: str | None = Form(None),
     image: UploadFile = File(...),
 ) -> GenerateResponse:
     job_id = job_id or uuid.uuid4().hex
@@ -1304,6 +1306,7 @@ async def generate_image(
                 "project_id": project_id,
                 "parent_job_id": parent_job_id,
                 "edit_mode": edit_mode,
+                "design_id": design_id,
                 "mode": "creative",
             }
         ),
@@ -1501,6 +1504,18 @@ async def image_intent(
         raise HTTPException(status_code=500, detail="Failed to extract prompt.")
 
     update_job(job_id, {"status": "intent_ready", "input.prompt_final": prompt})
+    if design_id:
+        _validate_design_id(design_id)
+        record_ai_usage(
+            design_id,
+            {
+                "provider": "google",
+                "model": settings.gemini_model,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "cost_usd": result.cost_usd,
+            },
+        )
     return ImageIntentResponse(
         job_id=job_id,
         prompt=prompt,
@@ -2650,9 +2665,11 @@ async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
 @app.get("/design/{design_id}/conversation")
 def design_conversation_endpoint(design_id: str) -> dict:
     _validate_design_id(design_id)
+    design = get_design(design_id)
     return {
         "design_id": design_id,
         "messages": load_design_conversation(design_id),
+        "usage_totals": design.metadata.get("ai_usage_totals") or {},
     }
 
 

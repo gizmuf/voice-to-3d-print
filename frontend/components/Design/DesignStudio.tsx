@@ -8,7 +8,7 @@ import SelectionChip from "../SelectionChip";
 import SpeechToTextButton, { type VoiceState } from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
-import { displayModelName, formatUsd, tokenCostUsd } from "../../lib/ai-cost";
+import { displayModelName, formatUsd } from "../../lib/ai-cost";
 import { useDesignStream } from "../../lib/useDesignStream";
 import { useHealth } from "../../lib/useHealth";
 import { usePrinterProfiles } from "../../lib/usePrinterProfiles";
@@ -423,12 +423,8 @@ export default function DesignStudio() {
   const [externalSessionCost, setExternalSessionCost] = useState(0);
   useEffect(() => setExternalSessionCost(0), [design?.design_id]);
   const sessionCost = useMemo(
-    () =>
-      externalSessionCost + stream.history.reduce((total, entry) => {
-        if (entry.kind !== "assistant" || !entry.tokens) return total;
-        return total + tokenCostUsd(entry.tokens, entry.model);
-      }, 0),
-    [externalSessionCost, stream.history],
+    () => externalSessionCost + stream.lifetimeCost,
+    [externalSessionCost, stream.lifetimeCost],
   );
 
   useEffect(() => {
@@ -1949,7 +1945,12 @@ export default function DesignStudio() {
             </div>
           ) : null}
           <div style={historyStyle}>
-            {stream.history.length === 0 ? (
+            {!stream.hydrated ? (
+              <div style={emptyChatStyle} role="status">
+                <span style={agentProgressDotStyle} aria-hidden />
+                <p>Wczytuję rozmowę…</p>
+              </div>
+            ) : stream.history.length === 0 ? (
               <div style={emptyChatStyle}>
                 <span style={emptyChatMarkStyle} aria-hidden>P</span>
                 <strong>Co zmieniamy?</strong>
@@ -1964,6 +1965,7 @@ export default function DesignStudio() {
           </div>
           <DesignChatInput
             backendUrl={backendUrl}
+            designId={design.design_id}
             onExternalCost={(cost) => setExternalSessionCost((current) => current + cost)}
             disabled={stream.state.status === "streaming"}
             selectedFeature={selectedFeature}
@@ -2178,6 +2180,7 @@ function ParameterControl({
 
 function DesignChatInput({
   backendUrl,
+  designId,
   onExternalCost,
   onSend,
   onCancel,
@@ -2188,6 +2191,7 @@ function DesignChatInput({
   parameters,
 }: {
   backendUrl: string;
+  designId: string;
   onExternalCost: (costUsd: number) => void;
   onSend: (text: string) => void;
   onCancel: () => void;
@@ -2255,6 +2259,7 @@ function DesignChatInput({
       const form = new FormData();
       form.append("image", file);
       form.append("input_type", "cad_reference");
+      form.append("design_id", designId);
       const response = await fetch(`${backendUrl}/image-intent`, { method: "POST", body: form });
       const payload = (await response.json().catch(() => null)) as {
         prompt?: string;
