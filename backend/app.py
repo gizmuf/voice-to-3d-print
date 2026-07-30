@@ -1290,7 +1290,6 @@ async def generate_image(
     project_id: str | None = Form(None),
     parent_job_id: str | None = Form(None),
     edit_mode: str | None = Form(None),
-    design_id: str | None = Form(None),
     image: UploadFile = File(...),
 ) -> GenerateResponse:
     job_id = job_id or uuid.uuid4().hex
@@ -1306,7 +1305,6 @@ async def generate_image(
                 "project_id": project_id,
                 "parent_job_id": parent_job_id,
                 "edit_mode": edit_mode,
-                "design_id": design_id,
                 "mode": "creative",
             }
         ),
@@ -1474,6 +1472,7 @@ async def image_intent(
     project_id: str | None = Form(None),
     parent_job_id: str | None = Form(None),
     edit_mode: str | None = Form(None),
+    design_id: str | None = Form(None),
 ) -> ImageIntentResponse:
     job_id = job_id or uuid.uuid4().hex
     ensure_job(
@@ -1487,6 +1486,7 @@ async def image_intent(
                 "project_id": project_id,
                 "parent_job_id": parent_job_id,
                 "edit_mode": edit_mode,
+                "design_id": design_id,
             }
         ),
     )

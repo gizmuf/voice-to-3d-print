@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 from services import gemini_intent
+
+
+def test_image_intent_accepts_design_id_for_cost_ledger() -> None:
+    from app import image_intent
+
+    assert "design_id" in inspect.signature(image_intent).parameters
 
 
 def test_image_prompt_uses_direct_usage_metadata(monkeypatch) -> None:
