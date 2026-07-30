@@ -8,6 +8,7 @@ import SelectionChip from "../SelectionChip";
 import SpeechToTextButton, { type VoiceState } from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
+import { displayModelName, formatUsd, tokenCostUsd } from "../../lib/ai-cost";
 import { useDesignStream } from "../../lib/useDesignStream";
 import { useHealth } from "../../lib/useHealth";
 import { usePrinterProfiles } from "../../lib/usePrinterProfiles";
@@ -157,6 +158,7 @@ export default function DesignStudio() {
   const [showAllParameters, setShowAllParameters] = useState(false);
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
   const [selectedFeaturePoint, setSelectedFeaturePoint] = useState<{ x: number; y: number; z: number } | null>(null);
+  const [selectedTopologyRef, setSelectedTopologyRef] = useState<string | null>(null);
   const [selectedManufacturabilityIssueIndex, setSelectedManufacturabilityIssueIndex] = useState<number | null>(null);
   const [makePrintable, setMakePrintable] = useState<{
     busy: boolean;
@@ -418,6 +420,16 @@ export default function DesignStudio() {
 
   const stream = useDesignStream(design?.design_id ?? null);
   const lastRevision = stream.latestRevisionId;
+  const [externalSessionCost, setExternalSessionCost] = useState(0);
+  useEffect(() => setExternalSessionCost(0), [design?.design_id]);
+  const sessionCost = useMemo(
+    () =>
+      externalSessionCost + stream.history.reduce((total, entry) => {
+        if (entry.kind !== "assistant" || !entry.tokens) return total;
+        return total + tokenCostUsd(entry.tokens, entry.model);
+      }, 0),
+    [externalSessionCost, stream.history],
+  );
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -450,6 +462,7 @@ export default function DesignStudio() {
       if (!design) return;
       setSelectedFeatureId(featureId);
       setSelectedFeaturePoint(point ?? featureAnchorForDesign(design, featureId));
+      setSelectedTopologyRef(null);
       setSelectedManufacturabilityIssueIndex(null);
     },
     [design]
@@ -900,15 +913,18 @@ export default function DesignStudio() {
     (payload: SelectionPayload) => {
       if (!design) return;
       const featureId = inferFeatureFromPoint(design, payload.point);
+      setSelectedTopologyRef(payload.topologyRef);
       if (featureId) {
-        selectFeature(featureId, payload.point);
+        setSelectedFeatureId(featureId);
+        setSelectedFeaturePoint(payload.point);
+        setSelectedManufacturabilityIssueIndex(null);
       } else {
         setSelectedFeatureId(null);
         setSelectedFeaturePoint(payload.point);
         setSelectedManufacturabilityIssueIndex(null);
       }
     },
-    [design, selectFeature]
+    [design]
   );
 
   if (!design) {
@@ -1678,6 +1694,7 @@ export default function DesignStudio() {
                     stream.send(message, {
                       selectedFeatureId: selectedFeature?.id ?? null,
                       selectedFeatureLabel: selectedFeature?.name ?? null,
+                      selectedTopologyRef,
                     });
                   }}
                 >
@@ -1704,6 +1721,7 @@ export default function DesignStudio() {
                   stream.send(message, {
                     selectedFeatureId: selectedFeature?.id ?? null,
                     selectedFeatureLabel: selectedFeature?.name ?? null,
+                    selectedTopologyRef,
                   });
                 };
                 return (
@@ -1840,6 +1858,7 @@ export default function DesignStudio() {
               onClearSelection={() => {
                 setSelectedFeatureId(null);
                 setSelectedFeaturePoint(null);
+                setSelectedTopologyRef(null);
                 setSelectedManufacturabilityIssueIndex(null);
               }}
               selectionMarker={
@@ -1864,6 +1883,7 @@ export default function DesignStudio() {
                     onDismiss={() => {
                       setSelectedFeatureId(null);
                       setSelectedFeaturePoint(null);
+                      setSelectedTopologyRef(null);
                     }}
                   />
                 ) : null
@@ -1904,39 +1924,37 @@ export default function DesignStudio() {
 
         <aside style={chatPaneStyle} className="pulsai-chat-pane">
           <div style={chatPaneHeaderStyle}>
-            <div>
-              <p style={{ ...eyebrowStyle, color: "#7dd3c7", opacity: 1 }}>PULSAI COPILOT</p>
-              <h3 style={{ ...paneHeaderStyle, margin: "2px 0 0", color: "#f5f7fa", opacity: 1 }}>
-                Design by conversation
-              </h3>
+            <div style={chatIdentityStyle}>
+              <span style={chatBrandMarkStyle} aria-hidden>P</span>
+              <div>
+                <strong style={chatTitleStyle}>Pulsai</strong>
+                <span style={chatSubtitleStyle}>Projektant CAD</span>
+              </div>
             </div>
-            <span style={chatOnlineStyle} role="status" aria-live="polite">
-              {stream.state.status === "streaming"
-                ? "working"
-                : stream.state.status === "error"
-                  ? "needs attention"
-                  : "ready"}
-            </span>
+            <div style={chatHeaderMetaStyle}>
+              <span style={sessionCostStyle} title="Dokładny koszt tokenów Claude w tej sesji">
+                Sesja {formatUsd(sessionCost)}
+              </span>
+              <span style={chatOnlineStyle} role="status" aria-live="polite">
+                {stream.state.status === "streaming" ? "pracuje" : stream.state.status === "error" ? "błąd" : "gotowy"}
+              </span>
+            </div>
           </div>
           {stream.state.status === "streaming" ? (
             <div style={agentProgressStyle} role="status" aria-live="polite">
               <span style={agentProgressDotStyle} aria-hidden />
-              <span>
-                <strong>{stream.state.activity ?? "Working on the design…"}</strong>
-                <small style={{ display: "block", marginTop: 2, color: "rgba(217,244,239,0.68)" }}>
-                  This is an initial draft until the build finishes. You can type your next edit now;
-                  sending unlocks when this operation completes.
-                </small>
-              </span>
+              <strong>{displayModelName(stream.state.model)}</strong>
+              <span style={{ opacity: 0.62 }}>·</span>
+              <span>{stream.state.activity ?? "Pracuje nad projektem…"}</span>
             </div>
           ) : null}
           <div style={historyStyle}>
             {stream.history.length === 0 ? (
-              <p style={{ fontSize: 12, opacity: 0.6 }}>
-                Ask for any geometry change. Examples: <em>"hexagonal holes"</em>,{" "}
-                <em>"add a 4mm fillet to the top edge"</em>,{" "}
-                <em>"shell with 2mm wall, top open"</em>.
-              </p>
+              <div style={emptyChatStyle}>
+                <span style={emptyChatMarkStyle} aria-hidden>P</span>
+                <strong>Co zmieniamy?</strong>
+                <p>Opisz zmianę, wskaż element w modelu albo dodaj zdjęcie referencyjne.</p>
+              </div>
             ) : (
               stream.history.map((entry, idx) => (
                 <ChatMessage key={idx} entry={entry} />
@@ -1945,6 +1963,8 @@ export default function DesignStudio() {
             <div ref={chatEndRef} />
           </div>
           <DesignChatInput
+            backendUrl={backendUrl}
+            onExternalCost={(cost) => setExternalSessionCost((current) => current + cost)}
             disabled={stream.state.status === "streaming"}
             selectedFeature={selectedFeature}
             parameters={design.parameters}
@@ -1953,6 +1973,7 @@ export default function DesignStudio() {
               stream.send(text, {
                 selectedFeatureId: selectedFeature?.id ?? null,
                 selectedFeatureLabel: selectedFeature?.name ?? null,
+                selectedTopologyRef,
               })
             }
             onApplyDirect={async (text, edit) => {
@@ -2156,6 +2177,8 @@ function ParameterControl({
 
 
 function DesignChatInput({
+  backendUrl,
+  onExternalCost,
   onSend,
   onCancel,
   onApplyDirect,
@@ -2164,6 +2187,8 @@ function DesignChatInput({
   selectedFeature,
   parameters,
 }: {
+  backendUrl: string;
+  onExternalCost: (costUsd: number) => void;
   onSend: (text: string) => void;
   onCancel: () => void;
   onApplyDirect: (text: string, edit: { name: string; value: number | boolean | string }) => Promise<void> | void;
@@ -2176,6 +2201,21 @@ function DesignChatInput({
   const [applying, setApplying] = useState(false);
   const [routeBadge, setRouteBadge] = useState<DesignEditBadge | null>(null);
   const [voiceHint, setVoiceHint] = useState<string | null>(null);
+  const [referenceImage, setReferenceImage] = useState<File | null>(null);
+  const [referencePreview, setReferencePreview] = useState<string | null>(null);
+  const [imageState, setImageState] = useState<"idle" | "analyzing" | "ready" | "error">("idle");
+  const [imageMessage, setImageMessage] = useState<string | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!referenceImage) {
+      setReferencePreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(referenceImage);
+    setReferencePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [referenceImage]);
 
   useEffect(() => {
     const text = draft.trim();
@@ -2205,6 +2245,44 @@ function DesignChatInput({
     }
   };
 
+  const analyzeReferenceImage = async (file: File) => {
+    setReferenceImage(file);
+    setImageState("analyzing");
+    setImageMessage("Gemini 3.5 Flash-Lite · analizuje zdjęcie");
+    try {
+      if (!file.type.startsWith("image/")) throw new Error("Wybierz plik obrazu.");
+      if (file.size > 12 * 1024 * 1024) throw new Error("Zdjęcie może mieć maksymalnie 12 MB.");
+      const form = new FormData();
+      form.append("image", file);
+      form.append("input_type", "cad_reference");
+      const response = await fetch(`${backendUrl}/image-intent`, { method: "POST", body: form });
+      const payload = (await response.json().catch(() => null)) as {
+        prompt?: string;
+        model?: string;
+        input_tokens?: number;
+        output_tokens?: number;
+        cost_usd?: number;
+        detail?: string;
+      } | null;
+      if (!response.ok || !payload?.prompt) {
+        throw new Error(payload?.detail || "Nie udało się przeanalizować zdjęcia.");
+      }
+      setDraft((current) => {
+        const description = `Na podstawie zdjęcia referencyjnego: ${payload.prompt}`;
+        return current.trim() ? `${current.trim()}\n\n${description}` : description;
+      });
+      setImageState("ready");
+      const cost = Number(payload.cost_usd ?? 0);
+      if (Number.isFinite(cost) && cost > 0) onExternalCost(cost);
+      setImageMessage(
+        `${displayModelName(payload.model)} opisał zdjęcie${cost > 0 ? ` · ${formatUsd(cost)}` : ""} — sprawdź opis`,
+      );
+    } catch (error) {
+      setImageState("error");
+      setImageMessage(error instanceof Error ? error.message : "Nie udało się przeanalizować zdjęcia.");
+    }
+  };
+
   return (
     <form
       onSubmit={(e) => {
@@ -2212,33 +2290,79 @@ function DesignChatInput({
         if (!draft.trim() || disabled) return;
         onSend(draft.trim());
         setDraft("");
+        setReferenceImage(null);
+        setImageState("idle");
+        setImageMessage(null);
       }}
       style={{ display: "flex", flexDirection: "column", gap: 6 }}
     >
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        rows={2}
-        placeholder="Opisz zmianę…"
-        disabled={applying}
-        aria-describedby={isStreaming ? "chat-streaming-hint" : undefined}
-        style={chatTextareaStyle}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && draft.trim() && !disabled) {
-            onSend(draft.trim());
-            setDraft("");
-          }
-        }}
-      />
-      {routeBadge ? (
-        <div style={routeBadgeRowStyle}>
-          <span style={routeBadgeStyle(routeBadge.tone)} title={routeBadge.title}>
-            {routeBadge.label} · ok. {routeBadge.costEstimate}
-          </span>
-        </div>
-      ) : null}
-      <div style={chatComposerFooterStyle}>
-        <div style={{ flex: "none" }}>
+      <div style={chatComposerShellStyle}>
+        {referenceImage ? (
+          <div style={imageAttachmentStyle}>
+            {referencePreview ? <img src={referencePreview} alt="Zdjęcie referencyjne" style={imageThumbStyle} /> : null}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{referenceImage.name}</strong>
+              <span style={{ color: imageState === "error" ? "#ff8b8b" : "rgba(232,240,247,0.58)" }}>
+                {imageMessage}
+              </span>
+            </div>
+            <button
+              type="button"
+              aria-label="Usuń zdjęcie"
+              title="Usuń zdjęcie"
+              style={composerIconButtonStyle}
+              onClick={() => {
+                setReferenceImage(null);
+                setImageState("idle");
+                setImageMessage(null);
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ) : null}
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={3}
+          placeholder="Napisz do Pulsai…"
+          disabled={applying}
+          aria-describedby={isStreaming ? "chat-streaming-hint" : undefined}
+          style={chatTextareaStyle}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && draft.trim() && !disabled) {
+              e.preventDefault();
+              onSend(draft.trim());
+              setDraft("");
+              setReferenceImage(null);
+              setImageState("idle");
+              setImageMessage(null);
+            }
+          }}
+        />
+        <div style={chatComposerFooterStyle}>
+          <div style={composerToolsStyle}>
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void analyzeReferenceImage(file);
+                event.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              style={composerIconButtonStyle}
+              onClick={() => imageInputRef.current?.click()}
+              disabled={applying || imageState === "analyzing"}
+              aria-label="Dodaj zdjęcie referencyjne"
+              title="Dodaj zdjęcie referencyjne"
+            >
+              +
+            </button>
           <SpeechToTextButton
             compact
             disabled={applying}
@@ -2254,40 +2378,41 @@ function DesignChatInput({
               else setVoiceHint((current) => current?.startsWith("Gotowe") ? current : null);
             }}
           />
-        </div>
-        <span style={chatComposerHintStyle}>
-          {voiceHint ? (
-            voiceHint
-          ) : isStreaming ? (
-            <span id="chat-streaming-hint">Możesz już wpisać następną zmianę</span>
-          ) : selectedFeature ? (
-            `Cel: ${selectedFeature.name}`
-          ) : (
-            "Powiedz lub wpisz zmianę"
-          )}
-        </span>
-        {isStreaming ? (
-          <button type="button" onClick={onCancel} style={secondaryButtonStyle}>
-            Zatrzymaj
-          </button>
-        ) : (
-          <div style={{ display: "flex", gap: 6 }}>
-            {routeBadge?.directEdit ? (
-              <button
-                type="button"
-                onClick={handleApplyDirect}
-                disabled={disabled || applying || !draft.trim()}
-                style={applyDirectButtonStyle}
-                title={`Set ${routeBadge.directEdit.name} = ${routeBadge.directEdit.value} without an LLM call`}
-              >
-                {applying ? "Applying…" : "Apply directly"}
-              </button>
-            ) : null}
-            <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
-              Wyślij
-            </button>
           </div>
-        )}
+          <span style={chatComposerHintStyle}>
+            {imageState === "analyzing" ? imageMessage : voiceHint ? voiceHint : selectedFeature ? `Cel: ${selectedFeature.name}` : routeBadge?.label}
+          </span>
+          {isStreaming ? (
+            <button type="button" onClick={onCancel} style={composerSendButtonStyle} aria-label="Zatrzymaj" title="Zatrzymaj">
+              ■
+            </button>
+          ) : routeBadge?.directEdit ? (
+            <button
+              type="button"
+              onClick={handleApplyDirect}
+              disabled={disabled || applying || !draft.trim()}
+              style={applyDirectButtonStyle}
+              title={`${routeBadge.directEdit.name} = ${routeBadge.directEdit.value}, bez wywołania modelu`}
+            >
+              {applying ? "…" : "$0 · Zastosuj"}
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={disabled || !draft.trim() || imageState === "analyzing"}
+              style={composerSendButtonStyle}
+              aria-label="Wyślij"
+              title="Wyślij"
+            >
+              ↑
+            </button>
+          )}
+        </div>
+        {isStreaming ? (
+          <span id="chat-streaming-hint" style={composerBelowHintStyle}>Możesz przygotować następną wiadomość w trakcie pracy.</span>
+        ) : routeBadge && !routeBadge.directEdit ? (
+          <span style={composerBelowHintStyle}>{routeBadge.title} · ok. {routeBadge.costEstimate}</span>
+        ) : null}
       </div>
     </form>
   );
@@ -2335,11 +2460,11 @@ function classifyDesignEditBadge(
   parameters: Design["parameters"],
 ): DesignEditBadge {
   const lower = text.toLowerCase();
-  const normalized = lower.replace(/[^a-z0-9_]+/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = lower.replace(/[^\p{L}\p{N}_%]+/gu, " ").replace(/\s+/g, " ").trim();
   const questionLike =
-    /^(why|what|how|can|does|do|is|are|where|which|explain|show|tell|count|measure|analyze|check)\b/.test(
+    /^(why|what|how|can|does|do|is|are|where|which|explain|show|tell|count|measure|analyze|check|dlaczego|co|jak|czy|gdzie|który|która|pokaż|wyjaśnij|zmierz|sprawdź)\b/.test(
       normalized,
-    ) || (lower.includes("?") && !/\b(make|set|change|add|remove|delete|split|repair|orient)\b/.test(normalized));
+    ) || (lower.includes("?") && !/\b(make|set|change|add|remove|delete|split|repair|orient|ustaw|zmień|dodaj|usuń|napraw|obróć)\b/.test(normalized));
 
   if (questionLike) {
     return {
@@ -2350,22 +2475,18 @@ function classifyDesignEditBadge(
     };
   }
 
-  const hasEditVerb = /\b(make|set|change|increase|decrease|reduce|shrink|enlarge|scale|thicken|thin|add|remove|delete|drill|cut|replace|move|rotate|fillet|chamfer)\b/.test(
+  const hasEditVerb = /\b(make|set|change|increase|decrease|reduce|shrink|enlarge|scale|thicken|thin|add|remove|delete|drill|cut|replace|move|rotate|fillet|chamfer|ustaw|zmień|zwiększ|zmniejsz|powiększ|pomniejsz|poszerz|zwęż|pogrub|dodaj|usuń|wytnij|zastąp|przesuń|obróć)\b/.test(
     normalized,
   );
-  const hasNumericIntent = /\d/.test(normalized) || /\b(twice|double|half|smaller|larger|bigger|thicker|thinner|more|less)\b/.test(normalized);
-  const mentionsParam = parameters.some((p) => {
-    const name = p.name.toLowerCase();
-    const spaced = name.replaceAll("_", " ");
-    return (` ${normalized} `.includes(` ${name} `) || ` ${normalized} `.includes(` ${spaced} `));
-  });
+  const hasNumericIntent = /\d/.test(normalized) || /\b(twice|double|half|smaller|larger|bigger|thicker|thinner|more|less|podwój|podwójnie|połowę|mniejszy|mniejsza|większy|większa|grubszy|cieńszy|więcej|mniej)\b/.test(normalized);
+  const mentionsParam = parameters.some((p) => parameterMatches(normalized, p.name));
   if (mentionsParam && hasEditVerb && hasNumericIntent) {
     const directEdit = parseDirectParamEdit(normalized, parameters);
     return {
       label: "Bez AI",
       title: directEdit
-        ? `Will set ${directEdit.name} to ${directEdit.value}. No agent round-trip.`
-        : "Likely direct parameter update; no full agent rewrite expected.",
+        ? `Ustawi ${directEdit.name} na ${directEdit.value} bez wywołania modelu.`
+        : "Prawdopodobnie bezpośrednia zmiana parametru.",
       tone: "free",
       costEstimate: COST_BY_TONE.free,
       ...(directEdit ? { directEdit } : {}),
@@ -2375,7 +2496,7 @@ function classifyDesignEditBadge(
   if (/\b(split|repair|orient|orientation|support|smooth|mirror|offset|inflate|press fit|hole|holes|drill|detect)\b/.test(normalized)) {
     return {
       label: "Szybka edycja AI",
-      title: "Likely routed to a focused CAD or mesh tool.",
+      title: "Skieruję polecenie do wyspecjalizowanego narzędzia CAD.",
       tone: "cheap",
       costEstimate: COST_BY_TONE.cheap,
     };
@@ -2383,7 +2504,7 @@ function classifyDesignEditBadge(
 
   return {
     label: "Edycja AI",
-    title: "Likely needs the full design-agent loop.",
+    title: "Ta zmiana prawdopodobnie wymaga pełnego agenta projektowego.",
     tone: "full",
     costEstimate: COST_BY_TONE.full,
   };
@@ -2398,11 +2519,11 @@ function parseDirectParamEdit(
   normalized: string,
   parameters: Design["parameters"],
 ): { name: string; value: number | boolean | string } | null {
-  const paramHits = parameters.filter((p) => {
-    const name = p.name.toLowerCase();
-    const spaced = name.replaceAll("_", " ");
-    return (` ${normalized} `.includes(` ${name} `) || ` ${normalized} `.includes(` ${spaced} `));
-  });
+  const scoredParams = parameters
+    .map((param) => ({ param, score: parameterMatchScore(normalized, param.name) }))
+    .filter((candidate) => candidate.score > 0);
+  const bestScore = Math.max(0, ...scoredParams.map((candidate) => candidate.score));
+  const paramHits = scoredParams.filter((candidate) => candidate.score === bestScore).map((candidate) => candidate.param);
   if (paramHits.length !== 1) return null;
   const param = paramHits[0];
   const current = param.value;
@@ -2417,18 +2538,22 @@ function parseDirectParamEdit(
   }
 
   // Relative phrasing first: works without an explicit number.
-  if (/\b(double|twice)\b/.test(normalized) && typeof current === "number") {
+  if (/\b(double|twice|podwój|podwójnie)\b/.test(normalized) && typeof current === "number") {
     return { name: param.name, value: roundLikely(current * 2) };
   }
-  if (/\bhalf\b/.test(normalized) && typeof current === "number") {
+  if (/\b(half|połowę|połowa)\b/.test(normalized) && typeof current === "number") {
     return { name: param.name, value: roundLikely(current / 2) };
   }
 
   // Absolute numeric token. Take the first number near the param mention.
   const match = normalized.match(/-?\d+(?:\.\d+)?/);
   if (!match) return null;
-  const num = Number(match[0]);
+  if (normalized.includes("%")) return null;
+  let num = Number(match[0]);
   if (!Number.isFinite(num)) return null;
+  if (param.type === "length_mm" && /\b(cm|centymetr|centymetry|centymetrów)\b/.test(normalized)) {
+    num *= 10;
+  }
 
   if (typeof current === "number") {
     return { name: param.name, value: num };
@@ -2437,6 +2562,47 @@ function parseDirectParamEdit(
     return { name: param.name, value: match[0] };
   }
   return null;
+}
+
+const PARAM_ALIASES: Record<string, string[]> = {
+  diameter: ["średnica", "średnicę"],
+  width: ["szerokość", "szerokością"],
+  height: ["wysokość", "wysokością"],
+  depth: ["głębokość", "głębokością"],
+  thickness: ["grubość", "grubością"],
+  count: ["liczba", "ilość"],
+  hole: ["otwór", "otworu", "dziura", "dziury"],
+  holes: ["otwory", "otworów", "dziury"],
+  wheel: ["kołowrotek", "kołowrotka"],
+  track: ["bieżnia", "bieżni", "tor"],
+  rung: ["szczebelek", "szczebelki", "szczebelków"],
+  spoke: ["szprycha", "szprychy", "szprych"],
+  wall: ["ścianka", "ścianki", "ściany"],
+  base: ["podstawa", "podstawy"],
+};
+
+function parameterMatches(normalized: string, name: string): boolean {
+  return parameterMatchScore(normalized, name) > 0;
+}
+
+function parameterMatchScore(normalized: string, name: string): number {
+  const tokens = name.toLowerCase().replace(/_mm$|_deg$/i, "").split("_");
+  const haystack = ` ${normalized} `;
+  const exactPhrases = [name.toLowerCase(), tokens.join(" ")];
+  if (exactPhrases.some((phrase) => haystack.includes(` ${phrase} `))) return 100;
+  const specific = new Set<string>();
+  if (tokens.includes("rung") && tokens.includes("count")) specific.add("liczba szczebelków");
+  if (tokens.includes("spoke") && tokens.includes("count")) specific.add("liczba szprych");
+  if (tokens.includes("hole") && tokens.includes("diameter")) specific.add("średnica otworu");
+  if (tokens.includes("wheel") && tokens.includes("diameter")) specific.add("średnica kołowrotka");
+  if (tokens.includes("track") && tokens.includes("width")) specific.add("szerokość bieżni");
+  if ([...specific].some((phrase) => haystack.includes(` ${phrase} `))) return 80;
+  let score = 0;
+  for (const token of tokens) {
+    if (haystack.includes(` ${token} `)) score += 12;
+    if ((PARAM_ALIASES[token] ?? []).some((alias) => haystack.includes(` ${alias} `))) score += 10;
+  }
+  return score;
 }
 
 function roundLikely(n: number): number {
@@ -3110,21 +3276,66 @@ const chatPaneStyle: React.CSSProperties = {
   color: "#eef3f7",
   border: "1px solid rgba(255,255,255,0.08)",
   borderRadius: 12,
-  padding: 14,
+  padding: 12,
   display: "flex",
   flexDirection: "column",
-  gap: 8,
+  gap: 10,
   maxHeight: "76vh",
   boxShadow: "0 16px 36px rgba(19,29,40,0.14)",
 };
 
 const chatPaneHeaderStyle: React.CSSProperties = {
   display: "flex",
-  alignItems: "flex-start",
+  alignItems: "center",
   justifyContent: "space-between",
   gap: 10,
-  paddingBottom: 8,
+  padding: "2px 2px 10px",
   borderBottom: "1px solid rgba(255,255,255,0.08)",
+};
+
+const chatIdentityStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 9,
+  minWidth: 0,
+};
+
+const chatBrandMarkStyle: React.CSSProperties = {
+  width: 30,
+  height: 30,
+  display: "grid",
+  placeItems: "center",
+  borderRadius: 9,
+  background: "linear-gradient(145deg, #70c6ff, #56b9a8)",
+  color: "#0d1720",
+  fontSize: 13,
+  fontWeight: 900,
+};
+
+const chatTitleStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: 13,
+  color: "#f5f7fa",
+};
+
+const chatSubtitleStyle: React.CSSProperties = {
+  display: "block",
+  marginTop: 1,
+  fontSize: 10,
+  color: "rgba(232,240,247,0.50)",
+};
+
+const chatHeaderMetaStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-end",
+  gap: 3,
+};
+
+const sessionCostStyle: React.CSSProperties = {
+  color: "rgba(232,240,247,0.52)",
+  fontSize: 9,
+  whiteSpace: "nowrap",
 };
 
 const chatOnlineStyle: React.CSSProperties = {
@@ -3139,25 +3350,42 @@ const chatOnlineStyle: React.CSSProperties = {
 
 const agentProgressStyle: React.CSSProperties = {
   display: "flex",
-  alignItems: "flex-start",
-  gap: 9,
-  padding: "9px 10px",
-  borderRadius: 10,
-  border: "1px solid rgba(125,211,199,0.22)",
-  background: "rgba(125,211,199,0.08)",
+  alignItems: "center",
+  gap: 6,
+  padding: "6px 8px",
+  borderRadius: 8,
+  background: "rgba(125,211,199,0.06)",
   color: "#d9f4ef",
-  fontSize: 11,
+  fontSize: 10,
   lineHeight: 1.35,
 };
 
 const agentProgressDotStyle: React.CSSProperties = {
   width: 8,
   height: 8,
-  marginTop: 3,
+  marginTop: 0,
   borderRadius: 999,
   background: "#7dd3c7",
   boxShadow: "0 0 0 4px rgba(125,211,199,0.12)",
   flex: "none",
+};
+
+const emptyChatStyle: React.CSSProperties = {
+  flex: 1,
+  display: "grid",
+  placeItems: "center",
+  alignContent: "center",
+  gap: 7,
+  padding: "28px 18px",
+  textAlign: "center",
+  color: "rgba(238,243,247,0.78)",
+};
+
+const emptyChatMarkStyle: React.CSSProperties = {
+  ...chatBrandMarkStyle,
+  width: 36,
+  height: 36,
+  borderRadius: 11,
 };
 
 const paneHintStyle: React.CSSProperties = {
@@ -3272,17 +3500,29 @@ const textareaStyle: React.CSSProperties = {
 
 const chatTextareaStyle: React.CSSProperties = {
   width: "100%",
-  minHeight: 76,
-  resize: "vertical",
-  background: "rgba(255,255,255,0.07)",
-  border: "1px solid rgba(255,255,255,0.14)",
-  borderRadius: 12,
-  padding: "10px 12px",
+  minHeight: 68,
+  maxHeight: 180,
+  resize: "none",
+  background: "transparent",
+  border: "none",
+  borderRadius: 0,
+  padding: "4px 5px",
   font: "inherit",
   fontSize: 13,
   lineHeight: 1.4,
   color: "#f5f7fa",
   outline: "none",
+};
+
+const chatComposerShellStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 7,
+  padding: 8,
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 17,
+  background: "rgba(255,255,255,0.065)",
+  boxShadow: "0 8px 24px rgba(0,0,0,0.16)",
 };
 
 const chatComposerFooterStyle: React.CSSProperties = {
@@ -3291,6 +3531,59 @@ const chatComposerFooterStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 8,
   minWidth: 0,
+};
+
+const composerToolsStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+};
+
+const composerIconButtonStyle: React.CSSProperties = {
+  width: 32,
+  height: 32,
+  display: "grid",
+  placeItems: "center",
+  padding: 0,
+  borderRadius: 999,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "transparent",
+  color: "rgba(238,243,247,0.86)",
+  fontSize: 18,
+  cursor: "pointer",
+};
+
+const composerSendButtonStyle: React.CSSProperties = {
+  ...composerIconButtonStyle,
+  background: "#f2f5f7",
+  color: "#111820",
+  borderColor: "transparent",
+  fontSize: 18,
+  fontWeight: 800,
+};
+
+const composerBelowHintStyle: React.CSSProperties = {
+  padding: "0 5px 2px",
+  color: "rgba(232,240,247,0.44)",
+  fontSize: 9,
+  lineHeight: 1.3,
+};
+
+const imageAttachmentStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: 6,
+  borderRadius: 11,
+  background: "rgba(0,0,0,0.18)",
+  fontSize: 9,
+};
+
+const imageThumbStyle: React.CSSProperties = {
+  width: 42,
+  height: 42,
+  borderRadius: 8,
+  objectFit: "cover",
 };
 
 const routeBadgeRowStyle: React.CSSProperties = {
@@ -3327,10 +3620,14 @@ const secondaryButtonStyle: React.CSSProperties = {
 };
 
 const applyDirectButtonStyle: React.CSSProperties = {
-  ...primaryButtonStyle,
-  background: "rgba(76,175,80,0.18)",
-  color: "rgba(46,125,50,0.95)",
-  border: "1px solid rgba(76,175,80,0.45)",
+  padding: "7px 10px",
+  borderRadius: 999,
+  background: "rgba(125,211,199,0.14)",
+  color: "#9be2d7",
+  border: "1px solid rgba(125,211,199,0.28)",
+  fontSize: 10,
+  fontWeight: 750,
+  cursor: "pointer",
 };
 
 const slicerHintStyle: React.CSSProperties = {

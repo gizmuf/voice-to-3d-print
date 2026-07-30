@@ -10,8 +10,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from services.ai.tools_v2 import DesignContext
-from services.codegen.engine import audit_then_run, parameter_snapshot
-from services.codegen.store import save_design
+from services.codegen.engine import DesignBuildError, build_design, parameter_snapshot
+from services.codegen.store import save_build, save_design
 
 
 class UpdateParameterInput(BaseModel):
@@ -102,37 +102,45 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
             "rejected_value": new_value,
         }
 
-    overrides = {p.name: p.value for p in design.parameters}
-    overrides[params.name] = new_value
-
-    sandbox_result = audit_then_run(
-        script=design.script,
-        parameter_overrides=overrides,
-        targets=["stl"],
-        imported_files=design.metadata.get("imported_files") or None,
-    )
-    if not sandbox_result.ok:
-        return {
-            "error": (
-                f"Parameter change rejected: build failed with new value. "
-                f"Sandbox said: {sandbox_result.payload.get('error')}"
-            ),
-            "previous_value": target.value,
-            "rejected_value": params.new_value,
-        }
-
+    previous_value = target.value
+    previous_revision = design.revision_id
     target.value = new_value
     design.parent_revision_id = design.revision_id
     from services.codegen.store import new_revision_id
 
     design.revision_id = new_revision_id()
+    try:
+        build = build_design(
+            design,
+            targets=["stl", "glb"],
+            process=design.process if design.process in ("fdm", "cnc") else "fdm",
+            printer_profile_id=ctx.printer_profile_id,
+        )
+    except DesignBuildError as exc:
+        target.value = previous_value
+        design.revision_id = previous_revision
+        design.parent_revision_id = None
+        return {
+            "error": f"Parameter change rejected: build failed with new value. {exc}",
+            "previous_value": previous_value,
+            "rejected_value": params.new_value,
+        }
+
     save_design(design)
+    save_build(design.id, build)
+    ctx.last_build = build
     return {
         "ok": True,
         "name": params.name,
         "new_value": new_value,
         "new_revision_id": design.revision_id,
         "snapshot": parameter_snapshot(design),
+        "mesh_hash": build.mesh_hash,
+        "bounding_box_mm": build.bounding_box_mm,
+        "artifacts": {kind: artifact.url for kind, artifact in build.artifacts.items()},
+        "manufacturability_status": (
+            build.manufacturability.status if build.manufacturability else None
+        ),
     }
 
 

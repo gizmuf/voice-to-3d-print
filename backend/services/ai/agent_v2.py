@@ -21,6 +21,7 @@ from anthropic import Anthropic
 
 from config import settings
 from services.ai.compaction import maybe_compact_history
+from services.ai.direct_route import ambiguity_question, parse_direct_parameter_edit
 from services.ai.prompts_v2 import SYSTEM_PROMPT, render_turn_context
 from services.ai.telemetry import record_tool_call
 from services.ai.tools_v2 import DesignContext, TOOL_DEFINITIONS, execute as execute_tool
@@ -41,11 +42,13 @@ def _system_blocks(
     *,
     selected_feature_id: str | None = None,
     selected_feature_label: str | None = None,
+    selected_topology_ref: str | None = None,
 ) -> list[dict[str, Any]]:
     selected_block = _selected_feature_context(
         ctx,
         selected_feature_id=selected_feature_id,
         selected_feature_label=selected_feature_label,
+        selected_topology_ref=selected_topology_ref,
     )
     turn_context = render_turn_context(ctx.design, ctx.last_build)
     if selected_block:
@@ -68,8 +71,9 @@ def _selected_feature_context(
     *,
     selected_feature_id: str | None,
     selected_feature_label: str | None,
+    selected_topology_ref: str | None,
 ) -> str:
-    if not selected_feature_id and not selected_feature_label:
+    if not selected_feature_id and not selected_feature_label and not selected_topology_ref:
         return ""
     match = next(
         (
@@ -86,16 +90,17 @@ def _selected_feature_context(
             if match.parent_feature_ids
             else ""
         )
+        topology = f" topology_ref={selected_topology_ref}." if selected_topology_ref else ""
         return (
             "## Selected feature context\n"
             f"User has selected feature `{match.id}` ({match.name}, {match.kind})."
-            f"{parents}{words}\n"
+            f"{parents}{words}{topology}\n"
             "Prefer editing this feature unless the user explicitly asks for a different target.\n"
         )
     label = selected_feature_label or selected_feature_id
     return (
         "## Selected feature context\n"
-        f"User selected feature `{label}`, but it was not found in the current feature graph. "
+        f"User selected feature `{label}` with topology_ref `{selected_topology_ref}`, but it was not found in the current feature graph. "
         "Ask one short clarification before making a targeted edit.\n"
     )
 
@@ -111,15 +116,9 @@ def stream_turn(
     printer_profile_id: str | None = None,
     selected_feature_id: str | None = None,
     selected_feature_label: str | None = None,
+    selected_topology_ref: str | None = None,
 ) -> Iterator[str]:
     started = time.perf_counter()
-
-    if not settings.anthropic_api_key:
-        yield _sse(
-            "error",
-            {"message": "ANTHROPIC_API_KEY is not configured on the backend."},
-        )
-        return
 
     design = get_design(design_id)
     last_build = get_build(design_id)
@@ -132,8 +131,86 @@ def stream_turn(
         current_user_message=user_message,
     )
 
-    history = load_conversation(design_id)
-    history = _repair_dangling_tool_uses(history)
+    history = _repair_dangling_tool_uses(load_conversation(design_id))
+
+    question = ambiguity_question(user_message)
+    direct_edit = parse_direct_parameter_edit(user_message, design.parameters)
+    if question or direct_edit:
+        history.append({"role": "user", "content": user_message})
+        yield _sse(
+            "turn_start",
+            {
+                "design_id": design_id,
+                "revision_id": ctx.design.revision_id,
+                "model": "local",
+            },
+        )
+        if question:
+            history.append({"role": "assistant", "content": [{"type": "text", "text": question}]})
+            save_conversation(design_id, _compact_for_persist(history))
+            yield _sse("assistant_text", {"text": question})
+            yield _sse(
+                "turn_end",
+                {
+                    "design_id": design_id,
+                    "revision_id": ctx.design.revision_id,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0,
+                },
+            )
+            return
+
+        assert direct_edit is not None
+        tool_id = f"local-param-{int(time.time() * 1000)}"
+        tool_input = {
+            "name": direct_edit.name,
+            "new_value": direct_edit.value,
+            "rationale": "Explicit numeric parameter edit parsed locally.",
+        }
+        yield _sse("tool_call_start", {"id": tool_id, "name": "update_parameter", "input": tool_input})
+        tool_started = time.perf_counter()
+        result = execute_tool("update_parameter", tool_input, ctx)
+        record_tool_call(
+            tool_name="update_parameter",
+            success=not bool(result.get("error")),
+            duration_ms=int((time.perf_counter() - tool_started) * 1000),
+            design_id=design_id,
+        )
+        yield _sse(
+            "tool_call_end",
+            {"id": tool_id, "name": "update_parameter", "result": result, "is_error": bool(result.get("error"))},
+        )
+        if result.get("error"):
+            message = f"Nie zastosowałem zmiany: {result['error']}"
+        else:
+            message = f"Gotowe — {direct_edit.name} = {direct_edit.value}. Zmiana wykonana lokalnie, bez kosztu modelu."
+        history.append({"role": "assistant", "content": [{"type": "text", "text": message}]})
+        save_conversation(design_id, _compact_for_persist(history))
+        yield _sse("assistant_text", {"text": message})
+        yield _sse(
+            "turn_end",
+            {
+                "design_id": design_id,
+                "revision_id": ctx.design.revision_id,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+            },
+        )
+        return
+
+    if not settings.anthropic_api_key:
+        yield _sse(
+            "error",
+            {"message": "ANTHROPIC_API_KEY is not configured on the backend."},
+        )
+        return
+
     history, _ = maybe_compact_history(history)
     history.append({"role": "user", "content": user_message})
     yield _sse(
@@ -149,6 +226,7 @@ def stream_turn(
     total_in = total_out = cache_read = cache_write = 0
     failed_tool_calls = 0
     persisted = False
+    recovery_announced = False
 
     def _persist_history() -> None:
         nonlocal persisted
@@ -169,18 +247,35 @@ def stream_turn(
 
     try:
         for iteration in range(MAX_TOOL_ITERATIONS):
+            recovery_mode = failed_tool_calls > 0
+            if recovery_mode and not recovery_announced:
+                yield _sse(
+                    "model_activity",
+                    {
+                        "model": settings.anthropic_chat_model,
+                        "mode": "recovery",
+                        "activity": "Pierwsza próba nie przeszła walidacji — analizuję bezpieczną poprawkę…",
+                    },
+                )
+                recovery_announced = True
             try:
                 response = client.messages.create(
                     model=settings.anthropic_chat_model,
-                    max_tokens=settings.anthropic_max_output_tokens,
+                    max_tokens=(
+                        max(settings.anthropic_max_output_tokens, 3000)
+                        if recovery_mode
+                        else settings.anthropic_max_output_tokens
+                    ),
                     # Sonnet 5 enables adaptive thinking by default. Routine CAD
                     # turns should stay fast and predictable; hard-task routing
                     # can opt into thinking separately when we add it.
-                    thinking={"type": "disabled"},
+                    thinking={"type": "adaptive"} if recovery_mode else {"type": "disabled"},
+                    **({"output_config": {"effort": "medium"}} if recovery_mode else {}),
                     system=_system_blocks(
                         ctx,
                         selected_feature_id=selected_feature_id,
                         selected_feature_label=selected_feature_label,
+                        selected_topology_ref=selected_topology_ref,
                     ),
                     tools=TOOL_DEFINITIONS,
                     messages=history,

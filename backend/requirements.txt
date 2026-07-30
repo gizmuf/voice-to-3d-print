@@ -6,6 +6,7 @@ httpx
 pydantic
 python-dotenv
 trimesh
+networkx>=3.2,<4
 rtree
 manifold3d
 shapely

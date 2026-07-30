@@ -8,6 +8,8 @@ import { Box3, Color, MOUSE, MathUtils, Sphere, Vector3 } from "three";
 
 export type SelectionPayload = {
   objectName: string;
+  topologyRef: string;
+  triangleIndex: number | null;
   point: { x: number; y: number; z: number };
   normal: { x: number; y: number; z: number } | null;
 };
@@ -230,6 +232,8 @@ function LoadedModel({
     onSelect?.(
       {
         objectName: event.object.name || "mesh",
+        topologyRef: `${event.object.name || "mesh"}#triangle:${event.faceIndex ?? "unknown"}`,
+        triangleIndex: event.faceIndex ?? null,
         point: {
           x: Number(event.point.x.toFixed(3)),
           y: Number(event.point.y.toFixed(3)),

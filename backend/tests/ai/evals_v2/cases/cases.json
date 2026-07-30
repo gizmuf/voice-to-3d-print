@@ -188,5 +188,69 @@
     "user_message": "make it print better",
     "expected_clarifying_question": true,
     "expected_no_destructive_calls": true
+  },
+  {
+    "name": "hamster_wheel_24_rungs_polish",
+    "category": "param_edit_polish",
+    "fixture": {"kind": "template", "id": "hamster_wheel"},
+    "user_message": "ustaw dokładnie 24 szczebelki rozłożone równomiernie na kołowrotku",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true}
+  },
+  {
+    "name": "hamster_wheel_12cm_polish",
+    "category": "units_polish",
+    "fixture": {"kind": "template", "id": "hamster_wheel"},
+    "user_message": "zmień średnicę kołowrotka na 12 centymetrów",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true}
+  },
+  {
+    "name": "enclosure_usb_cutout",
+    "category": "multi_param_edit",
+    "fixture": {"kind": "flagship", "id": "enclosure"},
+    "user_message": "make the USB cutout 14 mm wide and 7 mm high",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "bracket_four_slots",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "bracket"},
+    "user_message": "use exactly four mounting slots on each leg",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "phone_stand_cable_hole_polish",
+    "category": "param_edit_polish",
+    "fixture": {"kind": "flagship", "id": "phone_stand"},
+    "user_message": "powiększ otwór na kabel do 12 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "knob_insert_tolerance",
+    "category": "precision_param_edit",
+    "fixture": {"kind": "flagship", "id": "knob"},
+    "user_message": "set the insert pocket diameter to 6.2 mm for a press fit",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "wall_hook_screw_holes_polish",
+    "category": "precision_param_edit_polish",
+    "fixture": {"kind": "flagship", "id": "wall_hook"},
+    "user_message": "ustaw średnicę otworów na śruby na 5 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "ambiguous_stronger_polish",
+    "category": "ambiguity_polish",
+    "fixture": {"kind": "flagship", "id": "bracket"},
+    "user_message": "zrób ten wspornik bardziej wytrzymały",
+    "expected_clarifying_question": true,
+    "expected_no_destructive_calls": true
   }
 ]

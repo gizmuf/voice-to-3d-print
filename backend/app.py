@@ -64,7 +64,7 @@ from services.codegen.templates import (
 from config import settings
 from services.ai_edit import ai_edit_workspace_model
 from services.deepgram_stt import transcribe_audio
-from services.gemini_intent import extract_prompt, extract_prompt_from_image
+from services.gemini_intent import extract_prompt, extract_prompt_from_image_with_usage
 from services.generation import GenerationResult, generate_model, generate_model_from_image
 from services.jewelry_trace import (
     generate_jewelry_concepts,
@@ -236,6 +236,10 @@ class IntentResponse(BaseModel):
 class ImageIntentResponse(BaseModel):
     job_id: str
     prompt: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0
 
 
 class RouteIntentRequest(BaseModel):
@@ -1486,7 +1490,8 @@ async def image_intent(
     try:
         content = await image.read()
         update_job(job_id, {"input.image_size": len(content)})
-        prompt = await extract_prompt_from_image(content, image.content_type or "image/jpeg")
+        result = await extract_prompt_from_image_with_usage(content, image.content_type or "image/jpeg")
+        prompt = result.prompt
     except Exception as exc:
         record_error(job_id, "image-intent", str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1496,7 +1501,14 @@ async def image_intent(
         raise HTTPException(status_code=500, detail="Failed to extract prompt.")
 
     update_job(job_id, {"status": "intent_ready", "input.prompt_final": prompt})
-    return ImageIntentResponse(job_id=job_id, prompt=prompt)
+    return ImageIntentResponse(
+        job_id=job_id,
+        prompt=prompt,
+        model=settings.gemini_model,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cost_usd=result.cost_usd,
+    )
 
 
 @app.post("/projects", response_model=ProjectResponse)
@@ -2618,6 +2630,7 @@ class DesignChatRequest(BaseModel):
     printer_profile_id: str | None = None
     selected_feature_id: str | None = None
     selected_feature_label: str | None = None
+    selected_topology_ref: str | None = None
 
 
 @app.post("/design/{design_id}/chat")
@@ -2629,6 +2642,7 @@ async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
         printer_profile_id=_effective_printer_id(design_id, request.printer_profile_id),
         selected_feature_id=request.selected_feature_id,
         selected_feature_label=request.selected_feature_label,
+        selected_topology_ref=request.selected_topology_ref,
     )
     return StreamingResponse(generator, media_type="text/event-stream")
 

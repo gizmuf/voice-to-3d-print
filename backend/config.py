@@ -74,6 +74,7 @@ class Settings:
         "https://gut-feeling-api-242245666842.us-central1.run.app/generate",
     )
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     # Anthropic / Claude config — used by the new chat agent loop.
     # Verify model IDs against https://docs.anthropic.com/en/docs/about-claude/models
     # at deploy time. Pinned from a single constant so we never scatter version

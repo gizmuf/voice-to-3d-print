@@ -11,11 +11,13 @@ type StreamState = {
   status: "idle" | "streaming" | "error";
   errorMessage?: string;
   activity?: string;
+  model?: string;
 };
 
 type SendOptions = {
   selectedFeatureId?: string | null;
   selectedFeatureLabel?: string | null;
+  selectedTopologyRef?: string | null;
 };
 
 const parseSSEStream = async function* (
@@ -122,6 +124,7 @@ export function useDesignStream(designId: string | null) {
             message,
             selected_feature_id: options.selectedFeatureId || null,
             selected_feature_label: options.selectedFeatureLabel || null,
+            selected_topology_ref: options.selectedTopologyRef || null,
           }),
           signal: controller.signal,
         });
@@ -132,14 +135,23 @@ export function useDesignStream(designId: string | null) {
         for await (const ev of parseSSEStream(response)) {
           if (controller.signal.aborted) break;
           if (ev.event === "turn_start") {
-            setState({ status: "streaming", activity: "Planning the CAD changes…" });
+            const model = typeof ev.data.model === "string" ? ev.data.model : undefined;
+            setState({ status: "streaming", activity: "Planning the CAD changes…", model });
+            updateAssistant((entry) => ({ ...entry, model: model ?? entry.model }));
+          } else if (ev.event === "model_activity") {
+            setState((current) => ({
+              status: "streaming",
+              activity: String(ev.data.activity ?? "Sprawdzam poprawkę…"),
+              model: typeof ev.data.model === "string" ? ev.data.model : current.model,
+            }));
           } else if (ev.event === "tool_call_start") {
-            setState({
+            setState((current) => ({
               status: "streaming",
               activity: activityForTool(String(ev.data.name ?? "")),
-            });
+              model: typeof ev.data.model === "string" ? ev.data.model : current.model,
+            }));
           } else if (ev.event === "tool_call_end") {
-            setState({ status: "streaming", activity: "Checking the result…" });
+            setState((current) => ({ ...current, status: "streaming", activity: "Checking the result…" }));
           }
           if (ev.event === "error") {
             const errorMessage = String(ev.data.message ?? "The CAD agent could not complete this edit.");
@@ -148,7 +160,7 @@ export function useDesignStream(designId: string | null) {
           }
           handleEvent(ev, { updateAssistant, setLatestRevisionId });
         }
-        if (!streamFailed) setState({ status: "idle" });
+        if (!streamFailed) setState((current) => ({ status: "idle", model: current.model }));
       } catch (error) {
         if (controller.signal.aborted) {
           setState({ status: "idle" });
@@ -165,12 +177,13 @@ export function useDesignStream(designId: string | null) {
   const cancel = useCallback(() => abortRef.current?.abort(), []);
 
   const appendLocalTurn = useCallback(
-    (userText: string, assistantText: string, revisionId?: string | null) => {
+    (userText: string, assistantText: string, revisionId?: string | null, model = "local") => {
       const userEntry: ChatTurnEntry = { kind: "user", text: userText };
       const assistantEntry: ChatTurnEntry = {
         kind: "assistant",
         text: assistantText,
         toolCalls: [],
+        model,
         ...(revisionId ? { revisionIdAfter: revisionId } : {}),
       };
       setHistory((prev) => [...prev, userEntry, assistantEntry]);

@@ -4,7 +4,8 @@ Each case loads a fixture (flagship design or pre-built STL plate), fires
 one chat turn, and asserts on tool call shape + (optional) mesh-hash
 change. Skipped wholesale without ``ANTHROPIC_API_KEY``.
 
-Approximate cost: ~$0.05 per case × 12 cases ≈ $0.60 / run.
+Approximate cost: varies by model and prompt cache. The suite prints exact token
+usage per turn; run it deliberately, not as part of the free unit-test lane.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from .checks import run_geometry_checks
 
 
 CASES_PATH = Path(__file__).parent / "cases" / "cases.json"
+EVAL_BASE_URL = os.getenv("PULSAI_EVAL_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
 pytestmark = pytest.mark.skipif(
@@ -71,16 +73,24 @@ def _seed_design_from_fixture(fixture: dict, grid_plate_stl: Path) -> str:
 
     if fixture["kind"] == "flagship":
         r = requests.post(
-            "http://127.0.0.1:8000/design/flagship/fork",
+            f"{EVAL_BASE_URL}/design/flagship/fork",
             json={"flagship_id": fixture["id"]},
             timeout=120,
+        )
+        r.raise_for_status()
+        return r.json()["design_id"]
+    if fixture["kind"] == "template":
+        r = requests.post(
+            f"{EVAL_BASE_URL}/design/create",
+            json={"template_id": fixture["id"], "name": f"Eval: {fixture['id']}", "process": "fdm"},
+            timeout=180,
         )
         r.raise_for_status()
         return r.json()["design_id"]
     if fixture["kind"] == "stl_grid_plate":
         with open(grid_plate_stl, "rb") as fh:
             r = requests.post(
-                "http://127.0.0.1:8000/design/import-stl",
+                f"{EVAL_BASE_URL}/design/import-stl",
                 files={"model": ("grid_plate.stl", fh, "application/sla")},
                 data={"process": "fdm"},
                 timeout=120,
@@ -94,14 +104,14 @@ def _stream_one_turn(design_id: str, message: str) -> dict:
     """Run one chat turn and return parsed events + mesh hash before/after."""
     import requests
 
-    before = requests.get(f"http://127.0.0.1:8000/design/{design_id}").json()
+    before = requests.get(f"{EVAL_BASE_URL}/design/{design_id}").json()
     before_hash = (before.get("latest_build") or {}).get("mesh_hash")
 
     resp = requests.post(
-        f"http://127.0.0.1:8000/design/{design_id}/chat",
+        f"{EVAL_BASE_URL}/design/{design_id}/chat",
         json={"message": message},
         stream=True,
-        timeout=240,
+        timeout=(30, 600),
     )
     resp.raise_for_status()
     buf = ""
@@ -125,7 +135,7 @@ def _stream_one_turn(design_id: str, message: str) -> dict:
             except Exception:
                 pass
 
-    after = requests.get(f"http://127.0.0.1:8000/design/{design_id}").json()
+    after = requests.get(f"{EVAL_BASE_URL}/design/{design_id}").json()
     after_hash = (after.get("latest_build") or {}).get("mesh_hash")
 
     return {
@@ -141,7 +151,12 @@ def _stream_one_turn(design_id: str, message: str) -> dict:
 )
 def test_eval_v2_case(case: dict, grid_plate_stl: Path) -> None:
     design_id = _seed_design_from_fixture(case["fixture"], grid_plate_stl)
-    out = _stream_one_turn(design_id, case["user_message"])
+    try:
+        out = _stream_one_turn(design_id, case["user_message"])
+    finally:
+        import requests
+
+        requests.delete(f"{EVAL_BASE_URL}/design/{design_id}", timeout=30)
 
     successful_tools = [
         d.get("name")

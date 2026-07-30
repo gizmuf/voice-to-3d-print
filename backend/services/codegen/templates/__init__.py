@@ -213,6 +213,10 @@ track_width = param("track_width", 34.0, type="length_mm", min=24.0, max=70.0,
                     doc="Usable width of the continuous running tread.")
 tread_thickness = param("tread_thickness", 2.4, type="length_mm", min=1.6, max=5.0,
                         doc="Radial thickness of the continuous tread.")
+rung_count = int(param("rung_count", 32, type="count", min=8, max=48,
+                       doc="Number of transverse rungs across the running track."))
+rung_diameter = param("rung_diameter", 4.0, type="length_mm", min=2.0, max=8.0,
+                      doc="Diameter of each transverse rung.")
 spoke_count = int(param("spoke_count", 6, type="count", min=3, max=12,
                         doc="Number of radial support ribs."))
 spoke_width = param("spoke_width", 5.0, type="length_mm", min=3.0, max=12.0)
@@ -239,26 +243,48 @@ spoke_mid_radius = hub_radius + spoke_length / 2.0 - 0.6
 spoke_y = -(track_width / 2.0 - spoke_depth / 2.0)
 
 # @feature: continuous_tread
-with BuildPart() as wheel:
-    with Locations((0, 0, axle_height)):
-        Cylinder(
-            radius=wheel_radius,
-            height=track_width,
+ring_mid_radius = wheel_radius - tread_thickness / 2.0
+rung_mid_radius = wheel_radius - rung_diameter / 2.0
+flange_y_left = -(track_width / 2.0 - tread_thickness / 2.0)
+flange_y_right = track_width / 2.0 - tread_thickness / 2.0
+wheel_tread_parts = []
+
+with BuildPart() as left_ring:
+    with Locations((0, flange_y_left, axle_height)):
+        Torus(
+            major_radius=ring_mid_radius,
+            minor_radius=tread_thickness / 2.0,
             rotation=(90, 0, 0),
-            align=(Align.CENTER, Align.CENTER, Align.CENTER),
         )
-        Cylinder(
-            radius=inner_radius,
-            height=track_width + 2.0,
+wheel_tread_parts.append(left_ring.part)
+
+with BuildPart() as right_ring:
+    with Locations((0, flange_y_right, axle_height)):
+        Torus(
+            major_radius=ring_mid_radius,
+            minor_radius=tread_thickness / 2.0,
             rotation=(90, 0, 0),
-            align=(Align.CENTER, Align.CENTER, Align.CENTER),
-            mode=Mode.SUBTRACT,
         )
+wheel_tread_parts.append(right_ring.part)
+
+for index in range(rung_count):
+    angle_rad = math.radians(360.0 * index / rung_count)
+    rung_x = rung_mid_radius * math.cos(angle_rad)
+    rung_z = axle_height + rung_mid_radius * math.sin(angle_rad)
+    with BuildPart() as rung:
+        with Locations((rung_x, 0, rung_z)):
+            Cylinder(
+                radius=rung_diameter / 2.0,
+                height=track_width,
+                rotation=(90, 0, 0),
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+    wheel_tread_parts.append(rung.part)
+wheel_tread = Compound(children=wheel_tread_parts, label="continuous_tread")
 # @end
 
 # @feature: hub_and_spokes
 with BuildPart() as wheel_supported:
-    add(wheel.part)
     with Locations((0, spoke_y, axle_height)):
         Cylinder(
             radius=hub_radius,
@@ -287,7 +313,7 @@ with BuildPart() as wheel_supported:
             align=(Align.CENTER, Align.CENTER, Align.CENTER),
             mode=Mode.SUBTRACT,
         )
-wheel = wheel_supported
+wheel_shape = Compound(children=[wheel_tread, wheel_supported.part], label="wheel")
 # @end
 
 stand_y = -(track_width / 2.0 + stand_gap + stand_thickness / 2.0)
@@ -339,10 +365,10 @@ with BuildPart() as axle:
         )
 # @end
 
-wheel.part.label = "wheel"
+wheel_shape.label = "wheel"
 stand.part.label = "stand"
 axle.part.label = "axle"
-result = Compound(children=[wheel.part, stand.part, axle.part], label="hamster_wheel")
+result = Compound(children=[wheel_shape, stand.part, axle.part], label="hamster_wheel")
 '''
 
 
