@@ -463,7 +463,6 @@ def health() -> dict:
     trellis2_image_enabled = bool(settings.trellis2_api_url and settings.trellis2_image_endpoint)
     triposr_enabled = bool(settings.triposr_root and Path(settings.triposr_root).exists())
     slicer_ready = Path(settings.prusaslicer_path).exists()
-    gcode_ready = "gcode" in (manifest.get("artifacts") or {})
     providers = {
         "meshy": {"enabled": bool(settings.meshy_api_key), "cost": "paid", "modes": ["text", "image"]},
         "tripo": {"enabled": bool(settings.tripo_api_key), "cost": "paid", "modes": ["text", "image"]},
@@ -2742,6 +2741,7 @@ def design_print_bundle_endpoint(design_id: str, request: PrintBundleRequest) ->
         for issue in issues
     ]
     slicer_ready = Path(settings.prusaslicer_path).exists()
+    gcode_ready = "gcode" in (manifest.get("artifacts") or {})
     mass = estimate.get("filament_g")
     minutes = estimate.get("print_minutes")
     if status == "safe" and gcode_ready:

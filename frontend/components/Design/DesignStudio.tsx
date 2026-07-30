@@ -859,7 +859,8 @@ export default function DesignStudio() {
     // Cache-bust by mesh hash. The backend overwrites the GLB at the same
     // URL on every rebuild, so without this the browser keeps showing the
     // cached old geometry even though the build was successful.
-    const v = design?.latest_build?.mesh_hash || design?.revision_id;
+    const artifactVersion = design?.latest_build?.mesh_hash || design?.revision_id;
+    const v = artifactVersion ? `${artifactVersion}-assembly-v1` : null;
     if (!v) return resolved;
     return resolved.includes("?") ? `${resolved}&v=${v}` : `${resolved}?v=${v}`;
   }, [
