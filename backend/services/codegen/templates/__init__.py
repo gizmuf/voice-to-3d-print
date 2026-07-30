@@ -579,6 +579,181 @@ result = shape
 '''
 
 
+_HAMSTER_RUNG_FEATURE = '''# @feature: continuous_tread
+rung_count = int(param("rung_count", 24, type="count", min=8, max=48,
+                       doc="Number of transverse rungs across the running track."))
+rung_diameter = param("rung_diameter", 4.0, type="length_mm", min=2.0, max=8.0,
+                      doc="Diameter of each transverse rung.")
+ring_mid_radius = wheel_radius - tread_thickness / 2.0
+flange_y_left = -(track_width / 2.0 - tread_thickness / 2.0)
+flange_y_right = track_width / 2.0 - tread_thickness / 2.0
+wheel_tread_parts = []
+
+# Keep the rings and rungs as a compound of valid solids. Fusing dozens of
+# touching cylinders is unnecessary for printing and dominates preview time.
+with BuildPart() as left_ring:
+    with Locations((0, flange_y_left, axle_height)):
+        Torus(
+            major_radius=ring_mid_radius,
+            minor_radius=tread_thickness / 2.0,
+            rotation=(90, 0, 0),
+        )
+wheel_tread_parts.append(left_ring.part)
+
+with BuildPart() as right_ring:
+    with Locations((0, flange_y_right, axle_height)):
+        Torus(
+            major_radius=ring_mid_radius,
+            minor_radius=tread_thickness / 2.0,
+            rotation=(90, 0, 0),
+        )
+wheel_tread_parts.append(right_ring.part)
+
+# Transverse rungs across the track; these are not radial spokes.
+for index in range(rung_count):
+    angle_rad = math.radians(360.0 * index / rung_count)
+    rung_x = ring_mid_radius * math.cos(angle_rad)
+    rung_z = axle_height + ring_mid_radius * math.sin(angle_rad)
+    with BuildPart() as rung:
+        with Locations((rung_x, 0, rung_z)):
+            Cylinder(
+                radius=rung_diameter / 2.0,
+                height=track_width,
+                rotation=(90, 0, 0),
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+    wheel_tread_parts.append(rung.part)
+wheel_tread = Compound(children=wheel_tread_parts, label="continuous_tread")
+# @end
+
+# @feature: hub_and_spokes
+with BuildPart() as wheel_support:
+    with Locations((0, spoke_y, axle_height)):
+        Cylinder(
+            radius=hub_radius,
+            height=spoke_depth,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+        )
+    for index in range(spoke_count):
+        angle_deg = index * 360.0 / spoke_count
+        angle_rad = math.radians(angle_deg)
+        spoke_x = math.sin(angle_rad) * spoke_mid_radius
+        spoke_z = axle_height + math.cos(angle_rad) * spoke_mid_radius
+        with Locations((spoke_x, spoke_y, spoke_z)):
+            Box(
+                spoke_width,
+                spoke_depth,
+                spoke_length,
+                rotation=(0, angle_deg, 0),
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+    with Locations((0, 0, axle_height)):
+        Cylinder(
+            radius=axle_hole_radius,
+            height=track_width + 2.0,
+            rotation=(90, 0, 0),
+            align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            mode=Mode.SUBTRACT,
+        )
+wheel_shape = Compound(children=[wheel_tread, wheel_support.part], label="wheel")
+# @end'''
+
+
+def _measurement_mm(prompt: str, labels: str) -> float | None:
+    match = re.search(
+        rf"(?:{labels})\w*\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|centymetr\w*)",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = float(match.group(1).replace(",", "."))
+    unit = match.group(2).lower()
+    return value * 10.0 if unit == "cm" or unit.startswith("centymetr") else value
+
+
+def _rung_count(prompt: str) -> int | None:
+    match = re.search(
+        r"(\d+)\s*(?:szczebel\w*|rung\w*)",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
+
+
+def _replace_param_default(script: str, name: str, value: float | int) -> str:
+    rendered = str(int(value)) if isinstance(value, int) else f"{value:.1f}"
+    return re.sub(
+        rf'(param\("{re.escape(name)}",\s*)[-+]?\d+(?:\.\d+)?',
+        rf"\g<1>{rendered}",
+        script,
+        count=1,
+    )
+
+
+def _hamster_wheel_seed(prompt: str) -> str:
+    script = HAMSTER_WHEEL
+    rung_count = _rung_count(prompt)
+    if rung_count is not None and 8 <= rung_count <= 48:
+        script = re.sub(
+            r"# @feature: continuous_tread\n.*?# @end\n\n# @feature: hub_and_spokes\n.*?# @end",
+            _HAMSTER_RUNG_FEATURE,
+            script,
+            count=1,
+            flags=re.DOTALL,
+        )
+        script = script.replace('wheel.part.label = "wheel"', 'wheel_shape.label = "wheel"')
+        script = script.replace(
+            "Compound(children=[wheel.part, stand.part, axle.part]",
+            "Compound(children=[wheel_shape, stand.part, axle.part]",
+        )
+        script = _replace_param_default(script, "rung_count", rung_count)
+
+    diameter = _measurement_mm(prompt, r"średnic|srednic|diameter")
+    width = _measurement_mm(prompt, r"szerokoś|szerokos|width")
+    if diameter is not None and 80.0 <= diameter <= 260.0:
+        script = _replace_param_default(script, "wheel_diameter", diameter)
+    if width is not None and 24.0 <= width <= 70.0:
+        script = _replace_param_default(script, "track_width", width)
+    return script
+
+
+def prompt_seed_is_complete(prompt: str, template_id: str | None) -> bool:
+    """Whether the deterministic seed fully satisfies the explicit prompt.
+
+    This deliberately stays conservative: unsupported mounting/bearing requests
+    still go to the CAD agent, while the common hamster-wheel dimensions and
+    rung count are handled locally and immediately.
+    """
+    if template_id != "hamster_wheel":
+        return False
+    needle = (prompt or "").lower()
+    unsupported = (
+        "przyssawk",
+        "suction",
+        "łożysk",
+        "lozysk",
+        "bearing",
+        "wall mount",
+        "ścienn",
+        "scienn",
+    )
+    if any(word in needle for word in unsupported):
+        return False
+    if ("szczebel" in needle or "rung" in needle) and _rung_count(prompt) is None:
+        return False
+    if any(word in needle for word in ("średnic", "srednic", "diameter")):
+        diameter = _measurement_mm(prompt, r"średnic|srednic|diameter")
+        if diameter is None or not 80.0 <= diameter <= 260.0:
+            return False
+    if any(word in needle for word in ("szerokoś", "szerokos", "width")):
+        width = _measurement_mm(prompt, r"szerokoś|szerokos|width")
+        if width is None or not 24.0 <= width <= 70.0:
+            return False
+    return True
+
+
 _SEED_SCRIPTS: dict[str, tuple[str, str]] = {
     # template_id -> (display name, build123d script)
     "perforated_disc": ("Perforated disc", PERFORATED_DISC),
@@ -649,7 +824,15 @@ def seed_for(prompt: str) -> tuple[str, str, str]:
     """Pick a template from a free-form prompt; return (template_id, name, script)."""
     tid = match_template_id(prompt) or "simple_box"
     name, script = _SEED_SCRIPTS[tid]
+    if tid == "hamster_wheel":
+        script = _hamster_wheel_seed(prompt)
     return tid, name, script
 
 
-__all__ = ["list_template_ids", "get_seed_script", "match_template_id", "seed_for"]
+__all__ = [
+    "list_template_ids",
+    "get_seed_script",
+    "match_template_id",
+    "prompt_seed_is_complete",
+    "seed_for",
+]

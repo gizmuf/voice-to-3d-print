@@ -26,6 +26,8 @@ from config import settings
 from services.codegen.engine import build_design
 from services.codegen.estimate import parse_gcode_estimate
 from services.codegen.models import BuildArtifact, Design
+from services.codegen.store import save_build
+from services.codegen import cloud_store
 
 
 SOFTWARE_VERSION = "pulsai-3d/0.1.0"
@@ -119,6 +121,9 @@ def export_preset_bundle(
     if setup_notes_path is not None:
         files_to_zip.append(setup_notes_path)
 
+    # Persist first so the manifest contains durable Cloud Storage URLs.
+    save_build(design.id, build)
+
     manifest = {
         "preset": preset,
         "design_id": design.id,
@@ -146,11 +151,12 @@ def export_preset_bundle(
         for fp in files_to_zip:
             zf.write(fp, arcname=fp.name)
 
+    bundle_url = cloud_store.upload_export_file(design.id, preset, bundle_path)
     return {
         "preset": preset,
         "design_id": design.id,
         "revision_id": build.revision_id,
-        "bundle_url": f"/artifacts/designs/{design.id}/exports/{preset}/{bundle_path.name}",
+        "bundle_url": bundle_url or f"/artifacts/designs/{design.id}/exports/{preset}/{bundle_path.name}",
         "manifest": manifest,
         "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
     }

@@ -51,11 +51,13 @@ from services.codegen.store import (
     list_designs,
     load_conversation as load_design_conversation,
     save_build,
+    save_conversation as save_design_conversation,
 )
 from services.codegen.templates import (
     get_seed_script as get_template_seed,
     list_template_ids,
     match_template_id,
+    prompt_seed_is_complete,
     seed_for as seed_template_for,
 )
 
@@ -1787,6 +1789,7 @@ class DesignCreateResponse(BaseModel):
     features: list[dict]
     initial_build: dict | None
     editable_model: dict
+    requires_agent: bool = False
 
 
 class JewelryTraceCreateRequest(BaseModel):
@@ -1814,8 +1817,8 @@ def _seed_design_record(request: DesignCreateRequest):
     if request.prompt:
         matched_template_id = match_template_id(request.prompt)
         if matched_template_id:
-            display, script = get_template_seed(matched_template_id)
-            return matched_template_id, request.name or display, script
+            template_id, display, script = seed_template_for(request.prompt)
+            return template_id, request.name or display, script
         if not settings.anthropic_api_key:
             raise HTTPException(
                 status_code=503,
@@ -1835,6 +1838,10 @@ def _seed_design_record(request: DesignCreateRequest):
 @app.post("/design/create", response_model=DesignCreateResponse)
 def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse:
     template_id, name, script = _seed_design_record(request)
+    requires_agent = bool(
+        request.prompt
+        and not prompt_seed_is_complete(request.prompt, template_id)
+    )
 
     try:
         # Initial seed only needs STL + GLB so the user sees the model fast.
@@ -1892,6 +1899,39 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
     build = build_from_sandbox_result(design, sandbox_result, process=request.process)
     save_build(design.id, build)
 
+    if request.prompt and not requires_agent:
+        values = {parameter.name: parameter.value for parameter in design.parameters}
+        summary_bits = []
+        for key, label in (
+            ("wheel_diameter", "średnica"),
+            ("track_width", "szerokość"),
+            ("rung_count", "szczebelki"),
+            ("spoke_count", "szprychy"),
+        ):
+            if key in values:
+                suffix = " mm" if key in {"wheel_diameter", "track_width"} else ""
+                summary_bits.append(f"{label}: {values[key]}{suffix}")
+        summary = ", ".join(summary_bits)
+        save_design_conversation(
+            design.id,
+            [
+                {"role": "user", "content": request.prompt},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Utworzyłem model od razu z walidowanego szablonu parametrycznego"
+                                + (f" — {summary}." if summary else ".")
+                                + " Pierwsza wersja nie wymagała wywołania płatnego modelu CAD."
+                            ),
+                        }
+                    ],
+                },
+            ],
+        )
+
     editable_model = design_to_editable_model(design, build)
     return DesignCreateResponse(
         design_id=design.id,
@@ -1909,6 +1949,7 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
         },
         editable_model=editable_model.model_dump(mode="json"),
+        requires_agent=requires_agent,
     )
 
 
@@ -2556,15 +2597,10 @@ def design_delete_endpoint(design_id: str) -> dict:
     artifacts, and the conversation. The user has to confirm in the UI; we
     don't ask twice on the backend."""
     _validate_design_id(design_id)
-    import shutil
+    from services.codegen.store import delete_design
 
-    target = settings.output_dir / "designs" / design_id
-    if not target.exists():
+    if not delete_design(design_id):
         raise HTTPException(status_code=404, detail="Design not found.")
-    try:
-        shutil.rmtree(target)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"deleted_design_id": design_id}
 
 

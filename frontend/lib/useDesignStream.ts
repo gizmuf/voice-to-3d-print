@@ -10,6 +10,7 @@ type SSEvent = { event: string; data: Record<string, unknown> };
 type StreamState = {
   status: "idle" | "streaming" | "error";
   errorMessage?: string;
+  activity?: string;
 };
 
 type SendOptions = {
@@ -61,14 +62,22 @@ export function useDesignStream(designId: string | null) {
     if (!designId) {
       setHistory([]);
       setLatestRevisionId(null);
+      setState({ status: "idle" });
       return;
     }
+    // A newly created design starts with an empty local history. Clear any
+    // previous design immediately, but do not let the hydration response
+    // overwrite a prompt that is submitted while this request is in flight.
+    setHistory([]);
+    setLatestRevisionId(null);
+    setState({ status: "idle" });
     let cancelled = false;
     fetch(`${backendUrl}/design/${designId}/conversation`)
       .then((res) => (res.ok ? res.json() : null))
       .then((payload) => {
         if (cancelled || !payload) return;
-        setHistory(hydrate(payload.messages || []));
+        const hydrated = hydrate(payload.messages || []);
+        setHistory((current) => (current.length > 0 ? current : hydrated));
       })
       .catch(() => undefined);
     return () => {
@@ -86,7 +95,7 @@ export function useDesignStream(designId: string | null) {
       const userEntry: ChatTurnEntry = { kind: "user", text: message };
       const assistantEntry: ChatTurnEntry = { kind: "assistant", text: "", toolCalls: [] };
       setHistory((prev) => [...prev, userEntry, assistantEntry]);
-      setState({ status: "streaming" });
+      setState({ status: "streaming", activity: "Understanding your request…" });
 
       const updateAssistant = (
         update: (
@@ -122,6 +131,16 @@ export function useDesignStream(designId: string | null) {
         let streamFailed = false;
         for await (const ev of parseSSEStream(response)) {
           if (controller.signal.aborted) break;
+          if (ev.event === "turn_start") {
+            setState({ status: "streaming", activity: "Planning the CAD changes…" });
+          } else if (ev.event === "tool_call_start") {
+            setState({
+              status: "streaming",
+              activity: activityForTool(String(ev.data.name ?? "")),
+            });
+          } else if (ev.event === "tool_call_end") {
+            setState({ status: "streaming", activity: "Checking the result…" });
+          }
           if (ev.event === "error") {
             const errorMessage = String(ev.data.message ?? "The CAD agent could not complete this edit.");
             streamFailed = true;
@@ -161,6 +180,19 @@ export function useDesignStream(designId: string | null) {
   );
 
   return { history, state, latestRevisionId, send, cancel, appendLocalTurn };
+}
+
+function activityForTool(toolName: string): string {
+  const labels: Record<string, string> = {
+    read_design: "Reading the current design…",
+    query_library: "Looking up a reliable CAD pattern…",
+    update_parameter: "Updating dimensions…",
+    replace_feature: "Rebuilding the requested feature…",
+    rewrite_design: "Rewriting the parametric model…",
+    run_build: "Building the new 3D model…",
+    check_manufacturability: "Checking printability…",
+  };
+  return labels[toolName] ?? "Applying CAD changes…";
 }
 
 // `normalizeError` was hoisted to ../lib/backend.ts as `normalizeFetchError`

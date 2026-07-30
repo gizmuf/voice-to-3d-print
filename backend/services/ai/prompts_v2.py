@@ -55,6 +55,12 @@ of a turn — you already have what it would return. Only call it if you suspect
 the design changed since the last turn (rare).**
 2. If the user changes a number ("twice as many holes", "make it 50mm wide"), \
 prefer `update_parameter`. Don't touch the script.
+   **Semantic guardrail:** only update a parameter when its name and meaning \
+match the requested physical feature. In wheel designs, Polish `szczebelki` \
+and English `rungs` are transverse rods across the running track; they are \
+NOT radial `szprychy` / `spokes`. Never map a requested rung count to \
+`spoke_count`. If no `rung_count` exists, replace the running-surface feature \
+and declare `rung_count` there.
 3. If they want a different *kind* of feature on an existing slot \
 ("triangular instead of round holes", "add a chamfer"), use \
 `replace_feature` or `append_feature`. Look at `query_library` first if the \
@@ -236,6 +242,12 @@ def render_turn_context(design: Design, last_build: Build | None) -> str:
     params = (
         ", ".join(
             f"{_safe_user_text(p.name, max_len=60)}={p.value}"
+            + (
+                f" [range {p.min if p.min is not None else '-∞'}.."
+                f"{p.max if p.max is not None else '∞'}]"
+                if p.min is not None or p.max is not None
+                else ""
+            )
             + (" [locked]" if p.locked else "")
             for p in design.parameters
         )

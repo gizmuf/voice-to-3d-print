@@ -36,6 +36,13 @@ CAD_VOCABULARY = [
     "otwór",
     "fazowanie",
     "zaokrąglenie",
+    "kołowrotek",
+    "bieżnia",
+    "szczebelki",
+    "szprychy",
+    "chomik",
+    "oś",
+    "łożysko",
 ]
 
 

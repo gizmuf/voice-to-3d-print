@@ -2,16 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { resolveBackendUrl } from "../lib/backend";
+import { resolveSttUrl } from "../lib/backend";
 
 type SpeechToTextButtonProps = {
   disabled?: boolean;
   onTranscript: (text: string) => void;
   compact?: boolean;
   language?: "pl" | "en" | "multi";
+  onStateChange?: (state: VoiceState, message?: string) => void;
 };
 
-type VoiceState = "idle" | "recording" | "transcribing";
+export type VoiceState = "idle" | "requesting" | "recording" | "transcribing";
 
 const MAX_RECORDING_MS = 90_000;
 
@@ -20,8 +21,9 @@ export default function SpeechToTextButton({
   onTranscript,
   compact = false,
   language = "pl",
+  onStateChange,
 }: SpeechToTextButtonProps) {
-  const backendUrl = resolveBackendUrl();
+  const sttUrl = resolveSttUrl();
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -29,6 +31,11 @@ export default function SpeechToTextButton({
   const [supported, setSupported] = useState(true);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [error, setError] = useState<string | null>(null);
+
+  const updateVoiceState = (state: VoiceState, message?: string) => {
+    setVoiceState(state);
+    onStateChange?.(state, message);
+  };
 
   useEffect(() => {
     setSupported(window.isSecureContext);
@@ -51,13 +58,14 @@ export default function SpeechToTextButton({
   };
 
   const uploadRecording = async (blob: Blob) => {
-    setVoiceState("transcribing");
+    updateVoiceState("transcribing");
+    let finalMessage: string | undefined;
     try {
       const form = new FormData();
       const extension = blob.type.includes("ogg") ? "ogg" : "webm";
       form.append("audio", blob, `pulsai-recording.${extension}`);
       form.append("language", language);
-      const response = await fetch(`${backendUrl}/stt`, { method: "POST", body: form });
+      const response = await fetch(`${sttUrl}/stt`, { method: "POST", body: form });
       const payload = (await response.json().catch(() => null)) as
         | { transcript?: string; detail?: string }
         | null;
@@ -66,10 +74,12 @@ export default function SpeechToTextButton({
       if (!transcript) throw new Error("Nie usłyszałem wyraźnej komendy. Spróbuj ponownie.");
       onTranscript(transcript);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Nie udało się rozpoznać nagrania.");
+      const message = uploadError instanceof Error ? uploadError.message : "Nie udało się rozpoznać nagrania.";
+      setError(message);
+      finalMessage = message;
     } finally {
       releaseMicrophone();
-      setVoiceState("idle");
+      updateVoiceState("idle", finalMessage);
     }
   };
 
@@ -80,6 +90,7 @@ export default function SpeechToTextButton({
   const start = async () => {
     if (disabled || voiceState !== "idle") return;
     setError(null);
+    updateVoiceState("requesting");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -104,7 +115,7 @@ export default function SpeechToTextButton({
       recorder.onerror = () => {
         setError("Nagrywanie zostało przerwane. Spróbuj ponownie.");
         releaseMicrophone();
-        setVoiceState("idle");
+        updateVoiceState("idle", "Nagrywanie zostało przerwane. Spróbuj ponownie.");
       };
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
@@ -112,29 +123,31 @@ export default function SpeechToTextButton({
         if (blob.size === 0) {
           setError("Nagranie jest puste. Spróbuj ponownie.");
           releaseMicrophone();
-          setVoiceState("idle");
+          updateVoiceState("idle", "Nagranie jest puste. Spróbuj ponownie.");
           return;
         }
         void uploadRecording(blob);
       };
       recorder.start(250);
-      setVoiceState("recording");
+      updateVoiceState("recording");
       stopTimerRef.current = window.setTimeout(stop, MAX_RECORDING_MS);
     } catch (microphoneError) {
       releaseMicrophone();
-      setVoiceState("idle");
-      setError(
+      const message =
         microphoneError instanceof DOMException && microphoneError.name === "NotAllowedError"
           ? "Zezwól Pulsai na dostęp do mikrofonu."
-          : "Nie udało się uruchomić mikrofonu.",
-      );
+          : "Nie udało się uruchomić mikrofonu.";
+      setError(message);
+      updateVoiceState("idle", message);
     }
   };
 
   const label =
     voiceState === "recording"
       ? "Zatrzymaj i przepisz"
-      : voiceState === "transcribing"
+      : voiceState === "requesting"
+        ? "Uruchamiam mikrofon"
+        : voiceState === "transcribing"
         ? "Przepisuję nagranie"
         : "Powiedz po polsku";
 
@@ -143,16 +156,28 @@ export default function SpeechToTextButton({
       <button
         type="button"
         onClick={voiceState === "recording" ? stop : start}
-        disabled={disabled || !supported || voiceState === "transcribing"}
+        disabled={disabled || !supported || voiceState === "transcribing" || voiceState === "requesting"}
         aria-label={label}
         title={supported ? `${label} — model Nova-3, język polski` : "Nagrywanie audio jest niedostępne w tej przeglądarce"}
         style={buttonStyle(voiceState, compact)}
       >
         <MicrophoneIcon />
-        {compact ? null : <span>{voiceState === "recording" ? "Zakończ" : voiceState === "transcribing" ? "Przepisuję…" : "Mów"}</span>}
+        {compact ? null : (
+          <span>
+            {voiceState === "recording"
+              ? "Zakończ"
+              : voiceState === "requesting"
+                ? "Uruchamiam…"
+                : voiceState === "transcribing"
+                  ? "Przepisuję…"
+                  : "Mów"}
+          </span>
+        )}
       </button>
-      {voiceState === "recording" ? <span style={statusStyle}>Słucham po polsku…</span> : null}
-      {error ? <span style={errorStyle}>{error}</span> : null}
+      {!compact && voiceState === "recording" ? <span style={statusStyle}>Słucham po polsku…</span> : null}
+      {!compact && voiceState === "requesting" ? <span style={statusStyle}>Uruchamiam…</span> : null}
+      {!compact && voiceState === "transcribing" ? <span style={statusStyle}>Przepisuję…</span> : null}
+      {error && !compact ? <span style={errorStyle}>{error}</span> : null}
     </div>
   );
 }
@@ -189,8 +214,8 @@ const buttonStyle = (state: VoiceState, compact: boolean): React.CSSProperties =
   font: "inherit",
   fontSize: 12,
   fontWeight: 800,
-  cursor: state === "transcribing" ? "wait" : "pointer",
-  opacity: state === "transcribing" ? 0.72 : 1,
+  cursor: state === "transcribing" || state === "requesting" ? "wait" : "pointer",
+  opacity: state === "transcribing" || state === "requesting" ? 0.72 : 1,
 });
 
 const statusStyle: React.CSSProperties = { color: "#9bc9ff", fontSize: 10, lineHeight: 1.2 };

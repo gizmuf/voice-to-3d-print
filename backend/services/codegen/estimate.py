@@ -28,7 +28,7 @@ _TIME_RE = re.compile(
     r"(?:(\d+)\s*d\s*)?(?:(\d+)\s*h\s*)?(?:(\d+)\s*m\s*)?(?:(\d+)\s*s)?",
     re.IGNORECASE,
 )
-_GRAMS_RE = re.compile(r"filament used\s*\[g\]\s*=\s*([\d.]+)", re.IGNORECASE)
+_GRAMS_RE = re.compile(r"(?:total\s+)?filament used\s*\[g\]\s*=\s*([\d.]+)", re.IGNORECASE)
 _CM3_RE = re.compile(r"filament used\s*\[cm3\]\s*=\s*([\d.]+)", re.IGNORECASE)
 
 
@@ -45,9 +45,9 @@ def filament_price_usd_per_g() -> float:
 def parse_gcode_estimate(gcode_path: Path) -> PrintEstimate | None:
     """Parse a PrusaSlicer G-code file and return a PrintEstimate.
 
-    Reads up to 2 KB from the head and 4 KB from the tail — the comments we
-    care about live in the file's ``configuration block`` near the end and
-    in the slicer banner near the start.
+    Reads up to 2 KB from the head and 512 KB from the tail. PrusaSlicer 2.9
+    appends a large configuration block after the estimates, so the earlier
+    4 KB tail window skipped real time/material values on production files.
     """
     if not gcode_path.exists():
         return None
@@ -55,9 +55,10 @@ def parse_gcode_estimate(gcode_path: Path) -> PrintEstimate | None:
         size = gcode_path.stat().st_size
         with gcode_path.open("r", encoding="utf-8", errors="replace") as fh:
             head = fh.read(2048)
-            if size > 6144:
-                fh.seek(max(size - 4096, 0))
-                tail = fh.read(4096)
+            tail_bytes = 512 * 1024
+            if size > 2048:
+                fh.seek(max(size - tail_bytes, 0))
+                tail = fh.read(tail_bytes)
             else:
                 tail = ""
         text = head + "\n" + tail
@@ -87,6 +88,16 @@ def parse_gcode_estimate(gcode_path: Path) -> PrintEstimate | None:
             cm3 = float(c.group(1))
         except ValueError:
             pass
+
+    # The distro default profile reports 0g when filament density is absent,
+    # while still reporting a valid volume. Use conservative PLA density so
+    # the user gets a useful material estimate instead of a false zero.
+    if (grams is None or grams <= 0) and cm3 is not None and cm3 > 0:
+        try:
+            density_g_cm3 = float(os.getenv("FILAMENT_DENSITY_G_CM3", "1.24"))
+        except ValueError:
+            density_g_cm3 = 1.24
+        grams = cm3 * density_g_cm3
 
     if grams is None and minutes is None:
         return None

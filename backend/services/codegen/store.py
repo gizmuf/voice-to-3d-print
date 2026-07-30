@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from config import settings
+from services.codegen import cloud_store
 from services.codegen.models import Build, Design, DesignRecord
 
 
@@ -89,8 +90,9 @@ def save_design(design: Design) -> Design:
     for feature in design.features:
         if not feature.revision_id:
             feature.revision_id = design.revision_id
+    payload = design.model_dump(mode="json")
     path = _design_path(design.id)
-    path.write_text(json.dumps(design.model_dump(mode="json"), indent=2))
+    path.write_text(json.dumps(payload, indent=2))
     _feature_graph_path(design.id).write_text(
         json.dumps(
             {
@@ -101,20 +103,27 @@ def save_design(design: Design) -> Design:
             indent=2,
         )
     )
+    cloud_store.save_design_payload(design.id, payload)
     return design
 
 
 def get_design(design_id: str) -> Design:
     path = _design_path(design_id)
     if not path.exists():
-        raise HTTPException(status_code=404, detail=f"Design {design_id} not found.")
+        payload = cloud_store.load_design_payload(design_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail=f"Design {design_id} not found.")
+        path.write_text(json.dumps(payload, indent=2))
     return Design.model_validate_json(path.read_text())
 
 
 def get_design_or_none(design_id: str) -> Design | None:
     path = _design_path(design_id)
     if not path.exists():
-        return None
+        payload = cloud_store.load_design_payload(design_id)
+        if payload is None:
+            return None
+        path.write_text(json.dumps(payload, indent=2))
     try:
         return Design.model_validate_json(path.read_text())
     except Exception as exc:
@@ -126,21 +135,25 @@ def get_design_or_none(design_id: str) -> Design | None:
 
 
 def save_build(design_id: str, build: Build) -> Build:
+    cloud_store.upload_build_artifacts(design_id, build)
     path = _build_path(design_id)
-    path.write_text(json.dumps(build.model_dump(mode="json"), indent=2))
+    build_payload = build.model_dump(mode="json")
+    path.write_text(json.dumps(build_payload, indent=2))
     revision_dir = _design_dir(design_id) / "revisions" / build.revision_id
     revision_dir.mkdir(parents=True, exist_ok=True)
     (revision_dir / "build.json").write_text(json.dumps(build.model_dump(mode="json"), indent=2))
     # Snapshot the design (script + parameters) alongside the build so a
     # later restore_revision can fully rewind, not just promote artifacts.
     design = get_design_or_none(design_id)
+    design_payload = design.model_dump(mode="json") if design is not None else None
+    feature_graph = None
     if design is not None:
         (revision_dir / "design.json").write_text(
             json.dumps(design.model_dump(mode="json"), indent=2)
         )
         (revision_dir / "feature_graph.json").write_text(
             json.dumps(
-                {
+                feature_graph := {
                     "design_id": design.id,
                     "revision_id": design.revision_id,
                     "features": [f.model_dump(mode="json") for f in design.features],
@@ -148,6 +161,12 @@ def save_build(design_id: str, build: Build) -> Build:
                 indent=2,
             )
         )
+    cloud_store.save_build_payload(
+        design_id,
+        build_payload,
+        design_payload=design_payload,
+        feature_graph=feature_graph,
+    )
     _sync_to_legacy_workspace(design_id, build)
     prune_revisions(design_id, keep_last=settings.revision_keep_last)
     return build
@@ -254,7 +273,10 @@ def _sync_to_legacy_workspace(design_id: str, build: Build) -> None:
 def get_build(design_id: str) -> Build | None:
     path = _build_path(design_id)
     if not path.exists():
-        return None
+        payload = cloud_store.load_build_payload(design_id)
+        if payload is None:
+            return None
+        path.write_text(json.dumps(payload, indent=2))
     try:
         return Build.model_validate_json(path.read_text())
     except Exception:
@@ -263,20 +285,53 @@ def get_build(design_id: str) -> Build | None:
 
 def get_record(design_id: str) -> DesignRecord:
     design = get_design(design_id)
-    return DesignRecord(design=design, latest_build=get_build(design_id))
+    build = get_build(design_id)
+    if _build_artifacts_need_regeneration(build):
+        from services.codegen.engine import build_design
+
+        build = build_design(
+            design,
+            targets=["stl", "glb"],
+            process=design.process if design.process in {"fdm", "cnc"} else "fdm",
+            printer_profile_id=design.printer_profile_id,
+        )
+        save_build(design.id, build)
+    return DesignRecord(design=design, latest_build=build)
+
+
+def _build_artifacts_need_regeneration(build: Build | None) -> bool:
+    if build is None:
+        return True
+    for kind in ("stl", "glb"):
+        artifact = build.artifacts.get(kind)
+        if artifact is None:
+            return True
+        if artifact.url.startswith("http://") or artifact.url.startswith("https://"):
+            continue
+        if not Path(artifact.path).is_file():
+            return True
+    return False
 
 
 def list_designs() -> list[Design]:
-    out: list[Design] = []
+    by_id: dict[str, Design] = {}
     if not _root().exists():
-        return out
+        return []
     for child in _root().iterdir():
         if not child.is_dir():
             continue
         try:
-            out.append(Design.model_validate_json((child / "design.json").read_text()))
+            design = Design.model_validate_json((child / "design.json").read_text())
+            by_id[design.id] = design
         except Exception:
             continue
+    for payload in cloud_store.list_design_payloads():
+        try:
+            design = Design.model_validate(payload)
+            by_id[design.id] = design
+        except Exception:
+            continue
+    out = list(by_id.values())
     out.sort(key=lambda d: d.metadata.get("updated_at", ""), reverse=True)
     return out
 
@@ -301,7 +356,10 @@ def update_design_script(
 def load_conversation(design_id: str) -> list[dict]:
     path = _conversation_path(design_id)
     if not path.exists():
-        return []
+        remote = cloud_store.load_conversation_payload(design_id)
+        if remote is None:
+            return []
+        path.write_text(json.dumps(remote, indent=2))
     try:
         return json.loads(path.read_text())
     except Exception:
@@ -312,6 +370,7 @@ def save_conversation(design_id: str, messages: list[dict]) -> None:
     path = _conversation_path(design_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(messages, indent=2))
+    cloud_store.save_conversation_payload(design_id, messages)
 
 
 def list_revisions(design_id: str) -> list[dict]:
@@ -322,10 +381,8 @@ def list_revisions(design_id: str) -> list[dict]:
     (no full artifact list) suitable for the timeline thumbnails strip.
     """
     revisions_dir = _design_dir(design_id) / "revisions"
-    if not revisions_dir.exists():
-        return []
-    out: list[dict] = []
-    for child in revisions_dir.iterdir():
+    by_id: dict[str, dict] = {}
+    for child in revisions_dir.iterdir() if revisions_dir.exists() else []:
         if not child.is_dir():
             continue
         bjson = child / "build.json"
@@ -337,8 +394,7 @@ def list_revisions(design_id: str) -> list[dict]:
             continue
         artifacts = payload.get("artifacts") or {}
         glb = artifacts.get("glb")
-        out.append(
-            {
+        summary = {
                 "revision_id": payload.get("revision_id", child.name),
                 "mesh_hash": payload.get("mesh_hash"),
                 "bounding_box_mm": payload.get("bounding_box_mm"),
@@ -349,9 +405,38 @@ def list_revisions(design_id: str) -> list[dict]:
                 "glb_url": (glb or {}).get("url") if isinstance(glb, dict) else None,
                 "stat_mtime": bjson.stat().st_mtime,
             }
-        )
+        by_id[str(summary["revision_id"])] = summary
+    for remote in cloud_store.list_revision_payloads(design_id):
+        build = remote.get("build") or {}
+        if not isinstance(build, dict):
+            continue
+        revision_id = str(build.get("revision_id") or remote.get("revision_id") or "")
+        if not revision_id:
+            continue
+        artifacts = build.get("artifacts") or {}
+        glb = artifacts.get("glb") if isinstance(artifacts, dict) else None
+        by_id[revision_id] = {
+            "revision_id": revision_id,
+            "mesh_hash": build.get("mesh_hash"),
+            "bounding_box_mm": build.get("bounding_box_mm"),
+            "manufacturability_status": (build.get("manufacturability") or {}).get("status"),
+            "duration_ms": build.get("duration_ms"),
+            "glb_url": (glb or {}).get("url") if isinstance(glb, dict) else None,
+            "stat_mtime": _firestore_timestamp(remote.get("updated_at")),
+        }
+    out = list(by_id.values())
     out.sort(key=lambda r: r["stat_mtime"], reverse=True)
     return out
+
+
+def _firestore_timestamp(value: object) -> float:
+    timestamp = getattr(value, "timestamp", None)
+    if callable(timestamp):
+        try:
+            return float(timestamp())
+        except Exception:
+            return 0.0
+    return 0.0
 
 
 def delete_revision(design_id: str, revision_id: str) -> bool:
@@ -370,12 +455,13 @@ def delete_revision(design_id: str, revision_id: str) -> bool:
         )
 
     rev_dir = _design_dir(design_id) / "revisions" / revision_id
-    if not rev_dir.exists():
+    if not rev_dir.exists() and cloud_store.load_revision_payload(design_id, revision_id) is None:
         return False
 
     import shutil
 
     shutil.rmtree(rev_dir, ignore_errors=True)
+    cloud_store.delete_revision_payload(design_id, revision_id)
     return not rev_dir.exists()
 
 
@@ -390,6 +476,20 @@ def restore_revision(design_id: str, revision_id: str):
     rev_dir = _design_dir(design_id) / "revisions" / revision_id
     build_path = rev_dir / "build.json"
     design_path = rev_dir / "design.json"
+
+    if not build_path.exists():
+        remote = cloud_store.load_revision_payload(design_id, revision_id)
+        if remote:
+            rev_dir.mkdir(parents=True, exist_ok=True)
+            remote_build = remote.get("build")
+            remote_design = remote.get("design")
+            remote_graph = remote.get("feature_graph")
+            if isinstance(remote_build, dict):
+                build_path.write_text(json.dumps(remote_build, indent=2))
+            if isinstance(remote_design, dict):
+                design_path.write_text(json.dumps(remote_design, indent=2))
+            if isinstance(remote_graph, dict):
+                (rev_dir / "feature_graph.json").write_text(json.dumps(remote_graph, indent=2))
 
     if not build_path.exists():
         raise FileNotFoundError(
@@ -417,6 +517,18 @@ def restore_revision(design_id: str, revision_id: str):
     return build_payload
 
 
+def delete_design(design_id: str) -> bool:
+    """Delete both the local CAD cache and durable cloud copy."""
+    import shutil
+
+    target = _root() / design_id
+    existed = target.exists() or cloud_store.load_design_payload(design_id) is not None
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    cloud_store.delete_design_payload(design_id)
+    return existed
+
+
 __all__ = [
     "create_design",
     "save_design",
@@ -429,6 +541,7 @@ __all__ = [
     "list_revisions",
     "restore_revision",
     "delete_revision",
+    "delete_design",
     "prune_revisions",
     "update_design_script",
     "load_conversation",

@@ -8,6 +8,8 @@ def test_polish_nova_3_uses_keyterms_without_english_measurements() -> None:
     assert "keyterm" in params
     assert "keywords" not in params
     assert "measurements" not in params
+    assert "kołowrotek" in params["keyterm"]
+    assert "bieżnia" in params["keyterm"]
 
 
 def test_nova_2_uses_legacy_keywords() -> None:

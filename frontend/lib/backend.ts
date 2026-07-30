@@ -16,6 +16,11 @@ export const resolveBackendUrl = () => {
   return localBackendUrl;
 };
 
+export const resolveSttUrl = () => {
+  if (process.env.NEXT_PUBLIC_STT_URL) return process.env.NEXT_PUBLIC_STT_URL;
+  return resolveBackendUrl();
+};
+
 export const resolveUrl = (base: string, value?: string | null) => {
   if (!value) return null;
   if (value.startsWith("http")) return value;

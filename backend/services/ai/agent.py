@@ -125,6 +125,7 @@ def stream_turn(
             response = client.messages.create(
                 model=settings.anthropic_chat_model,
                 max_tokens=settings.anthropic_max_output_tokens,
+                thinking={"type": "disabled"},
                 system=_system_blocks(ctx.model),
                 tools=TOOL_DEFINITIONS,
                 messages=history,

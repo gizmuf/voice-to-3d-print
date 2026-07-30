@@ -885,12 +885,17 @@ code {
   overflow: hidden;
 }
 
-.model-appearance-panel summary {
+.model-appearance-trigger {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
   cursor: pointer;
   padding: 8px 10px;
   font-size: 11px;
   font-weight: 800;
-  list-style-position: inside;
+  font-family: inherit;
 }
 
 .model-appearance-controls {

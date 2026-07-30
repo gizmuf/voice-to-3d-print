@@ -1,10 +1,10 @@
 "use client";
 
 import { Suspense, createElement, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
-import { Bounds, Html, OrbitControls, useGLTF } from "@react-three/drei";
+import { Html, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
-import type { Material, Mesh } from "three";
-import { Color, MOUSE, Vector3 } from "three";
+import type { Material, Mesh, PerspectiveCamera } from "three";
+import { Box3, Color, MOUSE, MathUtils, Sphere, Vector3 } from "three";
 
 export type SelectionPayload = {
   objectName: string;
@@ -54,6 +54,9 @@ type LoadedModelProps = {
   selectedObjectId: string | null;
   onHover?: (objectId: string | null) => void;
   onSelect?: (payload: SelectionPayload, objectId: string) => void;
+  controlsRef?: MutableRefObject<{ target: Vector3; update: () => void } | null>;
+  fitDirection?: readonly [number, number, number];
+  fitView?: boolean;
 };
 
 type ModelLoadState =
@@ -96,8 +99,12 @@ function LoadedModel({
   selectedObjectId,
   onHover,
   onSelect,
+  controlsRef,
+  fitDirection = [1, 0.75, 1],
+  fitView = false,
 }: LoadedModelProps) {
   const gltf = useGLTF(src);
+  const { camera, size, invalidate } = useThree();
   const scene = useMemo(() => gltf.scene.clone(true), [gltf.scene]);
   const meshes = useMemo(() => {
     const collected: Mesh[] = [];
@@ -113,6 +120,41 @@ function LoadedModel({
     });
     return collected;
   }, [scene]);
+
+  useEffect(() => {
+    if (!fitView) return;
+    let innerFrame = 0;
+    const outerFrame = requestAnimationFrame(() => {
+      innerFrame = requestAnimationFrame(() => {
+      scene.updateWorldMatrix(true, true);
+        const box = new Box3().setFromObject(scene);
+        if (box.isEmpty()) return;
+        const center = box.getCenter(new Vector3());
+        const radius = Math.max(box.getBoundingSphere(new Sphere()).radius, 0.001);
+        const perspective = camera as PerspectiveCamera;
+        const verticalFov = MathUtils.degToRad(perspective.fov || 40);
+        const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(size.width / Math.max(size.height, 1), 0.01));
+        const limitingFov = Math.max(Math.min(verticalFov, horizontalFov), MathUtils.degToRad(10));
+        const distance = radius / Math.sin(limitingFov / 2);
+        const direction = new Vector3(...fitDirection).normalize();
+
+        camera.position.copy(center.clone().add(direction.multiplyScalar(distance)));
+        perspective.near = Math.max(distance / 1000, 0.01);
+        perspective.far = Math.max(distance * 10, 2000);
+        perspective.updateProjectionMatrix();
+        camera.lookAt(center);
+        if (controlsRef?.current) {
+          controlsRef.current.target.copy(center);
+          controlsRef.current.update();
+        }
+        invalidate();
+      });
+    });
+    return () => {
+      cancelAnimationFrame(outerFrame);
+      if (innerFrame) cancelAnimationFrame(innerFrame);
+    };
+  }, [camera, controlsRef, fitDirection, fitView, invalidate, scene, size.height, size.width, src]);
 
   // We `cloneMaterial` per mesh so hover/select tints don't leak into the
   // upstream cached gltf. Those cloned materials are owned by this component
@@ -343,10 +385,12 @@ export default function ModelViewer({
   const [interactionMode, setInteractionMode] = useState<"orbit" | "pan">(defaultInteractionMode);
   const [viewerTheme, setViewerTheme] = useState<"workbench" | "light">("workbench");
   const [showGrid, setShowGrid] = useState(true);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [loadState, setLoadState] = useState<ModelLoadState>({ status: "idle" });
   const [internalResetSignal, setInternalResetSignal] = useState(0);
   const [viewerCommand, setViewerCommand] = useState<ViewerCommand | null>(null);
   const controlsRef = useRef<{ target: Vector3; update: () => void } | null>(null);
+  const appearanceRef = useRef<HTMLDivElement | null>(null);
   const commandIdRef = useRef(0);
 
   useEffect(() => {
@@ -358,6 +402,22 @@ export default function ModelViewer({
     setInteractionMode(defaultInteractionMode);
   }, [defaultInteractionMode, src, ghostModelUrl]);
 
+  useEffect(() => {
+    if (!appearanceOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!appearanceRef.current?.contains(event.target as Node)) setAppearanceOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAppearanceOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [appearanceOpen]);
+
   const hasGhost = Boolean(showChanges && ghostModelUrl);
   const normalizedCamera = useMemo(() => {
     if (defaultCameraPreset !== "front" || !defaultCameraNormal) return null;
@@ -368,12 +428,15 @@ export default function ModelViewer({
       z: defaultCameraNormal.z / length,
     };
   }, [defaultCameraNormal, defaultCameraPreset]);
-  const cameraPosition =
-    defaultCameraPreset === "front"
-      ? (normalizedCamera
-          ? ([normalizedCamera.x * 360, normalizedCamera.y * 360, normalizedCamera.z * 360] as const)
-          : ([0, 0, 360] as const))
-      : ([240, 180, 240] as const);
+  const cameraPosition = useMemo(
+    () =>
+      defaultCameraPreset === "front"
+        ? (normalizedCamera
+            ? ([normalizedCamera.x * 360, normalizedCamera.y * 360, normalizedCamera.z * 360] as const)
+            : ([0, 0, 360] as const))
+        : ([240, 180, 240] as const),
+    [defaultCameraPreset, normalizedCamera?.x, normalizedCamera?.y, normalizedCamera?.z]
+  );
   const viewerKey = `${src || "empty"}:${ghostModelUrl || "noghost"}:${defaultCameraPreset}:${normalizedCamera?.x || 0}:${normalizedCamera?.y || 0}:${normalizedCamera?.z || 0}:${resetViewSignal}:${internalResetSignal}`;
 
   const issueViewerCommand = (type: ViewerCommand["type"]) => {
@@ -477,32 +540,33 @@ export default function ModelViewer({
             })
           : null}
         <Suspense fallback={null}>
-          <Bounds fit clip margin={1.2}>
-            <>
-              {hasGhost && ghostModelUrl ? (
-                <LoadedModel
-                  src={ghostModelUrl}
-                  ghost
-                  viewerTheme={viewerTheme}
-                  hoveredObjectId={hoveredObjectId}
-                  selectedObjectId={selectedObjectId}
-                />
-              ) : null}
+          <>
+            {hasGhost && ghostModelUrl ? (
               <LoadedModel
-                src={src}
+                src={ghostModelUrl}
+                ghost
                 viewerTheme={viewerTheme}
                 hoveredObjectId={hoveredObjectId}
                 selectedObjectId={selectedObjectId}
-                onHover={setHoveredObjectId}
-                onSelect={(payload, objectId) => {
-                  setSelectedObjectId(objectId);
-                  onSelect?.(payload);
-                }}
               />
-              {selectionMarker ? <SelectionMarker marker={selectionMarker} /> : null}
-              {annotations}
-            </>
-          </Bounds>
+            ) : null}
+            <LoadedModel
+              src={src}
+              viewerTheme={viewerTheme}
+              hoveredObjectId={hoveredObjectId}
+              selectedObjectId={selectedObjectId}
+              controlsRef={controlsRef}
+              fitDirection={cameraPosition}
+              fitView
+              onHover={setHoveredObjectId}
+              onSelect={(payload, objectId) => {
+                setSelectedObjectId(objectId);
+                onSelect?.(payload);
+              }}
+            />
+            {selectionMarker ? <SelectionMarker marker={selectionMarker} /> : null}
+            {annotations}
+          </>
         </Suspense>
         <CameraTargetController focusTarget={focusTarget} controlsRef={controlsRef} />
         <CameraCommandController command={viewerCommand} controlsRef={controlsRef} />
@@ -558,19 +622,29 @@ export default function ModelViewer({
         >
           {interactionMode === "orbit" ? "Mode: orbit" : "Mode: pan"}
         </button>
-        <details className="model-appearance-panel">
-          <summary>Appearance</summary>
-          <div className="model-appearance-controls">
-            <div className="model-appearance-segmented" aria-label="Viewer theme">
-              <button type="button" data-active={viewerTheme === "workbench"} onClick={() => setViewerTheme("workbench")}>Workbench</button>
-              <button type="button" data-active={viewerTheme === "light"} onClick={() => setViewerTheme("light")}>Light</button>
+        <div ref={appearanceRef} className="model-appearance-panel">
+          <button
+            type="button"
+            className="model-appearance-trigger"
+            aria-expanded={appearanceOpen}
+            aria-controls="model-appearance-controls"
+            onClick={() => setAppearanceOpen((current) => !current)}
+          >
+            <span aria-hidden>{appearanceOpen ? "▾" : "▸"}</span> Appearance
+          </button>
+          {appearanceOpen ? (
+            <div id="model-appearance-controls" className="model-appearance-controls">
+              <div className="model-appearance-segmented" aria-label="Viewer theme">
+                <button type="button" data-active={viewerTheme === "workbench"} onClick={() => setViewerTheme("workbench")}>Workbench</button>
+                <button type="button" data-active={viewerTheme === "light"} onClick={() => setViewerTheme("light")}>Light</button>
+              </div>
+              <label>
+                <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
+                Grid
+              </label>
             </div>
-            <label>
-              <input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} />
-              Grid
-            </label>
-          </div>
-        </details>
+          ) : null}
+        </div>
       </div>
 
       {selectionChip ? <div className="model-selection-chip-slot">{selectionChip}</div> : null}

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatMessage from "../Chat/ChatMessage";
 import ModelViewer from "../ModelViewer";
 import SelectionChip from "../SelectionChip";
-import SpeechToTextButton from "../SpeechToTextButton";
+import SpeechToTextButton, { type VoiceState } from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { useDesignStream } from "../../lib/useDesignStream";
@@ -115,6 +115,7 @@ export default function DesignStudio() {
   const [templates, setTemplates] = useState<DesignTemplate[]>([]);
   const [design, setDesign] = useState<Design | null>(null);
   const [creating, setCreating] = useState(false);
+  const [openingDeepLink, setOpeningDeepLink] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [jewelryContext, setJewelryContext] = useState(JEWELRY_CONTEXTS[0]);
@@ -144,6 +145,7 @@ export default function DesignStudio() {
   const [onshapeError, setOnshapeError] = useState<string | null>(null);
   const [process, setProcess] = useState<"fdm" | "cnc" | "either">("fdm");
   const reloadAfterRef = useRef<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
   // After /design/create returns, we may want Claude to actually *shape* the
   // model from the user's prompt — not just seed a template. We can't call
   // useDesignStream.send until the hook sees the new design id, so we queue
@@ -364,9 +366,18 @@ export default function DesignStudio() {
     if (typeof window === "undefined") return;
     const id = new URLSearchParams(window.location.search).get("design");
     if (!id) return;
-    setCreating(true);
+    setOpeningDeepLink(true);
     fetch(`${backendUrl}/design/${id}`)
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (res.ok) return res.json();
+        if (res.status === 404) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("design");
+          window.history.replaceState({}, "", url.toString());
+          return null;
+        }
+        throw new Error(`Open failed: ${res.status}`);
+      })
       .then((payload) => {
         if (!payload) return;
         setDesign({
@@ -381,8 +392,10 @@ export default function DesignStudio() {
           printer_profile_id: payload.printer_profile_id ?? null,
         });
       })
-      .catch(() => undefined)
-      .finally(() => setCreating(false));
+      .catch((error) => {
+        setCreateError(error instanceof Error ? error.message : "Could not open design.");
+      })
+      .finally(() => setOpeningDeepLink(false));
     // Run once on mount; subsequent changes go through onCreate / onImportCAD.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -405,6 +418,10 @@ export default function DesignStudio() {
 
   const stream = useDesignStream(design?.design_id ?? null);
   const lastRevision = stream.latestRevisionId;
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: "nearest" });
+  }, [stream.history]);
 
   useEffect(() => {
     if (!design || !lastRevision) return;
@@ -484,6 +501,7 @@ export default function DesignStudio() {
         }
         const payload = (await res.json()) as Design & {
           design_id: string;
+          requires_agent?: boolean;
         };
         setDesign({
           design_id: payload.design_id,
@@ -498,8 +516,19 @@ export default function DesignStudio() {
         // If the user typed a free-form prompt (not a one-click template),
         // queue it as the first chat turn so Claude actually applies the
         // user's intent to the seed (e.g. "make the holes hexagonal").
-        if (!templateId && creationPrompt && creationPrompt.trim()) {
+        if (
+          !templateId
+          && creationPrompt
+          && creationPrompt.trim()
+          && payload.requires_agent !== false
+        ) {
           setPendingFirstPrompt(creationPrompt.trim());
+        }
+        setPrompt("");
+        if (typeof window !== "undefined") {
+          const url = new URL(window.location.href);
+          url.searchParams.set("design", payload.design_id);
+          window.history.replaceState({}, "", url.toString());
         }
         return true;
       } catch (error) {
@@ -833,6 +862,23 @@ export default function DesignStudio() {
 
   const issues = design?.latest_build?.manufacturability?.issues ?? [];
   const status = design?.latest_build?.manufacturability?.status;
+  const controlParameters = useMemo(() => {
+    const priority = [
+      "wheel_diameter",
+      "track_width",
+      "rung_count",
+      "spoke_count",
+      "tread_thickness",
+    ];
+    return [...(design?.parameters ?? [])].sort((left, right) => {
+      const leftIndex = priority.indexOf(left.name);
+      const rightIndex = priority.indexOf(right.name);
+      if (leftIndex === -1 && rightIndex === -1) return 0;
+      if (leftIndex === -1) return 1;
+      if (rightIndex === -1) return -1;
+      return leftIndex - rightIndex;
+    });
+  }, [design?.parameters]);
   const selectedManufacturabilityIssue =
     selectedManufacturabilityIssueIndex === null ? null : issues[selectedManufacturabilityIssueIndex] ?? null;
   const selectedManufacturabilityPoint = selectedManufacturabilityIssue?.location
@@ -1271,11 +1317,25 @@ export default function DesignStudio() {
             <span style={{ color: "#71d28d" }}>Y</span>
             <span style={{ color: "#6ea8ff" }}>Z</span>
           </div>
-          <div style={startViewerEmptyStyle}>
-            <div style={startViewerObjectStyle} aria-hidden="true" />
-            <strong>Tu pojawi się Twój model</strong>
-            <span>Podgląd pozostaje widoczny podczas całej rozmowy i każdej poprawki.</span>
-          </div>
+          {creating ? (
+            <div style={startCreatingStyle} role="status" aria-live="polite">
+              <span style={startCreatingSpinnerStyle} aria-hidden />
+              <strong>Buduję parametryczny model…</strong>
+              <span>Interpretuję wymiary, tworzę geometrię i przygotowuję podgląd GLB.</span>
+              <small>Przy złożonych częściach może to potrwać kilkadziesiąt sekund.</small>
+            </div>
+          ) : openingDeepLink ? (
+            <div style={startCreatingStyle} role="status" aria-live="polite">
+              <span style={startCreatingSpinnerStyle} aria-hidden />
+              <strong>Otwieram zapisany projekt…</strong>
+            </div>
+          ) : (
+            <div style={startViewerEmptyStyle}>
+              <div style={startViewerObjectStyle} aria-hidden="true" />
+              <strong>Tu pojawi się Twój model</strong>
+              <span>Podgląd pozostaje widoczny podczas całej rozmowy i każdej poprawki.</span>
+            </div>
+          )}
           <span style={startViewerModeStyle}>TRYB: ORBITA</span>
         </section>
 
@@ -1469,13 +1529,6 @@ export default function DesignStudio() {
         </div>
       </header>
 
-      <RevisionTimeline
-        designId={design.design_id}
-        currentRevisionId={design.revision_id}
-        onRestore={() => refreshDesign(design.design_id)}
-        refreshKey={design.revision_id}
-      />
-
       <section style={threePaneStyle} className="pulsai-studio-grid">
         <aside style={parametersPaneStyle} className="pulsai-parameters-pane">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1493,7 +1546,7 @@ export default function DesignStudio() {
             </label>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {design.parameters.slice(0, showAllParameters ? design.parameters.length : 4).map((p) => (
+            {controlParameters.slice(0, showAllParameters ? controlParameters.length : 4).map((p) => (
               <ParameterControl
                 key={p.name}
                 param={p}
@@ -1591,17 +1644,7 @@ export default function DesignStudio() {
           <h3 style={paneHeaderStyle}>Manufacturability</h3>
           {health && !health.slicer_ready ? (
             <div style={slicerHintStyle} role="note">
-              Slicer not configured. Install{" "}
-              <a
-                href="https://www.prusa3d.com/page/prusaslicer_424/"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: "inherit" }}
-              >
-                PrusaSlicer
-              </a>{" "}
-              or set <code>PRUSASLICER_PATH</code> to enable G-code, print
-              time, and material estimates. STL/GLB export still works.
+              Przygotowanie G-code jest chwilowo niedostępne. Nadal możesz pobrać STL.
             </div>
           ) : null}
           {(() => {
@@ -1735,6 +1778,7 @@ export default function DesignStudio() {
                   remainingIssues: payload.remaining_issues ?? [],
                   slicerReady: payload.slicer_ready,
                 });
+                await refreshDesign(design.design_id);
               } catch (error) {
                 setMakePrintable({
                   busy: false,
@@ -1743,10 +1787,10 @@ export default function DesignStudio() {
               }
             }}
           >
-            {makePrintable.busy ? "Exporting…" : "Export FDM ZIP"}
+            {makePrintable.busy ? "Przygotowuję…" : "Przygotuj do druku"}
           </button>
           <span style={exportHintStyle}>
-            Download only. Use “Fix this” to ask Pulsai to change geometry.
+            Sprawdzę model, wygeneruję G-code oraz podam czas i zużycie materiału.
           </span>
           {makePrintable.summary ? (
             <span style={makePrintableResultStyle(makePrintable.status)}>
@@ -1755,7 +1799,7 @@ export default function DesignStudio() {
                 <>
                   {" "}
                   <a href={makePrintable.bundleUrl} target="_blank" rel="noopener noreferrer">
-                    Download ZIP
+                    Pobierz pakiet
                   </a>
                 </>
               ) : null}
@@ -1790,6 +1834,7 @@ export default function DesignStudio() {
             <ModelViewer
               src={buildArtifactUrl}
               label={design.name}
+              isUpdating={stream.state.status === "streaming"}
               defaultCameraPreset="iso"
               onSelect={handleViewerSelect}
               onClearSelection={() => {
@@ -1865,8 +1910,26 @@ export default function DesignStudio() {
                 Design by conversation
               </h3>
             </div>
-            <span style={chatOnlineStyle}>ready</span>
+            <span style={chatOnlineStyle} role="status" aria-live="polite">
+              {stream.state.status === "streaming"
+                ? "working"
+                : stream.state.status === "error"
+                  ? "needs attention"
+                  : "ready"}
+            </span>
           </div>
+          {stream.state.status === "streaming" ? (
+            <div style={agentProgressStyle} role="status" aria-live="polite">
+              <span style={agentProgressDotStyle} aria-hidden />
+              <span>
+                <strong>{stream.state.activity ?? "Working on the design…"}</strong>
+                <small style={{ display: "block", marginTop: 2, color: "rgba(217,244,239,0.68)" }}>
+                  This is an initial draft until the build finishes. You can type your next edit now;
+                  sending unlocks when this operation completes.
+                </small>
+              </span>
+            </div>
+          ) : null}
           <div style={historyStyle}>
             {stream.history.length === 0 ? (
               <p style={{ fontSize: 12, opacity: 0.6 }}>
@@ -1879,6 +1942,7 @@ export default function DesignStudio() {
                 <ChatMessage key={idx} entry={entry} />
               ))
             )}
+            <div ref={chatEndRef} />
           </div>
           <DesignChatInput
             disabled={stream.state.status === "streaming"}
@@ -1931,6 +1995,13 @@ export default function DesignStudio() {
           ) : null}
         </aside>
       </section>
+
+      <RevisionTimeline
+        designId={design.design_id}
+        currentRevisionId={design.revision_id}
+        onRestore={() => refreshDesign(design.design_id)}
+        refreshKey={design.revision_id}
+      />
 
       <details style={{ marginTop: 12 }}>
         <summary style={{ cursor: "pointer", fontSize: 12, opacity: 0.65 }}>
@@ -2104,6 +2175,7 @@ function DesignChatInput({
   const [draft, setDraft] = useState("");
   const [applying, setApplying] = useState(false);
   const [routeBadge, setRouteBadge] = useState<DesignEditBadge | null>(null);
+  const [voiceHint, setVoiceHint] = useState<string | null>(null);
 
   useEffect(() => {
     const text = draft.trim();
@@ -2147,8 +2219,9 @@ function DesignChatInput({
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         rows={2}
-        placeholder="Describe an edit…"
-        disabled={disabled}
+        placeholder="Opisz zmianę…"
+        disabled={applying}
+        aria-describedby={isStreaming ? "chat-streaming-hint" : undefined}
         style={chatTextareaStyle}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && draft.trim() && !disabled) {
@@ -2157,25 +2230,45 @@ function DesignChatInput({
           }
         }}
       />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-          <SpeechToTextButton
-            compact
-            disabled={disabled || applying}
-            onTranscript={(text) => setDraft((current) => [current.trim(), text].filter(Boolean).join(" "))}
-          />
-          <span style={{ fontSize: 11, opacity: 0.6 }}>
-            {selectedFeature ? `Target: ${selectedFeature.name}` : "Speak or type an edit"}
+      {routeBadge ? (
+        <div style={routeBadgeRowStyle}>
+          <span style={routeBadgeStyle(routeBadge.tone)} title={routeBadge.title}>
+            {routeBadge.label} · ok. {routeBadge.costEstimate}
           </span>
         </div>
-        {routeBadge ? (
-          <span style={routeBadgeStyle(routeBadge.tone)} title={routeBadge.title}>
-            {routeBadge.label} · {routeBadge.costEstimate}
-          </span>
-        ) : null}
+      ) : null}
+      <div style={chatComposerFooterStyle}>
+        <div style={{ flex: "none" }}>
+          <SpeechToTextButton
+            compact
+            disabled={applying}
+            onTranscript={(text) => {
+              setDraft((current) => [current.trim(), text].filter(Boolean).join(" "));
+              setVoiceHint("Gotowe — kliknij Wyślij");
+            }}
+            onStateChange={(state: VoiceState, message?: string) => {
+              if (message) setVoiceHint(message);
+              else if (state === "requesting") setVoiceHint("Uruchamiam mikrofon…");
+              else if (state === "recording") setVoiceHint("Słucham — kliknij, aby zakończyć");
+              else if (state === "transcribing") setVoiceHint("Przepisuję mowę…");
+              else setVoiceHint((current) => current?.startsWith("Gotowe") ? current : null);
+            }}
+          />
+        </div>
+        <span style={chatComposerHintStyle}>
+          {voiceHint ? (
+            voiceHint
+          ) : isStreaming ? (
+            <span id="chat-streaming-hint">Możesz już wpisać następną zmianę</span>
+          ) : selectedFeature ? (
+            `Cel: ${selectedFeature.name}`
+          ) : (
+            "Powiedz lub wpisz zmianę"
+          )}
+        </span>
         {isStreaming ? (
           <button type="button" onClick={onCancel} style={secondaryButtonStyle}>
-            Stop
+            Zatrzymaj
           </button>
         ) : (
           <div style={{ display: "flex", gap: 6 }}>
@@ -2191,7 +2284,7 @@ function DesignChatInput({
               </button>
             ) : null}
             <button type="submit" disabled={disabled || !draft.trim()} style={primaryButtonStyle}>
-              Send
+              Wyślij
             </button>
           </div>
         )}
@@ -2223,7 +2316,7 @@ type DesignEditBadge = {
 
 /**
  * Order-of-magnitude cost per tone. Sourced from observed median per-turn
- * spend in the eval harness (Sonnet 4.6 with prompt caching). Refresh
+ * spend in the eval harness (Sonnet 5, routine thinking disabled). Refresh
  * quarterly or when we change the model.
  *  - answer: Claude reads the design, answers in text, no tool calls.
  *  - free:   direct-apply path bypasses the LLM entirely.
@@ -2231,10 +2324,10 @@ type DesignEditBadge = {
  *  - full:   multi-tool agent loop, possibly a rewrite_design.
  */
 const COST_BY_TONE: Record<DesignEditBadge["tone"], string> = {
-  answer: "~$0.01",
+  answer: "$0.01",
   free: "$0.00",
-  cheap: "~$0.02",
-  full: "~$0.05",
+  cheap: "$0.02",
+  full: "$0.05",
 };
 
 function classifyDesignEditBadge(
@@ -2250,7 +2343,7 @@ function classifyDesignEditBadge(
 
   if (questionLike) {
     return {
-      label: "Answer only",
+      label: "Odpowiedź AI",
       title: "Likely explanation or inspection; should not rebuild unless the agent needs a check.",
       tone: "answer",
       costEstimate: COST_BY_TONE.answer,
@@ -2269,7 +2362,7 @@ function classifyDesignEditBadge(
   if (mentionsParam && hasEditVerb && hasNumericIntent) {
     const directEdit = parseDirectParamEdit(normalized, parameters);
     return {
-      label: "Direct param",
+      label: "Bez AI",
       title: directEdit
         ? `Will set ${directEdit.name} to ${directEdit.value}. No agent round-trip.`
         : "Likely direct parameter update; no full agent rewrite expected.",
@@ -2281,7 +2374,7 @@ function classifyDesignEditBadge(
 
   if (/\b(split|repair|orient|orientation|support|smooth|mirror|offset|inflate|press fit|hole|holes|drill|detect)\b/.test(normalized)) {
     return {
-      label: "Tool edit",
+      label: "Szybka edycja AI",
       title: "Likely routed to a focused CAD or mesh tool.",
       tone: "cheap",
       costEstimate: COST_BY_TONE.cheap,
@@ -2289,7 +2382,7 @@ function classifyDesignEditBadge(
   }
 
   return {
-    label: "Agent edit",
+    label: "Edycja AI",
     title: "Likely needs the full design-agent loop.",
     tone: "full",
     costEstimate: COST_BY_TONE.full,
@@ -2778,6 +2871,34 @@ const startViewerEmptyStyle: React.CSSProperties = {
   color: "#e8eef3",
 };
 
+const startCreatingStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  zIndex: 2,
+  width: "min(360px, 82%)",
+  height: "fit-content",
+  margin: "auto",
+  padding: "22px 24px",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 8,
+  borderRadius: 16,
+  border: "1px solid rgba(112,198,255,0.28)",
+  background: "rgba(14,24,34,0.82)",
+  color: "#eef6fb",
+  textAlign: "center",
+  boxShadow: "0 18px 48px rgba(0,0,0,0.22)",
+};
+
+const startCreatingSpinnerStyle: React.CSSProperties = {
+  width: 24,
+  height: 24,
+  borderRadius: 999,
+  border: "3px solid rgba(112,198,255,0.2)",
+  borderTopColor: "#70c6ff",
+};
+
 const startViewerObjectStyle: React.CSSProperties = {
   width: 130,
   height: 130,
@@ -3016,6 +3137,29 @@ const chatOnlineStyle: React.CSSProperties = {
   fontWeight: 800,
 };
 
+const agentProgressStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 9,
+  padding: "9px 10px",
+  borderRadius: 10,
+  border: "1px solid rgba(125,211,199,0.22)",
+  background: "rgba(125,211,199,0.08)",
+  color: "#d9f4ef",
+  fontSize: 11,
+  lineHeight: 1.35,
+};
+
+const agentProgressDotStyle: React.CSSProperties = {
+  width: 8,
+  height: 8,
+  marginTop: 3,
+  borderRadius: 999,
+  background: "#7dd3c7",
+  boxShadow: "0 0 0 4px rgba(125,211,199,0.12)",
+  flex: "none",
+};
+
 const paneHintStyle: React.CSSProperties = {
   display: "block",
   maxWidth: 180,
@@ -3141,6 +3285,29 @@ const chatTextareaStyle: React.CSSProperties = {
   outline: "none",
 };
 
+const chatComposerFooterStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "auto minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: 8,
+  minWidth: 0,
+};
+
+const routeBadgeRowStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-end",
+  minHeight: 17,
+};
+
+const chatComposerHintStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: 11,
+  opacity: 0.68,
+};
+
 const primaryButtonStyle: React.CSSProperties = {
   padding: "8px 16px",
   background: "rgba(33,150,243,0.85)",
@@ -3208,7 +3375,7 @@ const routeBadgeStyle = (
     answer: ["rgba(33,150,243,0.14)", "rgba(13,71,161,0.9)"],
     free: ["rgba(76,175,80,0.16)", "rgba(46,125,50,0.85)"],
     cheap: ["rgba(255,193,7,0.20)", "rgba(126,87,0,0.9)"],
-    full: ["rgba(244,67,54,0.12)", "rgba(183,28,28,0.9)"],
+    full: ["rgba(255,255,255,0.08)", "rgba(238,243,247,0.72)"],
   }[tone];
   return {
     padding: "3px 8px",
@@ -3327,12 +3494,32 @@ function ExportMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const presets = [
     { id: "fdm", label: "Export for 3D printing", desc: "STL · G-code · manifest" },
     { id: "cnc", label: "Export for CNC", desc: "STEP · DXF · setup notes" },
     { id: "docs", label: "Export for docs", desc: "STL · GLB · manifest" },
     { id: "all", label: "Export everything", desc: "all of the above" },
   ];
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  useEffect(() => setOpen(false), [designId, revisionId]);
+
   const trigger = async (preset: string) => {
     if (busy) return;
     setBusy(preset);
@@ -3355,10 +3542,12 @@ function ExportMenu({
     }
   };
   return (
-    <div style={{ position: "relative" }}>
+    <div ref={menuRef} style={{ position: "relative" }}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
         style={{
           padding: "4px 12px",
           background: "rgba(33,150,243,0.85)",
@@ -3374,6 +3563,7 @@ function ExportMenu({
       </button>
       {open ? (
         <div
+          role="menu"
           style={{
             position: "absolute",
             bottom: "calc(100% + 4px)",

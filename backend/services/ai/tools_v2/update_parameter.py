@@ -65,6 +65,43 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
     # this the script gets ``"200"`` and crashes on arithmetic.
     new_value = _coerce(target.value, params.new_value)
 
+    if isinstance(new_value, (int, float)) and not isinstance(new_value, bool):
+        if target.min is not None and float(new_value) < target.min:
+            return {
+                "error": (
+                    f"Parameter '{params.name}' cannot be set to {new_value}; "
+                    f"its declared minimum is {target.min}. Do not clamp silently — "
+                    "check whether the user meant a different feature or parameter."
+                ),
+                "code": "parameter_below_minimum",
+                "name": params.name,
+                "minimum": target.min,
+                "rejected_value": new_value,
+            }
+        if target.max is not None and float(new_value) > target.max:
+            return {
+                "error": (
+                    f"Parameter '{params.name}' cannot be set to {new_value}; "
+                    f"its declared maximum is {target.max}. Do not clamp silently — "
+                    "check whether the user meant a different feature or parameter."
+                ),
+                "code": "parameter_above_maximum",
+                "name": params.name,
+                "maximum": target.max,
+                "rejected_value": new_value,
+            }
+    if target.choices and str(new_value) not in target.choices:
+        return {
+            "error": (
+                f"Parameter '{params.name}' must be one of: "
+                + ", ".join(target.choices)
+            ),
+            "code": "parameter_invalid_choice",
+            "name": params.name,
+            "choices": target.choices,
+            "rejected_value": new_value,
+        }
+
     overrides = {p.name: p.value for p in design.parameters}
     overrides[params.name] = new_value
 

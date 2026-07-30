@@ -173,6 +173,10 @@ def stream_turn(
                 response = client.messages.create(
                     model=settings.anthropic_chat_model,
                     max_tokens=settings.anthropic_max_output_tokens,
+                    # Sonnet 5 enables adaptive thinking by default. Routine CAD
+                    # turns should stay fast and predictable; hard-task routing
+                    # can opt into thinking separately when we add it.
+                    thinking={"type": "disabled"},
                     system=_system_blocks(
                         ctx,
                         selected_feature_id=selected_feature_id,

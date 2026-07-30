@@ -149,6 +149,8 @@ def _slice_mesh(stl_path: Path, gcode_path: Path, profile_id: str | None = None)
     if completed.stderr:
         # PrusaSlicer writes some warnings to stderr; keep for debugging if needed.
         pass
+    if not gcode_path.is_file() or gcode_path.stat().st_size == 0:
+        raise RuntimeError("PrusaSlicer completed without producing G-code.")
     return True
 
 

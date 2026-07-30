@@ -135,7 +135,7 @@ export default function RevisionTimeline({
 
   return (
     <div style={shellStyle}>
-      <span style={labelStyle}>HISTORY</span>
+      <span style={labelStyle}>MODEL VERSIONS</span>
       <div style={stripStyle}>
         {revisions.map((r) => {
           const isCurrent = r.revision_id === currentRevisionId;
@@ -299,7 +299,9 @@ const shellStyle: React.CSSProperties = {
   background: "rgba(255,255,255,0.85)",
   border: "1px solid rgba(0,0,0,0.08)",
   borderRadius: 12,
-  marginBottom: 10,
+  width: "fit-content",
+  maxWidth: "100%",
+  marginTop: 12,
   overflowX: "auto",
 };
 

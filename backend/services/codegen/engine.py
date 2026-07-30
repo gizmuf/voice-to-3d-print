@@ -422,7 +422,17 @@ def run_manufacturability(
 
     bbox = tuple(float(v) for v in mesh.bounding_box.extents)
 
-    if not mesh.is_watertight:
+    mesh_is_closed = bool(mesh.is_watertight)
+    if not mesh_is_closed:
+        try:
+            components = mesh.split(only_watertight=False)
+            mesh_is_closed = bool(components) and all(
+                component.is_watertight for component in components
+            )
+        except Exception:
+            mesh_is_closed = False
+
+    if not mesh_is_closed:
         issues.append(
             ManufacturabilityIssue(
                 severity="error",
@@ -508,7 +518,7 @@ def run_manufacturability(
         process=process,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
         issues=issues,
-        estimated_volume_mm3=float(abs(mesh.volume)) if mesh.is_volume else None,
+        estimated_volume_mm3=float(abs(mesh.volume)) if mesh_is_closed else None,
         bounding_box_mm=bbox,
         mesh_hash=mesh_hash,
         duration_ms=int((time.perf_counter() - started) * 1000),
