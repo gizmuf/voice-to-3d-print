@@ -39,6 +39,27 @@ MAX_TOOL_ITERATIONS = 10
 MAX_FAILED_TOOL_CALLS = 2
 
 
+def _serialize_response_block(block: Any) -> dict[str, Any]:
+    """Preserve Anthropic content blocks exactly enough for message replay.
+
+    Thinking blocks must be returned unmodified alongside tool results. Saving
+    only their ``type`` poisons the conversation because the next Messages API
+    request requires both the thinking text and its signature.
+    """
+    model_dump = getattr(block, "model_dump", None)
+    if callable(model_dump):
+        payload = model_dump(mode="json", exclude_none=True)
+        if isinstance(payload, dict):
+            return payload
+
+    payload: dict[str, Any] = {"type": str(getattr(block, "type", "unknown"))}
+    for field in ("thinking", "signature", "data"):
+        value = getattr(block, field, None)
+        if value is not None:
+            payload[field] = value
+    return payload
+
+
 def _anthropic_cost_usd(
     *, input_tokens: int, output_tokens: int, cache_read_tokens: int, cache_creation_tokens: int
 ) -> float:
@@ -146,7 +167,9 @@ def stream_turn(
         current_user_message=user_message,
     )
 
-    history = _repair_dangling_tool_uses(load_conversation(design_id))
+    history = _repair_dangling_tool_uses(
+        _repair_malformed_thinking_blocks(load_conversation(design_id))
+    )
 
     question = ambiguity_question(user_message)
     direct_edit = parse_direct_parameter_edit(user_message, design.parameters)
@@ -323,7 +346,7 @@ def stream_turn(
                     assistant_blocks.append(use)
                     tool_uses.append(use)
                 else:
-                    assistant_blocks.append({"type": block.type})
+                    assistant_blocks.append(_serialize_response_block(block))
 
             history.append({"role": "assistant", "content": assistant_blocks})
 
@@ -582,6 +605,40 @@ def _repair_dangling_tool_uses(history: list[dict]) -> list[dict]:
             }
         )
         answered_ids.update(pending_ids)
+    return out
+
+
+def _repair_malformed_thinking_blocks(history: list[dict]) -> list[dict]:
+    """Drop legacy incomplete thinking blocks before replaying a transcript.
+
+    Versions deployed before this repair persisted ``{"type": "thinking"}``
+    without the required ``thinking`` and ``signature`` fields. The reasoning
+    text cannot be reconstructed, but completed tool calls and results remain
+    valid without it, so removing only the malformed block safely restores the
+    conversation.
+    """
+    if not history:
+        return history
+
+    out: list[dict] = []
+    for message in history:
+        content = message.get("content")
+        if not isinstance(content, list):
+            out.append(message)
+            continue
+
+        repaired: list[Any] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                if not isinstance(block.get("thinking"), str) or not isinstance(
+                    block.get("signature"), str
+                ):
+                    continue
+            if isinstance(block, dict) and block.get("type") == "redacted_thinking":
+                if not isinstance(block.get("data"), str):
+                    continue
+            repaired.append(block)
+        out.append({**message, "content": repaired})
     return out
 
 
