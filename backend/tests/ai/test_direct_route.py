@@ -1,4 +1,8 @@
-from services.ai.direct_route import ambiguity_question, parse_direct_parameter_edit
+from services.ai.direct_route import (
+    ambiguity_question,
+    parse_direct_parameter_edit,
+    parse_direct_parameter_edits,
+)
 from services.codegen.models import DesignParameter
 
 
@@ -35,3 +39,35 @@ def test_polish_from_to_edit_uses_the_target_value() -> None:
 def test_ambiguous_strength_request_requires_question() -> None:
     assert ambiguity_question("zrób ten wspornik bardziej wytrzymały") is not None
     assert ambiguity_question("ustaw grubość na 6 mm") is None
+
+
+def test_two_explicit_dimensions_are_parsed_as_one_local_batch() -> None:
+    params = [
+        _param("wheel_diameter", 120.0),
+        _param("track_width", 40.0),
+        _param("axle_diameter", 5.0),
+    ]
+
+    edits = parse_direct_parameter_edits(
+        "zmień średnicę kołowrotka na 150 mm oraz szerokość bieżnika na 50 mm",
+        params,
+    )
+
+    assert [(edit.name, edit.value) for edit in edits] == [
+        ("wheel_diameter", 150.0),
+        ("track_width", 50.0),
+    ]
+
+
+def test_relative_percentage_is_computed_from_current_parameter_locally() -> None:
+    params = [_param("track_width", 40.0), _param("wheel_diameter", 120.0)]
+
+    edits = parse_direct_parameter_edits("zwiększ szerokość bieżnika o 25%", params)
+
+    assert [(edit.name, edit.value) for edit in edits] == [("track_width", 50.0)]
+
+
+def test_percentage_without_direction_is_not_guessed() -> None:
+    params = [_param("track_width", 40.0)]
+
+    assert parse_direct_parameter_edits("ustaw szerokość bieżnika na 50%", params) == []

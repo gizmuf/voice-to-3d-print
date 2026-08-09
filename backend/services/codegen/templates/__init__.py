@@ -267,6 +267,7 @@ with BuildPart() as right_ring:
         )
 wheel_tread_parts.append(right_ring.part)
 
+# Transverse rungs across the track; these are not radial spokes.
 for index in range(rung_count):
     angle_rad = math.radians(360.0 * index / rung_count)
     rung_x = rung_mid_radius * math.cos(angle_rad)
@@ -688,7 +689,9 @@ wheel_shape = Compound(children=[wheel_tread, wheel_support.part], label="wheel"
 
 def _measurement_mm(prompt: str, labels: str) -> float | None:
     match = re.search(
-        rf"(?:{labels})\w*\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|centymetr\w*)",
+        # Accept a short semantic qualifier between the dimension and value:
+        # "szerokość bieżnika 4 cm", "wheel diameter of 120 mm".
+        rf"(?:{labels})\w*(?:\s+(?:of|kołowrot\w*|koła|wheel|bieżnik\w*|track))?\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|centymetr\w*)",
         prompt,
         flags=re.IGNORECASE,
     )
@@ -722,18 +725,6 @@ def _hamster_wheel_seed(prompt: str) -> str:
     script = HAMSTER_WHEEL
     rung_count = _rung_count(prompt)
     if rung_count is not None and 8 <= rung_count <= 48:
-        script = re.sub(
-            r"# @feature: continuous_tread\n.*?# @end\n\n# @feature: hub_and_spokes\n.*?# @end",
-            _HAMSTER_RUNG_FEATURE,
-            script,
-            count=1,
-            flags=re.DOTALL,
-        )
-        script = script.replace('wheel.part.label = "wheel"', 'wheel_shape.label = "wheel"')
-        script = script.replace(
-            "Compound(children=[wheel.part, stand.part, axle.part]",
-            "Compound(children=[wheel_shape, stand.part, axle.part]",
-        )
         script = _replace_param_default(script, "rung_count", rung_count)
 
     diameter = _measurement_mm(prompt, r"średnic|srednic|diameter")

@@ -668,17 +668,26 @@ def _fdm_checks(
                 epsilon = max(profile.nozzle_mm * 0.1, 0.01)
                 origins = points - normals_sampled * epsilon
                 directions = -normals_sampled
-                locations, ray_index, _ = mesh.ray.intersects_location(
+                locations, ray_index, triangle_index = mesh.ray.intersects_location(
                     ray_origins=origins, ray_directions=directions, multiple_hits=False
                 )
                 if len(ray_index):
                     distances = np.linalg.norm(locations - origins[ray_index], axis=1)
+                    # A real wall hit lands on an opposing surface.  Tangent
+                    # contacts between compound solids and edge-grazing hits
+                    # can be arbitrarily close but have parallel/sideways
+                    # normals; counting them caused false 0.1 mm blockers.
+                    hit_normals = mesh.face_normals[triangle_index]
+                    source_normals = normals_sampled[ray_index]
+                    opposing = np.einsum("ij,ij->i", source_normals, hit_normals) < -0.5
                     # A compound mesh has tangent contacts and shared edges.
                     # One grazing ray can report a fictitious 0.1 mm "wall"
                     # even when the surrounding feature is several mm thick.
                     # Require the thin measurement to recur across at least
                     # 3% of samples (minimum eight) before blocking a print.
-                    finite = np.flatnonzero(np.isfinite(distances) & (distances > 0))
+                    finite = np.flatnonzero(
+                        np.isfinite(distances) & (distances > 0) & opposing
+                    )
                     support_rank = max(8, int(math.ceil(len(distances) * 0.03)))
                     if len(finite) < support_rank:
                         robust_index = None

@@ -52,6 +52,7 @@ from services.codegen.store import (
     load_conversation as load_design_conversation,
     record_ai_usage,
     save_build,
+    save_design,
     save_conversation as save_design_conversation,
 )
 from services.codegen.templates import (
@@ -61,6 +62,8 @@ from services.codegen.templates import (
     prompt_seed_is_complete,
     seed_for as seed_template_for,
 )
+from services.mechanism_motion import evaluate_mechanism_motion
+from services.spec_compliance import evaluate_spec_compliance, record_spec_targets
 
 from config import settings
 from services.ai_edit import ai_edit_workspace_model
@@ -1817,6 +1820,8 @@ class DesignCreateResponse(BaseModel):
     initial_build: dict | None
     editable_model: dict
     requires_agent: bool = False
+    spec_compliance: dict | None = None
+    motion_report: dict | None = None
 
 
 class JewelryTraceCreateRequest(BaseModel):
@@ -1893,14 +1898,21 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
     parameters = derive_parameters(sandbox_result.payload)
     features = derive_named_features(sandbox_result.payload, script, created_by="system")
 
+    metadata: dict[str, object] = {}
+    if template_id:
+        metadata["template_id"] = template_id
+    if request.prompt:
+        metadata["source_prompt"] = request.prompt.strip()
     design = create_design(
         name=name,
         script=script,
         parameters=parameters,
         features=features,
         process=request.process,
-        metadata={"template_id": template_id} if template_id else {},
+        metadata=metadata,
     )
+    if request.prompt and record_spec_targets(design, request.prompt):
+        save_design(design)
 
     # Reuse the sandbox payload from the audit run instead of re-executing the
     # script. Move artifacts from the throwaway /tmp dir into the design's
@@ -1977,6 +1989,8 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
         },
         editable_model=editable_model.model_dump(mode="json"),
         requires_agent=requires_agent,
+        spec_compliance=evaluate_spec_compliance(design, build, request.prompt),
+        motion_report=evaluate_mechanism_motion(design, build),
     )
 
 
@@ -2577,6 +2591,8 @@ def design_get_endpoint(design_id: str) -> dict:
         "printer_profile_id": (
             record.design.printer_profile_id or get_profile(settings.default_printer_profile_id).id
         ),
+        "spec_compliance": evaluate_spec_compliance(record.design, record.latest_build),
+        "motion_report": evaluate_mechanism_motion(record.design, record.latest_build),
         "latest_build": (
             {
                 "revision_id": record.latest_build.revision_id,
@@ -2599,6 +2615,20 @@ def design_get_endpoint(design_id: str) -> dict:
             else None
         ),
     }
+
+
+@app.get("/design/{design_id}/compliance")
+def design_compliance_endpoint(design_id: str) -> dict:
+    _validate_design_id(design_id)
+    record = get_record(design_id)
+    return evaluate_spec_compliance(record.design, record.latest_build)
+
+
+@app.get("/design/{design_id}/motion-check")
+def design_motion_check_endpoint(design_id: str) -> dict:
+    _validate_design_id(design_id)
+    record = get_record(design_id)
+    return evaluate_mechanism_motion(record.design, record.latest_build)
 
 
 @app.get("/design")

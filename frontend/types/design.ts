@@ -56,6 +56,32 @@ export type PrintEstimate = {
   cost_usd_per_g?: number | null;
 };
 
+export type MotionReport = {
+  supported: boolean;
+  status: "safe" | "blocked" | "unsupported";
+  summary: string;
+  rotating_node?: string;
+  axis_cad?: [number, number, number];
+  axis_viewer?: [number, number, number];
+  axle_clearance_mm?: number;
+  minimum_static_gap_mm?: number;
+  caveat?: string;
+  checks?: Array<{ code: string; passed: boolean; message: string }>;
+};
+
+export type SpecCompliance = {
+  status: "passed" | "needs_repair" | "needs_attention" | "not_applicable";
+  summary: string;
+  checks: Array<{
+    kind: "parameter" | "geometry";
+    name: string;
+    expected: number | string | boolean;
+    actual: number | string | boolean | null;
+    tolerance: number;
+    passed: boolean;
+  }>;
+};
+
 export type DesignBuild = {
   revision_id: string;
   mesh_hash: string;
@@ -87,6 +113,8 @@ export type Design = {
   features: NamedFeature[];
   latest_build: DesignBuild | null;
   printer_profile_id?: string | null;
+  spec_compliance?: SpecCompliance | null;
+  motion_report?: MotionReport | null;
 };
 
 export type PrinterProfile = {

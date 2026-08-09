@@ -21,8 +21,13 @@ from anthropic import Anthropic
 
 from config import settings
 from services.ai.compaction import maybe_compact_history
-from services.ai.direct_route import ambiguity_question, parse_direct_parameter_edit
+from services.ai.direct_route import ambiguity_question, parse_direct_parameter_edits
 from services.ai.prompts_v2 import SYSTEM_PROMPT, render_turn_context
+from services.spec_compliance import (
+    evaluate_spec_compliance,
+    record_parameter_targets,
+    record_spec_targets,
+)
 from services.ai.telemetry import record_tool_call
 from services.ai.tools_v2 import DesignContext, TOOL_DEFINITIONS, execute as execute_tool
 from services.ai.tools_v2.update_parameter import execute_many as execute_parameter_changes
@@ -207,8 +212,8 @@ def stream_turn(
     )
 
     question = ambiguity_question(user_message)
-    direct_edit = parse_direct_parameter_edit(user_message, design.parameters)
-    if question or direct_edit:
+    direct_edits = parse_direct_parameter_edits(user_message, design.parameters)
+    if question or direct_edits:
         history.append({"role": "user", "content": user_message})
         yield _sse(
             "turn_start",
@@ -232,34 +237,65 @@ def stream_turn(
                     "output_tokens": 0,
                     "cache_read_tokens": 0,
                     "cache_creation_tokens": 0,
+                    "cost_usd": 0.0,
+                    "model": "local",
                 },
             )
             return
 
-        assert direct_edit is not None
+        assert direct_edits
         tool_id = f"local-param-{int(time.time() * 1000)}"
-        tool_input = {
-            "name": direct_edit.name,
-            "new_value": direct_edit.value,
-            "rationale": "Explicit numeric parameter edit parsed locally.",
-        }
-        yield _sse("tool_call_start", {"id": tool_id, "name": "update_parameter", "input": tool_input})
+        tool_inputs = [
+            {
+                "name": edit.name,
+                "new_value": edit.value,
+                "rationale": "Explicit numeric parameter edit parsed locally.",
+            }
+            for edit in direct_edits
+        ]
+        for index, tool_input in enumerate(tool_inputs):
+            yield _sse(
+                "tool_call_start",
+                {"id": f"{tool_id}-{index}", "name": "update_parameter", "input": tool_input},
+            )
         tool_started = time.perf_counter()
-        result = execute_tool("update_parameter", tool_input, ctx)
+        results = execute_parameter_changes(tool_inputs, ctx)
         record_tool_call(
             tool_name="update_parameter",
-            success=not bool(result.get("error")),
+            success=not any(result.get("error") for result in results),
             duration_ms=int((time.perf_counter() - tool_started) * 1000),
             design_id=design_id,
         )
-        yield _sse(
-            "tool_call_end",
-            {"id": tool_id, "name": "update_parameter", "result": result, "is_error": bool(result.get("error"))},
-        )
-        if result.get("error"):
-            message = f"Nie zastosowałem zmiany: {result['error']}"
+        for index, result in enumerate(results):
+            yield _sse(
+                "tool_call_end",
+                {
+                    "id": f"{tool_id}-{index}",
+                    "name": "update_parameter",
+                    "result": result,
+                    "is_error": bool(result.get("error")),
+                },
+            )
+        errors = [str(result["error"]) for result in results if result.get("error")]
+        if errors:
+            message = f"Nie zastosowałem zmiany: {'; '.join(errors)}"
         else:
-            message = f"Gotowe — {direct_edit.name} = {direct_edit.value}. Zmiana wykonana lokalnie, bez kosztu modelu."
+            changed = ", ".join(f"{edit.name} = {edit.value}" for edit in direct_edits)
+            message = f"Gotowe — {changed}. Zmiana wykonana lokalnie, bez kosztu modelu."
+            if record_parameter_targets(
+                ctx.design,
+                {edit.name: edit.value for edit in direct_edits},
+                source=user_message,
+            ):
+                from services.codegen.store import save_design
+
+                save_design(ctx.design)
+        compliance = evaluate_spec_compliance(ctx.design, ctx.last_build, user_message)
+        if compliance.get("status") == "passed" and record_spec_targets(ctx.design, user_message):
+            from services.codegen.store import save_design
+
+            save_design(ctx.design)
+        yield _sse("compliance_report", compliance)
         history.append({"role": "assistant", "content": [{"type": "text", "text": message}]})
         save_conversation(design_id, _compact_for_persist(history))
         yield _sse("assistant_text", {"text": message})
@@ -273,6 +309,8 @@ def stream_turn(
                 "output_tokens": 0,
                 "cache_read_tokens": 0,
                 "cache_creation_tokens": 0,
+                "cost_usd": 0.0,
+                "model": "local",
             },
         )
         return
@@ -497,6 +535,44 @@ def stream_turn(
                     )
                 },
             )
+
+        # Explicit dimensions and counts are contracts, not suggestions.  The
+        # model chooses the construction method; this deterministic gate checks
+        # the result and repairs high-confidence parameter mismatches without a
+        # second paid model call.
+        compliance = evaluate_spec_compliance(ctx.design, ctx.last_build, user_message)
+        repairs = compliance.get("repair_parameters") or []
+        if repairs and failed_tool_calls < MAX_FAILED_TOOL_CALLS:
+            yield _sse(
+                "model_activity",
+                {
+                    "model": "local verifier",
+                    "activity": "Porównuję model z wymiarami zlecenia i poprawiam rozbieżność…",
+                },
+            )
+            payloads = [
+                {
+                    "name": repair["name"],
+                    "new_value": repair["new_value"],
+                    "rationale": "Deterministic prompt-compliance repair.",
+                }
+                for repair in repairs
+            ]
+            repair_results = execute_parameter_changes(payloads, ctx)
+            if not any(result.get("error") for result in repair_results):
+                compliance = evaluate_spec_compliance(ctx.design, ctx.last_build, user_message)
+                repaired_names = ", ".join(str(repair["name"]) for repair in repairs)
+                repair_message = (
+                    f"Automatyczna kontrola wykryła rozbieżność i poprawiła: {repaired_names}. "
+                    "Wymiary sprawdzone bez dodatkowego kosztu modelu."
+                )
+                history.append({"role": "assistant", "content": [{"type": "text", "text": repair_message}]})
+                yield _sse("assistant_text", {"text": repair_message})
+        if compliance.get("status") == "passed" and record_spec_targets(ctx.design, user_message):
+            from services.codegen.store import save_design
+
+            save_design(ctx.design)
+        yield _sse("compliance_report", compliance)
     finally:
         # Persist on every exit path including client abort (GeneratorExit).
         # The dangling-tool-use repair on the next load patches any in-flight

@@ -252,5 +252,102 @@
     "user_message": "zrób ten wspornik bardziej wytrzymały",
     "expected_clarifying_question": true,
     "expected_no_destructive_calls": true
+  },
+  {
+    "name": "hamster_wheel_multi_dimension_local",
+    "category": "multi_param_edit_polish",
+    "fixture": {"kind": "template", "id": "hamster_wheel"},
+    "user_message": "zmień średnicę kołowrotka na 150 mm oraz szerokość bieżnika na 40 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true}
+  },
+  {
+    "name": "hamster_wheel_track_width_percent_local",
+    "category": "relative_param_edit_polish",
+    "fixture": {"kind": "template", "id": "hamster_wheel"},
+    "user_message": "zwiększ szerokość bieżnika o 25%",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "checks": {"buildsSuccessfully": true}
+  },
+  {
+    "name": "hamster_wheel_rung_count_percent_local",
+    "category": "relative_count_edit_polish",
+    "fixture": {"kind": "template", "id": "hamster_wheel"},
+    "user_message": "zmniejsz liczbę szczebelków o 25%",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "checks": {"buildsSuccessfully": true}
+  },
+  {
+    "name": "enclosure_wall_thickness_polish_local",
+    "category": "param_edit_polish",
+    "fixture": {"kind": "flagship", "id": "enclosure"},
+    "user_message": "zmień grubość ścianki na 3 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "enclosure_height_local",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "enclosure"},
+    "user_message": "change the enclosure height to 45 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "bracket_thickness_local",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "bracket"},
+    "user_message": "change the bracket thickness to 6 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "knob_outer_diameter_local",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "knob"},
+    "user_message": "change outer diameter to 36 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "phone_stand_cable_hole_percent_local",
+    "category": "relative_param_edit",
+    "fixture": {"kind": "flagship", "id": "phone_stand"},
+    "user_message": "increase the cable hole diameter by 25%",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "wall_hook_reach_local",
+    "category": "param_edit",
+    "fixture": {"kind": "flagship", "id": "wall_hook"},
+    "user_message": "change hook reach to 40 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
+  },
+  {
+    "name": "simple_box_width_height_local",
+    "category": "multi_param_edit_polish",
+    "fixture": {"kind": "template", "id": "simple_box"},
+    "user_message": "zmień szerokość na 100 mm i wysokość na 50 mm",
+    "expected_tools_called_any": ["update_parameter"],
+    "expected_model": "local",
+    "expected_compliance_status": "passed",
+    "checks": {"buildsSuccessfully": true, "isWatertight": true}
   }
 ]

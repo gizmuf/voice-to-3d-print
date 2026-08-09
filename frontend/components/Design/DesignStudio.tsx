@@ -267,6 +267,8 @@ export default function DesignStudio() {
           features: payload.features ?? [],
           latest_build: payload.latest_build ?? null,
           printer_profile_id: payload.printer_profile_id ?? null,
+          spec_compliance: payload.spec_compliance ?? null,
+          motion_report: payload.motion_report ?? null,
         });
         if (typeof window !== "undefined") {
           const url = new URL(window.location.href);
@@ -337,6 +339,8 @@ export default function DesignStudio() {
           features: payload.features ?? [],
           latest_build: (payload as any).initial_build ?? null,
           printer_profile_id: payload.printer_profile_id ?? null,
+          spec_compliance: payload.spec_compliance ?? null,
+          motion_report: payload.motion_report ?? null,
         });
       } catch (error) {
         setCreateError(
@@ -407,6 +411,8 @@ export default function DesignStudio() {
           features: payload.features ?? [],
           latest_build: payload.latest_build ?? null,
           printer_profile_id: payload.printer_profile_id ?? null,
+          spec_compliance: payload.spec_compliance ?? null,
+          motion_report: payload.motion_report ?? null,
         });
       })
       .catch((error) => {
@@ -536,6 +542,8 @@ export default function DesignStudio() {
           parameters: payload.parameters ?? [],
           features: payload.features ?? [],
           latest_build: (payload as any).initial_build ?? null,
+          spec_compliance: payload.spec_compliance ?? null,
+          motion_report: payload.motion_report ?? null,
         });
         // If the user typed a free-form prompt (not a one-click template),
         // queue it as the first chat turn so Claude actually applies the
@@ -1899,6 +1907,7 @@ export default function DesignStudio() {
             <ModelViewer
               src={buildArtifactUrl}
               label={design.name}
+              motionReport={design.motion_report}
               isUpdating={Boolean(stream.state.previewUpdating)}
               language={uiLanguage}
               defaultCameraPreset="iso"

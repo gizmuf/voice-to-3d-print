@@ -146,18 +146,25 @@ def _check_min_wall(
     epsilon = max(profile.nozzle_mm * 0.1, 0.01)
     origins = points - normals * epsilon
     directions = -normals
-    locations, ray_index, _ = mesh.ray.intersects_location(
+    locations, ray_index, triangle_index = mesh.ray.intersects_location(
         ray_origins=origins, ray_directions=directions, multiple_hits=False
     )
     if len(ray_index) == 0:
         return
     distances = np.linalg.norm(locations - origins[ray_index], axis=1)
+    hit_normals = mesh.face_normals[triangle_index]
+    source_normals = normals[ray_index]
+    opposing = np.einsum("ij,ij->i", source_normals, hit_normals) < -0.5
+    distances = distances[opposing]
+    filtered_ray_index = ray_index[opposing]
+    if len(distances) == 0:
+        return
     thin_mask = distances < threshold
     if not bool(np.any(thin_mask)):
         return
     thinnest_idx = int(np.argmin(distances))
     thinnest = float(distances[thinnest_idx])
-    location = tuple(float(c) for c in points[ray_index[thinnest_idx]])
+    location = tuple(float(c) for c in points[filtered_ray_index[thinnest_idx]])
     fraction = float(np.sum(thin_mask)) / float(samples)
     severity: Severity = "error" if thinnest < profile.nozzle_mm * 1.5 else "warn"
     issues.append(

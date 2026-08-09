@@ -105,6 +105,57 @@ test("anonymous user creates, edits, and exports a perforated disc bundle", asyn
   ).toBeVisible({ timeout: 30_000 });
 });
 
+test("validated hamster wheel rotates independently with zero-cost local edits", async ({
+  page,
+  request,
+}) => {
+  const create = await request.post(`${BACKEND_URL}/design/create`, {
+    data: {
+      prompt:
+        "Kołowrotek dla chomika: średnica kołowrotka 12 cm, szerokość bieżnika 4 cm, dokładnie 24 szczebelki",
+      process: "fdm",
+    },
+    timeout: 180_000,
+  });
+  expect(create.ok()).toBeTruthy();
+  const seeded = await create.json();
+  const designId = seeded.design_id as string;
+
+  try {
+    expect(seeded.requires_agent).toBeFalsy();
+    expect(seeded.spec_compliance.status).toBe("passed");
+    expect(seeded.motion_report.status).toBe("safe");
+    expect(seeded.parameters.filter((parameter: { name: string }) => parameter.name === "rung_count"))
+      .toHaveLength(1);
+
+    const localEdit = await streamOneDesignTurn(
+      request,
+      designId,
+      "zmień średnicę kołowrotka na 150 mm oraz szerokość bieżnika na 50 mm",
+    );
+    expect(localEdit.final.model).toBe("local");
+    expect(localEdit.final.cost_usd).toBe(0);
+    expect(localEdit.compliance.status).toBe("passed");
+
+    await page.goto(`/design?design=${designId}`);
+    const motionButton = page.getByRole("button", { name: /Test rotation|Test obrotu/ });
+    await expect(motionButton).toBeVisible({ timeout: 30_000 });
+    const canvas = page.locator("canvas").first();
+    await expect(canvas).toBeVisible();
+    const before = await canvas.screenshot();
+
+    await motionButton.click();
+    await expect(page.locator('[data-motion-running="true"]')).toBeVisible();
+    await expect(page.getByText(/Motion geometry: OK|Geometria ruchu: OK/)).toBeVisible();
+    await page.waitForTimeout(700);
+    const after = await canvas.screenshot();
+
+    expect(after.equals(before)).toBeFalsy();
+  } finally {
+    await request.delete(`${BACKEND_URL}/design/${designId}`);
+  }
+});
+
 type ToolCallEvent = {
   name: string;
   result?: Record<string, unknown>;
@@ -153,4 +204,32 @@ async function streamOneTurn(
     }
   }
   return { tool_calls, assistant_text };
+}
+
+async function streamOneDesignTurn(
+  request: import("@playwright/test").APIRequestContext,
+  designId: string,
+  message: string,
+): Promise<{ final: Record<string, unknown>; compliance: Record<string, unknown> }> {
+  const response = await request.post(`${BACKEND_URL}/design/${designId}/chat`, {
+    data: { message },
+    timeout: 180_000,
+  });
+  expect(response.ok()).toBeTruthy();
+  const body = await response.text();
+  let final: Record<string, unknown> = {};
+  let compliance: Record<string, unknown> = {};
+  for (const block of body.split("\n\n")) {
+    let event = "";
+    let data = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    if (!data) continue;
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    if (event === "turn_end") final = parsed;
+    if (event === "compliance_report") compliance = parsed;
+  }
+  return { final, compliance };
 }

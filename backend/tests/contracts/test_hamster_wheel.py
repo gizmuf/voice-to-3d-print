@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from services.codegen.engine import _coerce_targets, audit_then_run, run_manufacturability
+from services.codegen.engine import derive_parameters
 from services.codegen.templates import (
     get_seed_script,
     match_template_id,
@@ -64,6 +65,8 @@ def test_polish_rung_wheel_prompt_is_fully_parameterized_without_an_agent() -> N
 
     result = audit_then_run(script=script, targets=["stl", "glb"])
     assert result.ok, result.payload
+    parameter_names = [parameter.name for parameter in derive_parameters(result.payload)]
+    assert len(parameter_names) == len(set(parameter_names))
     bbox = result.payload["bbox_mm"]
     assert 199.0 <= bbox[0] <= 203.0
     assert 38.0 <= bbox[1] <= 58.0
@@ -74,3 +77,37 @@ def test_polish_rung_wheel_prompt_is_fully_parameterized_without_an_agent() -> N
     )
     assert not any(issue.code == "non_watertight" for issue in report.issues)
     assert not any(issue.code == "min_wall_thin" for issue in report.issues)
+
+
+def test_polish_semantic_dimension_qualifiers_stay_in_zero_cost_seed() -> None:
+    prompt = (
+        "Kołowrotek dla chomika: średnica kołowrotka 12 cm, "
+        "szerokość bieżnika 4 cm, dokładnie 24 szczebelki."
+    )
+
+    template_id, _, script = seed_for(prompt)
+
+    assert template_id == "hamster_wheel"
+    assert 'param("wheel_diameter", 120.0' in script
+    assert 'param("track_width", 40.0' in script
+    assert 'param("rung_count", 24' in script
+    assert prompt_seed_is_complete(prompt, template_id)
+
+
+def test_larger_wheel_compound_contacts_do_not_create_false_thin_wall_error() -> None:
+    prompt = (
+        "Kołowrotek dla chomika: średnica kołowrotka 15 cm, "
+        "szerokość bieżnika 4 cm, dokładnie 24 szczebelki."
+    )
+    _, _, script = seed_for(prompt)
+    result = audit_then_run(script=script, targets=["stl"])
+    assert result.ok, result.payload
+
+    report = run_manufacturability(
+        stl_path=Path(result.payload["artifacts"]["stl"]),
+        process="fdm",
+        printer_profile_id="prusa_mk4_default",
+    )
+
+    assert not any(issue.code == "min_wall_thin" for issue in report.issues)
+    assert report.status != "unprintable"

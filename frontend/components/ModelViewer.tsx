@@ -6,6 +6,7 @@ import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber"
 import type { Material, Mesh, PerspectiveCamera } from "three";
 import { Box3, Color, MOUSE, MathUtils, Sphere, Vector3 } from "three";
 import { uiText, type UiLanguage } from "../lib/ui-language";
+import type { MotionReport } from "../types/design";
 
 export type SelectionPayload = {
   objectName: string;
@@ -48,6 +49,7 @@ type ModelViewerProps = {
   selectionChip?: ReactNode;
   annotations?: ReactNode;
   language?: UiLanguage;
+  motionReport?: MotionReport | null;
 };
 
 type LoadedModelProps = {
@@ -414,6 +416,7 @@ export default function ModelViewer({
   selectionChip,
   annotations,
   language = "pl",
+  motionReport = null,
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
@@ -569,7 +572,11 @@ export default function ModelViewer({
   }
 
   return (
-    <div className="model-viewer-wrap">
+    <div
+      className="model-viewer-wrap"
+      data-motion-running={motionRunning ? "true" : "false"}
+      data-motion-status={motionReport?.status ?? (motionAvailable ? "preview-only" : "unavailable")}
+    >
       <Canvas
         key={viewerKey}
         camera={{ position: cameraPosition, fov: 40 }}
@@ -676,16 +683,23 @@ export default function ModelViewer({
         >
           {interactionMode === "orbit" ? uiText(language, "Tryb: obrót", "Mode: orbit") : uiText(language, "Tryb: przesuń", "Mode: pan")}
         </button>
-        {motionAvailable ? (
+        {motionAvailable && motionReport?.supported !== false ? (
           <button
             type="button"
             className="model-overlay-chip model-overlay-button subtle"
             aria-pressed={motionRunning}
-            title="Podgląd ruchu zespołu — bez symulacji tarcia i obciążeń"
+            disabled={motionReport?.status === "blocked"}
+            title={motionReport?.caveat ?? uiText(language, "Podgląd ruchu zespołu — bez symulacji tarcia i obciążeń", "Assembly motion preview — no friction or load simulation")}
             onClick={() => setMotionRunning((running) => !running)}
           >
             {motionRunning ? uiText(language, "Zatrzymaj koło", "Stop wheel") : uiText(language, "Test obrotu", "Test rotation")}
           </button>
+        ) : null}
+        {motionRunning && motionReport?.status === "safe" ? (
+          <div className="model-overlay-chip subtle" role="status">
+            {uiText(language, "Geometria ruchu: OK", "Motion geometry: OK")}
+            {motionReport.axle_clearance_mm != null ? ` · ${motionReport.axle_clearance_mm.toFixed(2)} mm` : ""}
+          </div>
         ) : null}
         <div ref={appearanceRef} className="model-appearance-panel">
           <button

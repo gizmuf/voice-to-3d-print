@@ -172,6 +172,10 @@ def test_eval_v2_case(case: dict, grid_plate_stl: Path) -> None:
         d.get("text", "") for ev, d in out["events"] if ev == "assistant_text"
     ).lower()
     final = next((d for ev, d in out["events"] if ev == "turn_end"), {})
+    compliance = next(
+        (d for ev, d in reversed(out["events"]) if ev == "compliance_report"),
+        {},
+    )
 
     if "expected_tools_called_any" in case:
         assert any(t in successful_tools for t in case["expected_tools_called_any"]), (
@@ -192,6 +196,17 @@ def test_eval_v2_case(case: dict, grid_plate_stl: Path) -> None:
         assert "?" in assistant_text, (
             f"Expected the agent to ask a clarifying question (no '?' in reply): "
             f"{assistant_text[:200]!r}"
+        )
+
+    if case.get("expected_model"):
+        assert final.get("model") == case["expected_model"], (
+            f"expected model={case['expected_model']!r}, got {final.get('model')!r}"
+        )
+
+    if case.get("expected_compliance_status"):
+        assert compliance.get("status") == case["expected_compliance_status"], (
+            f"expected compliance={case['expected_compliance_status']!r}, "
+            f"got {compliance!r}"
         )
 
     if case.get("checks"):
