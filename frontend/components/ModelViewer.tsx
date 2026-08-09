@@ -290,15 +290,17 @@ function LoadedModel({
 function SelectionMarker({ marker }: { marker: ViewerSelectionMarker }) {
   return createElement(
     "group",
-    { position: [marker.point.x, marker.point.y, marker.point.z] },
+    { position: [marker.point.x, marker.point.y, marker.point.z], renderOrder: 1000 },
     createElement(
       "mesh",
-      null,
+      { renderOrder: 1000 },
       createElement("sphereGeometry", { args: [2.2, 18, 18] }),
       createElement("meshStandardMaterial", {
         color: "#f59f3a",
         emissive: "#f59f3a",
         emissiveIntensity: 0.4,
+        depthTest: false,
+        depthWrite: false,
       })
     ),
     createElement(
