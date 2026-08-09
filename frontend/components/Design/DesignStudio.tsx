@@ -9,6 +9,7 @@ import SpeechToTextButton, { type VoiceState } from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
 import { displayModelName, formatUsd } from "../../lib/ai-cost";
+import { cadPointToViewer } from "../../lib/cad-coordinates";
 import { uiText, useUiLanguage, type UiLanguage } from "../../lib/ui-language";
 import { useDesignStream } from "../../lib/useDesignStream";
 import { useHealth } from "../../lib/useHealth";
@@ -432,7 +433,7 @@ export default function DesignStudio() {
     [backendUrl],
   );
 
-  const stream = useDesignStream(design?.design_id ?? null);
+  const stream = useDesignStream(design?.design_id ?? null, uiLanguage);
   const lastRevision = stream.latestRevisionId;
   const [externalSessionCost, setExternalSessionCost] = useState(0);
   useEffect(() => setExternalSessionCost(0), [design?.design_id]);
@@ -908,11 +909,11 @@ export default function DesignStudio() {
   const selectedManufacturabilityIssue =
     selectedManufacturabilityIssueIndex === null ? null : issues[selectedManufacturabilityIssueIndex] ?? null;
   const selectedManufacturabilityPoint = selectedManufacturabilityIssue?.location
-    ? {
+    ? cadPointToViewer({
         x: selectedManufacturabilityIssue.location[0],
         y: selectedManufacturabilityIssue.location[1],
         z: selectedManufacturabilityIssue.location[2],
-      }
+      })
     : null;
 
   useEffect(() => {
@@ -1781,7 +1782,7 @@ export default function DesignStudio() {
                               setSelectedFeaturePoint(null);
                             }}
                           >
-                            Locate
+                            {tx("Pokaż", "Locate")}
                           </button>
                         ) : null}
                         {issue.severity === "error" ? (

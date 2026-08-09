@@ -39,6 +39,41 @@ MAX_TOOL_ITERATIONS = 10
 MAX_FAILED_TOOL_CALLS = 2
 
 
+def _anthropic_failure_payload(exc: Exception) -> dict[str, Any]:
+    status_code = getattr(exc, "status_code", None)
+    request_id = getattr(exc, "request_id", None)
+    if status_code == 429:
+        code = "ai_rate_limited"
+        message = "Projektant AI jest teraz zajęty. Odczekaj chwilę i spróbuj ponownie."
+        retryable = True
+    elif status_code in {401, 403}:
+        code = "ai_auth_error"
+        message = "Projektant AI jest chwilowo niedostępny. Spróbuj ponownie za moment."
+        retryable = False
+    elif status_code == 400:
+        code = "ai_invalid_request"
+        message = (
+            "Nie udało się dokończyć tej wiadomości. Projekt pozostał bez zmian — "
+            "spróbuj wysłać ją ponownie."
+        )
+        retryable = True
+    else:
+        code = "ai_unavailable"
+        message = (
+            "Projektant AI jest chwilowo niedostępny. Projekt pozostał bez zmian — "
+            "spróbuj ponownie za moment."
+        )
+        retryable = True
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    }
+    if request_id:
+        payload["request_id"] = str(request_id)
+    return payload
+
+
 def _serialize_response_block(block: Any) -> dict[str, Any]:
     """Preserve Anthropic content blocks exactly enough for message replay.
 
@@ -243,9 +278,14 @@ def stream_turn(
         return
 
     if not settings.anthropic_api_key:
+        logger.error("anthropic_chat_not_configured design_id=%s", design_id)
         yield _sse(
             "error",
-            {"message": "ANTHROPIC_API_KEY is not configured on the backend."},
+            {
+                "code": "ai_auth_error",
+                "message": "Projektant AI jest chwilowo niedostępny. Spróbuj ponownie za moment.",
+                "retryable": False,
+            },
         )
         return
 
@@ -320,7 +360,16 @@ def stream_turn(
                     messages=history,
                 )
             except Exception as exc:
-                yield _sse("error", {"message": f"Anthropic call failed: {exc}"})
+                payload = _anthropic_failure_payload(exc)
+                logger.exception(
+                    "anthropic_chat_failed design_id=%s iteration=%s status_code=%s request_id=%s code=%s",
+                    design_id,
+                    iteration,
+                    getattr(exc, "status_code", None),
+                    getattr(exc, "request_id", None),
+                    payload["code"],
+                )
+                yield _sse("error", payload)
                 return
 
             usage = getattr(response, "usage", None)
@@ -421,13 +470,20 @@ def stream_turn(
                 )
             history.append({"role": "user", "content": tool_results})
             if failed_tool_calls >= MAX_FAILED_TOOL_CALLS:
+                logger.error(
+                    "cad_agent_retry_exhausted design_id=%s failed_tool_calls=%s",
+                    design_id,
+                    failed_tool_calls,
+                )
                 yield _sse(
                     "error",
                     {
+                        "code": "cad_retry_exhausted",
                         "message": (
-                            "Stopped after two failed CAD tool calls to avoid a costly retry loop. "
-                            "The design is unchanged; refine the request or use a known-good template."
-                        )
+                            "Nie udało się bezpiecznie wykonać tej zmiany po dwóch próbach. "
+                            "Projekt pozostał bez zmian — doprecyzuj polecenie albo spróbuj ponownie."
+                        ),
+                        "retryable": True,
                     },
                 )
                 break

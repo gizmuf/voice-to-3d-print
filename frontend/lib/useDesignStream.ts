@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { resolveBackendUrl, normalizeFetchError } from "./backend";
+import { friendlyChatError } from "./chat-errors";
+import type { UiLanguage } from "./ui-language";
 import type { ChatTurnEntry, ToolCall } from "../types/chat";
 
 type SSEvent = { event: string; data: Record<string, unknown> };
@@ -54,7 +56,7 @@ const parseSSEStream = async function* (
   }
 };
 
-export function useDesignStream(designId: string | null) {
+export function useDesignStream(designId: string | null, language: UiLanguage = "pl") {
   const backendUrl = resolveBackendUrl();
   const [history, setHistory] = useState<ChatTurnEntry[]>([]);
   const [state, setState] = useState<StreamState>({ status: "idle" });
@@ -172,9 +174,14 @@ export function useDesignStream(designId: string | null) {
             }));
           }
           if (ev.event === "error") {
-            const errorMessage = String(ev.data.message ?? "The CAD agent could not complete this edit.");
+            const errorMessage = friendlyChatError(ev.data, language);
             streamFailed = true;
             setState({ status: "error", errorMessage });
+            handleEvent(
+              { ...ev, data: { ...ev.data, message: errorMessage } },
+              { updateAssistant, setLatestRevisionId, setLifetimeCost },
+            );
+            continue;
           }
           handleEvent(ev, { updateAssistant, setLatestRevisionId, setLifetimeCost });
         }
@@ -189,7 +196,7 @@ export function useDesignStream(designId: string | null) {
         updateAssistant((entry) => ({ ...entry, text: entry.text || errorMessage }));
       }
     },
-    [backendUrl, designId],
+    [backendUrl, designId, language],
   );
 
   const cancel = useCallback(() => abortRef.current?.abort(), []);
