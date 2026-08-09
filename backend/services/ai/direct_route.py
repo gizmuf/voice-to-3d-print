@@ -24,6 +24,7 @@ _AMBIGUOUS = re.compile(
     re.IGNORECASE,
 )
 _NUMBER = re.compile(r"-?\d+(?:[.,]\d+)?")
+_TARGET_NUMBER = re.compile(r"\b(?:na|to)\s*(-?\d+(?:[.,]\d+)?)\b", re.IGNORECASE)
 
 _STEMS: dict[str, tuple[str, ...]] = {
     "diameter": ("średnic",),
@@ -59,7 +60,8 @@ def parse_direct_parameter_edit(
     normalized = _normalize(message)
     if not _EDIT.search(normalized) or "%" in message:
         return None
-    number_match = _NUMBER.search(normalized)
+    target_matches = list(_TARGET_NUMBER.finditer(normalized))
+    number_match = target_matches[-1] if target_matches else _NUMBER.search(normalized)
     if not number_match:
         return None
 
@@ -73,7 +75,8 @@ def parse_direct_parameter_edit(
         return None
 
     parameter = winners[0]
-    numeric = float(number_match.group(0).replace(",", "."))
+    number_text = number_match.group(1) if target_matches else number_match.group(0)
+    numeric = float(number_text.replace(",", "."))
     if parameter.type == "length_mm" and re.search(r"\b(cm|centymetr\w*)\b", normalized):
         numeric *= 10
     value: float | int = int(numeric) if isinstance(parameter.value, int) and numeric.is_integer() else numeric

@@ -20,6 +20,18 @@ def test_polish_rung_count_is_not_spoke_count() -> None:
     assert (edit.name, edit.value) == ("rung_count", 24)
 
 
+def test_polish_from_to_edit_uses_the_target_value() -> None:
+    params = [_param("height", 30.0), _param("width", 80.0)]
+
+    edit = parse_direct_parameter_edit(
+        "Zmień wysokość pudełka z 30 mm na 35 mm.",
+        params,
+    )
+
+    assert edit is not None
+    assert (edit.name, edit.value) == ("height", 35.0)
+
+
 def test_ambiguous_strength_request_requires_question() -> None:
     assert ambiguity_question("zrób ten wspornik bardziej wytrzymały") is not None
     assert ambiguity_question("ustaw grubość na 6 mm") is None
