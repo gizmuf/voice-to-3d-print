@@ -71,3 +71,19 @@ def test_percentage_without_direction_is_not_guessed() -> None:
     params = [_param("track_width", 40.0)]
 
     assert parse_direct_parameter_edits("ustaw szerokość bieżnika na 50%", params) == []
+
+
+def test_relative_millimeter_delta_adds_to_current_value() -> None:
+    params = [_param("plate_thickness", 4.0), _param("plate_height", 60.0)]
+
+    edits = parse_direct_parameter_edits("make the plate 2mm thicker", params)
+
+    assert [(edit.name, edit.value) for edit in edits] == [("plate_thickness", 6.0)]
+
+
+def test_relative_centimeter_delta_can_decrease() -> None:
+    params = [_param("track_width", 50.0), _param("wheel_diameter", 150.0)]
+
+    edits = parse_direct_parameter_edits("zmniejsz szerokość bieżnika o 1 cm węższą", params)
+
+    assert [(edit.name, edit.value) for edit in edits] == [("track_width", 40.0)]

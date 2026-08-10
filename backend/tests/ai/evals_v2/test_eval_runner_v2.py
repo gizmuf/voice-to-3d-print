@@ -22,6 +22,8 @@ from .checks import run_geometry_checks
 
 CASES_PATH = Path(__file__).parent / "cases" / "cases.json"
 EVAL_BASE_URL = os.getenv("PULSAI_EVAL_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+EVAL_MAX_COST_USD = float(os.getenv("PULSAI_EVAL_MAX_COST_USD", "0") or 0)
+EVAL_REPORT_PATH = os.getenv("PULSAI_EVAL_REPORT_PATH", "").strip()
 
 
 pytestmark = pytest.mark.skipif(
@@ -32,6 +34,14 @@ pytestmark = pytest.mark.skipif(
 
 def _load_cases() -> list[dict]:
     return json.loads(CASES_PATH.read_text())
+
+
+@pytest.fixture(scope="session")
+def cost_ledger() -> dict:
+    ledger = {"budget_usd": EVAL_MAX_COST_USD, "spent_usd": 0.0, "cases": []}
+    yield ledger
+    if EVAL_REPORT_PATH:
+        Path(EVAL_REPORT_PATH).write_text(json.dumps(ledger, indent=2))
 
 
 @pytest.fixture(scope="session")
@@ -149,7 +159,11 @@ def _stream_one_turn(design_id: str, message: str) -> dict:
 @pytest.mark.parametrize(
     "case", _load_cases(), ids=lambda c: c["name"]
 )
-def test_eval_v2_case(case: dict, grid_plate_stl: Path) -> None:
+def test_eval_v2_case(case: dict, grid_plate_stl: Path, cost_ledger: dict) -> None:
+    if EVAL_MAX_COST_USD and cost_ledger["spent_usd"] >= EVAL_MAX_COST_USD:
+        pytest.skip(
+            f"live eval budget reached: ${cost_ledger['spent_usd']:.4f} / ${EVAL_MAX_COST_USD:.2f}"
+        )
     design_id = _seed_design_from_fixture(case["fixture"], grid_plate_stl)
     try:
         out = _stream_one_turn(design_id, case["user_message"])
@@ -175,6 +189,20 @@ def test_eval_v2_case(case: dict, grid_plate_stl: Path) -> None:
     compliance = next(
         (d for ev, d in reversed(out["events"]) if ev == "compliance_report"),
         {},
+    )
+    case_cost = float(final.get("cost_usd", 0) or 0)
+    cost_ledger["spent_usd"] = round(cost_ledger["spent_usd"] + case_cost, 8)
+    cost_ledger["cases"].append(
+        {
+            "name": case["name"],
+            "cost_usd": case_cost,
+            "cumulative_cost_usd": cost_ledger["spent_usd"],
+            "model": final.get("model"),
+        }
+    )
+    print(
+        f"LIVE_EVAL_COST case={case['name']} cost=${case_cost:.4f} "
+        f"total=${cost_ledger['spent_usd']:.4f} budget=${EVAL_MAX_COST_USD:.2f}"
     )
 
     if "expected_tools_called_any" in case:

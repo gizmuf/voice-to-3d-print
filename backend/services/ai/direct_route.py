@@ -26,15 +26,22 @@ _AMBIGUOUS = re.compile(
 _NUMBER = re.compile(r"-?\d+(?:[.,]\d+)?")
 _TARGET_NUMBER = re.compile(r"\b(?:na|to)\s*(-?\d+(?:[.,]\d+)?)\b", re.IGNORECASE)
 _PERCENT = re.compile(r"(-?\d+(?:[.,]\d+)?)\s*%")
+_RELATIVE_DELTA = re.compile(
+    r"(-?\d+(?:[.,]\d+)?)\s*(mm|cm|centymetr\w*)?\s*"
+    r"(thicker|thinner|wider|narrower|taller|shorter|deeper|shallower|larger|smaller|"
+    r"grubsz\w*|cieńsz\w*|ciensz\w*|szersz\w*|węższ\w*|wezsz\w*|wyższ\w*|wyzsz\w*|"
+    r"niższ\w*|nizsz\w*|głębsz\w*|glebsz\w*|płytsz\w*|plytsz\w*)",
+    re.IGNORECASE,
+)
 _INCREASE = re.compile(r"\b(?:increase|enlarge|raise|zwiększ|powiększ|poszerz)\w*\b", re.IGNORECASE)
 _DECREASE = re.compile(r"\b(?:decrease|reduce|shrink|lower|zmniejsz|pomniejsz|zwęż)\w*\b", re.IGNORECASE)
 
 _STEMS: dict[str, tuple[str, ...]] = {
     "diameter": ("średnic",),
-    "width": ("szerokoś",),
-    "height": ("wysokoś",),
-    "depth": ("głębokoś",),
-    "thickness": ("gruboś",),
+    "width": ("szerokoś", "wid"),
+    "height": ("wysokoś", "height", "tall"),
+    "depth": ("głębokoś", "depth", "deep"),
+    "thickness": ("gruboś", "thick"),
     "count": ("liczb", "iloś"),
     "hole": ("otwor", "dziur"),
     "holes": ("otwor", "dziur"),
@@ -78,6 +85,24 @@ def parse_direct_parameter_edits(
     normalized = _normalize(message)
     if not _EDIT.search(normalized):
         return []
+
+    relative_delta = _RELATIVE_DELTA.search(normalized)
+    if relative_delta:
+        parameter = _unique_best_parameter(normalized, parameters)
+        if parameter is None or isinstance(parameter.value, (bool, str)):
+            return []
+        delta = float(relative_delta.group(1).replace(",", "."))
+        if parameter.type == "length_mm" and re.match(
+            r"^(?:cm|centymetr)", relative_delta.group(2) or "", re.IGNORECASE
+        ):
+            delta *= 10.0
+        comparative = relative_delta.group(3).lower()
+        negative = comparative.startswith(
+            ("thin", "narrow", "short", "shall", "small", "cień", "cien", "węż", "wez", "niż", "niz", "płyt", "plyt")
+        )
+        numeric = float(parameter.value) + (-delta if negative else delta)
+        value: float | int = int(round(numeric)) if isinstance(parameter.value, int) else numeric
+        return [DirectParameterEdit(name=parameter.name, value=value)]
 
     percent = _PERCENT.search(normalized)
     if percent:

@@ -17,13 +17,15 @@ from string import Template
 
 from pydantic import BaseModel, Field
 
+from config import settings
 from services.ai.tools_v2 import DesignContext
 from services.codegen.engine import (
     audit_then_run,
+    build_from_sandbox_result,
     derive_named_features,
     derive_parameters,
 )
-from services.codegen.store import new_revision_id, save_design
+from services.codegen.store import new_revision_id, save_build, save_design
 
 
 class MeshModifyHolesInput(BaseModel):
@@ -240,6 +242,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         script=new_script,
         parameter_overrides=overrides,
         targets=["stl"],
+        workspace_dir=settings.output_dir / "designs" / ctx.design.id,
         imported_files=ctx.design.metadata.get("imported_files") or None,
     )
     if not sandbox_result.ok:
@@ -265,6 +268,15 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         source_prompt=ctx.current_user_message,
     )
     save_design(ctx.design)
+    build = build_from_sandbox_result(
+        ctx.design,
+        sandbox_result,
+        parameter_overrides=overrides,
+        printer_profile_id=ctx.printer_profile_id,
+        process=ctx.design.process if ctx.design.process in ("fdm", "cnc") else "fdm",
+    )
+    save_build(ctx.design.id, build)
+    ctx.last_build = build
     return {
         "ok": True,
         "feature_name": feature_name,
@@ -272,6 +284,9 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         "min_radius_mm": params.min_radius_mm,
         "max_radius_mm": params.max_radius_mm,
         "new_revision_id": ctx.design.revision_id,
+        "mesh_hash": build.mesh_hash,
+        "bounding_box_mm": build.bounding_box_mm,
+        "artifacts": {kind: artifact.url for kind, artifact in build.artifacts.items()},
     }
 
 

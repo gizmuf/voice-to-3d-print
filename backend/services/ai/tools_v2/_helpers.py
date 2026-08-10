@@ -14,13 +14,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from config import settings
 from services.ai.tools_v2 import DesignContext
 from services.codegen.engine import (
     audit_then_run,
+    build_from_sandbox_result,
     derive_named_features,
     derive_parameters,
 )
-from services.codegen.store import new_revision_id, save_design
+from services.codegen.store import new_revision_id, save_build, save_design
 
 
 def append_block_and_build(
@@ -64,6 +66,7 @@ def append_block_and_build(
         script=new_script,
         parameter_overrides=overrides,
         targets=["stl"],
+        workspace_dir=settings.output_dir / "designs" / ctx.design.id,
         imported_files=ctx.design.metadata.get("imported_files") or None,
     )
     if not sandbox_result.ok:
@@ -89,11 +92,23 @@ def append_block_and_build(
         source_prompt=ctx.current_user_message,
     )
     save_design(ctx.design)
+    build = build_from_sandbox_result(
+        ctx.design,
+        sandbox_result,
+        parameter_overrides=overrides,
+        printer_profile_id=ctx.printer_profile_id,
+        process=ctx.design.process if ctx.design.process in ("fdm", "cnc") else "fdm",
+    )
+    save_build(ctx.design.id, build)
+    ctx.last_build = build
     out: dict[str, Any] = {
         "ok": True,
         "feature_name": feature_name,
         "new_revision_id": ctx.design.revision_id,
         "feature_count": len(ctx.design.features),
+        "mesh_hash": build.mesh_hash,
+        "bounding_box_mm": build.bounding_box_mm,
+        "artifacts": {kind: artifact.url for kind, artifact in build.artifacts.items()},
     }
     if extra_result_payload:
         out.update(extra_result_payload)
