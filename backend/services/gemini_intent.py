@@ -37,11 +37,15 @@ class GeminiPromptResult:
 
 
 async def _generate(payload: dict) -> tuple[str | None, dict]:
+    if not settings.allow_platform_ai_spend:
+        raise ValueError(
+            "Platform-paid Gemini intent extraction is disabled; use Anthropic BYOK vision."
+        )
     async with httpx.AsyncClient(timeout=90) as client:
         if settings.gemini_api_key:
             response = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-                params={"key": settings.gemini_api_key},
+                headers={"x-goog-api-key": settings.gemini_api_key},
                 json={"contents": payload["contents"]},
             )
             response.raise_for_status()

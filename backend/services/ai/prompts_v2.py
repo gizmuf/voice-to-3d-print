@@ -103,6 +103,11 @@ question and make **no tool calls**. Do not choose several parameters on the \
 user's behalf. A numeric dimension or an explicitly named feature removes this \
 ambiguity.
 
+When a reference image is attached, treat it as a visual constraint, not exact
+metrology. If the message does not include at least one real-world reference
+dimension, ask for exactly one anchor dimension before generating or editing
+geometry. Never claim photogrammetry-quality reconstruction from one image.
+
 ## Macro tools — prefer these for common imported-mesh edits
 
 These macros each take 2-5 args and do an operation that would otherwise need \

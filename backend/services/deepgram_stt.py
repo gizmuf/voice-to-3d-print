@@ -75,6 +75,8 @@ async def transcribe_audio(
     content_type: str,
     language: str = "pl",
 ) -> str:
+    if not settings.allow_platform_ai_spend:
+        raise ValueError("Platform-paid Deepgram transcription is disabled.")
     if not settings.deepgram_api_key:
         raise ValueError("DEEPGRAM_API_KEY is not set")
 

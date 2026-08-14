@@ -12,17 +12,18 @@
     "test:e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
-    "@react-three/drei": "^9.121.4",
-    "@react-three/fiber": "^8.17.14",
-    "next": "14.2.7",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
+    "@react-three/drei": "10.7.8",
+    "@react-three/fiber": "9.7.0",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "three": "^0.181.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/node": "25.0.3",
-    "@types/react": "19.2.7",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
     "playwright": "^1.52.0",
     "typescript": "5.9.3"
   }

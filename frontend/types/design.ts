@@ -90,6 +90,13 @@ export type DesignBuild = {
   manufacturability: Manufacturability | null;
   print_estimate?: PrintEstimate | null;
   duration_ms?: number;
+  selection_map?: Record<string, {
+    topology_ref: string;
+    feature_id?: string | null;
+    feature_name?: string | null;
+    surface_type?: string | null;
+    confidence: "feature_face" | "face" | "body";
+  }>;
 };
 
 export type DesignTemplate = { template_id: string; name: string };

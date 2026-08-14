@@ -1,0 +1,8 @@
+flowchart LR
+  U["Signed-in browser"] --> JWT["OIDC JWT verification"]
+  JWT --> POLICY["Central authorize(owner/member/share)"]
+  POLICY --> RESOURCE["Design and revision"]
+  POLICY --> QUOTA["Entitlement + atomic quota"]
+  POLICY --> ART["Authorized artifact delivery"]
+  QUOTA --> PAID["Paid provider or BYOK"]
+  RESOURCE --> DB["Private owner-scoped persistence"]

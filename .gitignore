@@ -18,6 +18,11 @@ backend/data/output/
 backend/data/telemetry/
 backend/logs/
 frontend/logs/
+frontend/test-results/
+frontend/playwright-report/
+.playwright-cli/
+output/playwright/
+output/backups/
 
 # Local secrets
 Keys/

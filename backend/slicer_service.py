@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import os
+import signal
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
 from meshlib import mrmeshpy as mm
 import trimesh
 
@@ -25,14 +27,6 @@ class ProcessResult:
 
 def _ensure_output_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-
-
-def _download_file(url: str, dest_path: Path) -> None:
-    with httpx.stream("GET", url, timeout=60) as response:
-        response.raise_for_status()
-        with dest_path.open("wb") as handle:
-            for chunk in response.iter_bytes():
-                handle.write(chunk)
 
 
 def _find_object_mesh(root: mm.Object) -> mm.ObjectMesh | None:
@@ -145,28 +139,44 @@ def _slice_mesh(stl_path: Path, gcode_path: Path, profile_id: str | None = None)
             str(stl_path),
         ]
     )
-    completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    if completed.stderr:
-        # PrusaSlicer writes some warnings to stderr; keep for debugging if needed.
-        pass
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=settings.slicer_timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise RuntimeError("PrusaSlicer exceeded the configured timeout.") from exc
+    if process.returncode != 0:
+        raise RuntimeError((stderr or stdout or "PrusaSlicer failed.")[:2000])
     if not gcode_path.is_file() or gcode_path.stat().st_size == 0:
         raise RuntimeError("PrusaSlicer completed without producing G-code.")
     return True
 
 
 def _resolve_local_artifact(glb_url: str) -> Path | None:
+    root = settings.output_dir.resolve()
     if glb_url.startswith("/artifacts/"):
         rel_path = glb_url.removeprefix("/artifacts/")
-        return settings.output_dir / rel_path
+        candidate = (root / rel_path).resolve()
+        return candidate if candidate.is_relative_to(root) else None
     parsed = urlparse(glb_url)
     if parsed.path.startswith("/artifacts/"):
         rel_path = parsed.path.removeprefix("/artifacts/")
-        return settings.output_dir / rel_path
+        candidate = (root / rel_path).resolve()
+        return candidate if candidate.is_relative_to(root) else None
     return None
 
 
 def process_model(glb_url: str, job_id: str | None = None) -> ProcessResult:
     job_id = job_id or uuid.uuid4().hex
+    if re.fullmatch(r"[a-f0-9]{32}", job_id) is None:
+        raise ValueError("Invalid job identifier.")
     job_dir = settings.output_dir / job_id
     _ensure_output_dir(job_dir)
 
@@ -178,7 +188,7 @@ def process_model(glb_url: str, job_id: str | None = None) -> ProcessResult:
     if local_source and local_source.exists():
         shutil.copy(local_source, glb_path)
     else:
-        _download_file(glb_url, glb_path)
+        raise ValueError("Remote model URLs are not accepted; use an owned local artifact.")
     _repair_mesh(glb_path, stl_path)
     validation = validate_mesh_file(stl_path)
     gcode_generated = _slice_mesh(stl_path, gcode_path)

@@ -48,7 +48,11 @@ def test_jewelry_trace_emits_buildable_organic_script() -> None:
     assert trace.svg_path
     assert len(trace.view_box) == 4
 
-    result = audit_then_run(script=trace.script, targets=["stl", "glb"])
+    result = audit_then_run(
+        script=trace.script,
+        targets=["stl", "glb"],
+        trusted_source=True,
+    )
     assert result.ok, result.payload.get("error")
     assert result.payload["bbox_mm"][0] > 30
     assert result.payload["bbox_mm"][2] >= 1.9
@@ -90,5 +94,9 @@ def test_jewelry_semantic_preview_graph_and_profile_build() -> None:
     preview["contours"][0]["role"] = "raised_relief"
     trace = trace_preview_to_script(preview)
     assert "raised_relief" in trace.script
-    result = audit_then_run(script=trace.script, targets=["stl", "glb"])
+    result = audit_then_run(
+        script=trace.script,
+        targets=["stl", "glb"],
+        trusted_source=True,
+    )
     assert result.ok, result.payload.get("error")

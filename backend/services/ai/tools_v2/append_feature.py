@@ -101,6 +101,8 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
     ctx.design.parent_revision_id = ctx.design.revision_id
     ctx.design.revision_id = new_revision_id()
     ctx.design.script = new_script
+    ctx.design.metadata.pop("trusted_script", None)
+    ctx.design.metadata.pop("trusted_script_sha256", None)
     ctx.design.parameters = derive_parameters(sandbox_result.payload)
     ctx.design.features = derive_named_features(
         sandbox_result.payload,

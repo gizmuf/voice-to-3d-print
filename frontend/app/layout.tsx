@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Fraunces, Space_Grotesk } from "next/font/google";
 import "../styles/globals.css";
+import GoogleAuthGate from "../components/Auth/GoogleAuthGate";
 
 const space = Space_Grotesk({
   subsets: ["latin"],
@@ -13,8 +14,8 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "3dprint",
-  description: "Serverless 3dprint prototype"
+  title: "Pulsai 3D",
+  description: "Conversation-first parametric CAD and 3D-print preparation."
 };
 
 export default function RootLayout({
@@ -23,9 +24,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="pl">
       <body className={`${space.variable} ${fraunces.variable}`}>
-        {children}
+        <GoogleAuthGate>{children}</GoogleAuthGate>
       </body>
     </html>
   );

@@ -78,6 +78,8 @@ def _generate_parametric(prompt: str) -> GenerationResult:
 
 
 async def _generate_meshy(prompt: str) -> GenerationResult:
+    if not settings.allow_platform_ai_spend:
+        raise ValueError("Platform-paid Meshy generation is disabled; use a customer-owned provider key.")
     if not settings.meshy_api_key:
         raise ValueError("MESHY_API_KEY is required for Meshy generation")
 
@@ -108,6 +110,8 @@ async def _generate_meshy(prompt: str) -> GenerationResult:
 
 
 async def _generate_tripo(prompt: str) -> GenerationResult:
+    if not settings.allow_platform_ai_spend:
+        raise ValueError("Platform-paid Tripo generation is disabled; use a customer-owned provider key.")
     if not settings.tripo_api_key:
         raise ValueError("TRIPO_API_KEY is required for Tripo generation")
 
@@ -241,6 +245,8 @@ async def _generate_tripo_from_image(
     filename: str,
     content_type: str,
 ) -> GenerationResult:
+    if not settings.allow_platform_ai_spend:
+        raise ValueError("Platform-paid Tripo generation is disabled; use a customer-owned provider key.")
     if not settings.tripo_api_key:
         raise ValueError("TRIPO_API_KEY is required for Tripo generation")
 
@@ -277,6 +283,8 @@ async def _generate_meshy_from_image(
     content: bytes,
     content_type: str,
 ) -> GenerationResult:
+    if not settings.allow_platform_ai_spend:
+        raise ValueError("Platform-paid Meshy generation is disabled; use a customer-owned provider key.")
     if not settings.meshy_api_key:
         raise ValueError("MESHY_API_KEY is required for Meshy generation")
 

@@ -137,6 +137,13 @@ async def generate_jewelry_concepts(
     profile_id: str = "resin_print",
     count: int = 3,
 ) -> dict[str, Any]:
+    if not settings.allow_platform_ai_spend:
+        return {
+            "configured": False,
+            "profile_id": profile_id,
+            "concepts": [],
+            "message": "Platform-paid image generation is disabled.",
+        }
     if not settings.openai_api_key:
         return {
             "configured": False,

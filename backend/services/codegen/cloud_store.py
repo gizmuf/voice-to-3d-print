@@ -101,7 +101,7 @@ def upload_build_artifacts(design_id: str, build: Any) -> None:
             f"{kind}/{path.name}"
         )
         blob = bucket.blob(object_path)
-        blob.cache_control = "public, max-age=31536000, immutable"
+        blob.cache_control = "private, max-age=0, no-store"
         content_type = mimetypes.guess_type(path.name)[0] or job_store._content_type_for_path(path)
         try:
             blob.upload_from_filename(str(path), content_type=content_type)

@@ -20,6 +20,11 @@ def _find_body(bodies: list[BodyNode], body_id: str, parent: BodyNode | None = N
 
 
 async def ai_edit_workspace_model(model: EditableModel, body_id: str, prompt: str) -> dict[str, float | str | bool]:
+    if not settings.allow_platform_ai_spend:
+        raise HTTPException(
+            status_code=403,
+            detail="Platform-paid AI edit is disabled; use customer BYOK.",
+        )
     if not model.bodies:
         raise HTTPException(status_code=400, detail="Workspace has no editable root body.")
 

@@ -38,7 +38,7 @@ def test_image_prompt_uses_direct_usage_metadata(monkeypatch) -> None:
 
         async def post(self, url: str, **kwargs):
             assert "gemini-3.5-flash-lite:generateContent" in url
-            assert kwargs["params"] == {"key": "test-key"}
+            assert kwargs["headers"] == {"x-goog-api-key": "test-key"}
             return Response()
 
     monkeypatch.setattr(gemini_intent.httpx, "AsyncClient", Client)
@@ -49,6 +49,7 @@ def test_image_prompt_uses_direct_usage_metadata(monkeypatch) -> None:
             gemini_api_key="test-key",
             gemini_model="gemini-3.5-flash-lite",
             gemini_proxy_url="https://proxy.invalid",
+            allow_platform_ai_spend=True,
         ),
     )
 

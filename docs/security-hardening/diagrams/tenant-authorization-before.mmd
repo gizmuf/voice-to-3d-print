@@ -1,0 +1,7 @@
+flowchart LR
+  U["Anonymous browser"] --> API["Public FastAPI"]
+  API --> ID["Design ID as locator and authority"]
+  API --> KEYS["Process-wide provider keys"]
+  ID --> FS["Firestore owner=anon, public=true"]
+  ID --> GCS["Public or durable GCS URL"]
+  KEYS --> PAID["Paid AI providers"]

@@ -73,6 +73,17 @@ def create_design(
     design_id: str | None = None,
 ) -> Design:
     design_id = design_id or new_design_id()
+    design_metadata = dict(metadata or {})
+    try:
+        from services.auth import current_owner_id
+
+        owner_id = current_owner_id()
+        if owner_id and "owner_id" not in design_metadata:
+            design_metadata["owner_id"] = owner_id
+    except Exception:
+        # Auth context is an API boundary concern; offline migrations and
+        # isolated build scripts can still create records explicitly.
+        pass
     design = Design(
         id=design_id,
         revision_id=new_revision_id(),
@@ -81,7 +92,7 @@ def create_design(
         parameters=parameters or [],
         features=features or [],
         process=process,  # type: ignore[arg-type]
-        metadata=metadata or {},
+        metadata=design_metadata,
     )
     save_design(design)
     return design
@@ -385,6 +396,7 @@ def record_ai_usage(design_id: str, entry: dict) -> dict:
     clean = {
         "provider": str(entry.get("provider") or "unknown"),
         "model": str(entry.get("model") or "unknown"),
+        "billing_source": str(entry.get("billing_source") or "platform"),
         "input_tokens": int(entry.get("input_tokens") or 0),
         "output_tokens": int(entry.get("output_tokens") or 0),
         "cache_read_tokens": int(entry.get("cache_read_tokens") or 0),

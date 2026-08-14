@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 from anthropic import Anthropic
 
 from config import settings
+from services.ai.anthropic_resilience import (
+    AnthropicCircuitOpen,
+    InvalidAnthropicApiKey,
+    call_messages_with_resilience,
+    resolve_anthropic_credentials,
+)
 from services.ai.compaction import maybe_compact_history
 from services.ai.direct_route import ambiguity_question, parse_direct_parameter_edits
 from services.ai.prompts_v2 import SYSTEM_PROMPT, render_turn_context
@@ -38,22 +44,93 @@ from services.codegen.store import (
     record_ai_usage,
     save_conversation,
 )
+from services.codegen.templates import get_seed_script
 
 
 MAX_TOOL_ITERATIONS = 10
 MAX_FAILED_TOOL_CALLS = 2
 
+_PARAMOTOR_OFFER_MARKER = "stylizowaną, geometryczną figurkę motoparalotniarza"
 
-def _anthropic_failure_payload(exc: Exception) -> dict[str, Any]:
+
+def _organic_paramotor_offer(user_message: str) -> str | None:
+    """Handle an unsupported realistic sculpt request without spending AI credit."""
+    needle = (user_message or "").lower()
+    is_paramotor = any(
+        word in needle
+        for word in ("motoparalotni", "paramotor", "paraglider pilot", "paralotn")
+    )
+    asks_for_figurine = any(word in needle for word in ("figur", "postać", "postac", "pilot"))
+    asks_for_realism = any(word in needle for word in ("realist", "dokładn", "dokladn", "szczegół", "szczegol"))
+    asks_for_stylized = any(word in needle for word in ("styliz", "low-poly", "low poly", "geometrycz"))
+    if not (is_paramotor and asks_for_figurine and asks_for_realism and not asks_for_stylized):
+        return None
+    return (
+        "Realistyczna figurka człowieka wymaga rzeźbienia organicznego lub image-to-mesh, "
+        "a nie parametrycznego CAD-u — nie chcę obciążać Twojego klucza próbą, której nie "
+        "potrafię tu uczciwie zweryfikować. Mogę za to od razu i bez kosztu utworzyć "
+        f"{_PARAMOTOR_OFFER_MARKER}: pilot, klatka, śmigło i podstawa, wysokość 120 mm, "
+        "gotową do dalszej kontroli FDM. Napisz „tak”, jeśli wybierasz ten wariant."
+    )
+
+
+def _history_contains_paramotor_offer(history: list[dict]) -> bool:
+    for message in reversed(history[-8:]):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and _PARAMOTOR_OFFER_MARKER in content:
+            return True
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and _PARAMOTOR_OFFER_MARKER in str(block.get("text", "")):
+                    return True
+    return False
+
+
+def _accepts_stylized_paramotor(user_message: str, history: list[dict]) -> bool:
+    needle = (user_message or "").strip().lower()
+    explicit = (
+        any(word in needle for word in ("motoparalotni", "paramotor", "paralotn"))
+        and any(word in needle for word in ("styliz", "low-poly", "low poly", "geometrycz"))
+    )
+    confirmation = needle in {
+        "tak", "tak.", "ok", "ok.", "okej", "zgoda", "rób", "rob", "zrób", "zrob",
+        "tak, zrób", "tak zrób", "tak, zrob", "tak zrob",
+    }
+    return explicit or (confirmation and _history_contains_paramotor_offer(history))
+
+
+def _anthropic_failure_payload(
+    exc: Exception,
+    *,
+    billing_source: str = "platform",
+) -> dict[str, Any]:
     status_code = getattr(exc, "status_code", None)
     request_id = getattr(exc, "request_id", None)
-    if status_code == 429:
+    if isinstance(exc, InvalidAnthropicApiKey):
+        code = "byok_invalid"
+        message = "Własny klucz Anthropic ma nieprawidłowy format. Sprawdź go i spróbuj ponownie."
+        retryable = False
+    elif isinstance(exc, AnthropicCircuitOpen):
+        code = "ai_circuit_open"
+        message = "Projektant AI odpoczywa po serii błędów dostawcy. Spróbuj ponownie za chwilę."
+        retryable = True
+    elif status_code == 429:
         code = "ai_rate_limited"
-        message = "Projektant AI jest teraz zajęty. Odczekaj chwilę i spróbuj ponownie."
+        message = (
+            "Twój klucz Anthropic osiągnął limit. Odczekaj chwilę lub sprawdź limity konta."
+            if billing_source == "customer_byok"
+            else "Projektant AI jest teraz zajęty. Odczekaj chwilę i spróbuj ponownie."
+        )
         retryable = True
     elif status_code in {401, 403}:
-        code = "ai_auth_error"
-        message = "Projektant AI jest chwilowo niedostępny. Spróbuj ponownie za moment."
+        code = "byok_auth_error" if billing_source == "customer_byok" else "ai_auth_error"
+        message = (
+            "Twój klucz Anthropic został odrzucony. Sprawdź jego ważność i uprawnienia."
+            if billing_source == "customer_byok"
+            else "Projektant AI jest chwilowo niedostępny. Spróbuj ponownie za moment."
+        )
         retryable = False
     elif status_code == 400:
         code = "ai_invalid_request"
@@ -101,9 +178,14 @@ def _serialize_response_block(block: Any) -> dict[str, Any]:
 
 
 def _anthropic_cost_usd(
-    *, input_tokens: int, output_tokens: int, cache_read_tokens: int, cache_creation_tokens: int
+    *,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
 ) -> float:
-    promo = settings.anthropic_chat_model == "claude-sonnet-5" and time.time() < 1788220800
+    promo = model == "claude-sonnet-5" and time.time() < 1788220800
     input_rate, output_rate = (2.0, 10.0) if promo else (3.0, 15.0)
     return (
         input_tokens * input_rate
@@ -193,6 +275,10 @@ def stream_turn(
     selected_feature_id: str | None = None,
     selected_feature_label: str | None = None,
     selected_topology_ref: str | None = None,
+    anthropic_api_key: str | None = None,
+    reference_image_base64: str | None = None,
+    reference_image_media_type: str | None = None,
+    reference_image_name: str | None = None,
 ) -> Iterator[str]:
     started = time.perf_counter()
 
@@ -211,8 +297,103 @@ def stream_turn(
         _repair_malformed_thinking_blocks(load_conversation(design_id))
     )
 
-    question = ambiguity_question(user_message)
-    direct_edits = parse_direct_parameter_edits(user_message, design.parameters)
+    organic_offer = _organic_paramotor_offer(user_message)
+    wants_stylized_paramotor = _accepts_stylized_paramotor(user_message, history)
+    if organic_offer or wants_stylized_paramotor:
+        history.append({"role": "user", "content": user_message})
+        yield _sse(
+            "turn_start",
+            {
+                "design_id": design_id,
+                "revision_id": ctx.design.revision_id,
+                "model": "local",
+                "billing_source": "none",
+            },
+        )
+        if organic_offer:
+            message = organic_offer
+        else:
+            _, paramotor_script = get_seed_script("stylized_paramotor")
+            rewrite_id = f"local-paramotor-{int(time.time() * 1000)}"
+            rewrite_input = {
+                "script": paramotor_script,
+                "rationale": "Validated local fallback for a stylized FDM paramotor pilot.",
+            }
+            # Do not stream or persist the full source script.  The UI only
+            # needs to know which validated local template is being applied.
+            public_input = {"template": "stylized_paramotor", "overall_height_mm": 120.0}
+            yield _sse(
+                "tool_call_start",
+                {"id": rewrite_id, "name": "rewrite_design", "input": public_input},
+            )
+            rewrite_result = execute_tool("rewrite_design", rewrite_input, ctx)
+            yield _sse(
+                "tool_call_end",
+                {
+                    "id": rewrite_id,
+                    "name": "rewrite_design",
+                    "result": rewrite_result,
+                    "is_error": bool(rewrite_result.get("error")),
+                },
+            )
+            if rewrite_result.get("error"):
+                message = (
+                    "Nie udało się bezpiecznie zbudować stylizowanej figurki. "
+                    "Projekt pozostał bez zmian — spróbuj ponownie."
+                )
+            else:
+                build_id = f"{rewrite_id}-build"
+                build_input = {"targets": ["stl", "step", "glb"], "process": "fdm"}
+                yield _sse(
+                    "tool_call_start",
+                    {"id": build_id, "name": "run_build", "input": build_input},
+                )
+                build_result = execute_tool("run_build", build_input, ctx)
+                yield _sse(
+                    "tool_call_end",
+                    {
+                        "id": build_id,
+                        "name": "run_build",
+                        "result": build_result,
+                        "is_error": bool(build_result.get("error")),
+                    },
+                )
+                if build_result.get("error"):
+                    message = (
+                        "Model został przygotowany, ale końcowa kontrola artefaktów nie przeszła. "
+                        "Nie oznaczam go jako gotowego do druku."
+                    )
+                else:
+                    status = ((build_result.get("manufacturability") or {}).get("status") or "unknown")
+                    message = (
+                        "Gotowe — utworzyłem lokalnie stylizowaną figurkę motoparalotniarza "
+                        "120 mm z pilotem, klatką, śmigłem i podstawą. Nie użyłem płatnego modelu. "
+                        f"Kontrola FDM: {status}. Przed drukiem uruchom „Przygotuj do druku”, "
+                        "żeby wykonać końcowy slicing dla wybranej drukarki."
+                    )
+        history.append({"role": "assistant", "content": [{"type": "text", "text": message}]})
+        save_conversation(design_id, _compact_for_persist(history))
+        yield _sse("assistant_text", {"text": message})
+        yield _sse(
+            "turn_end",
+            {
+                "design_id": design_id,
+                "revision_id": ctx.design.revision_id,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cost_usd": 0.0,
+                "model": "local",
+                "billing_source": "none",
+            },
+        )
+        return
+
+    has_reference_image = bool(reference_image_base64 and reference_image_media_type)
+    question = None if has_reference_image else ambiguity_question(user_message)
+    direct_edits = [] if has_reference_image else parse_direct_parameter_edits(user_message, design.parameters)
     if question or direct_edits:
         history.append({"role": "user", "content": user_message})
         yield _sse(
@@ -315,7 +496,17 @@ def stream_turn(
         )
         return
 
-    if not settings.anthropic_api_key:
+    try:
+        credentials = resolve_anthropic_credentials(
+            anthropic_api_key,
+            settings.anthropic_api_key,
+            allow_platform_billing=settings.allow_platform_ai_spend,
+        )
+    except InvalidAnthropicApiKey as exc:
+        yield _sse("error", _anthropic_failure_payload(exc, billing_source="customer_byok"))
+        return
+
+    if credentials is None:
         logger.error("anthropic_chat_not_configured design_id=%s", design_id)
         yield _sse(
             "error",
@@ -327,18 +518,45 @@ def stream_turn(
         )
         return
 
-    history, _ = maybe_compact_history(history)
-    history.append({"role": "user", "content": user_message})
+    # The SDK's implicit retries are disabled so this service owns one bounded,
+    # testable retry budget instead of multiplying nested retry loops.
+    client = Anthropic(
+        api_key=credentials.api_key,
+        max_retries=0,
+        timeout=settings.anthropic_timeout_s,
+    )
+    history, _ = maybe_compact_history(history, client=client)
+    user_content: str | list[dict[str, Any]] = user_message
+    if has_reference_image:
+        user_content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": reference_image_media_type,
+                    "data": reference_image_base64,
+                },
+            },
+            {
+                "type": "text",
+                "text": (
+                    f"Reference image{f' ({reference_image_name})' if reference_image_name else ''}. "
+                    f"{user_message}"
+                ),
+            },
+        ]
+    history.append({"role": "user", "content": user_content})
+    active_model = settings.anthropic_chat_model
     yield _sse(
         "turn_start",
         {
             "design_id": design_id,
             "revision_id": ctx.design.revision_id,
-            "model": settings.anthropic_chat_model,
+            "model": active_model,
+            "billing_source": credentials.billing_source,
         },
     )
 
-    client = Anthropic(api_key=settings.anthropic_api_key)
     total_in = total_out = cache_read = cache_write = 0
     failed_tool_calls = 0
     persisted = False
@@ -369,40 +587,81 @@ def stream_turn(
                 yield _sse(
                     "model_activity",
                     {
-                        "model": settings.anthropic_chat_model,
+                        "model": active_model,
                         "mode": "recovery",
                         "activity": "Pierwsza próba nie przeszła walidacji — analizuję bezpieczną poprawkę…",
                     },
                 )
                 recovery_announced = True
             try:
-                response = client.messages.create(
-                    model=settings.anthropic_chat_model,
-                    max_tokens=(
-                        max(settings.anthropic_max_output_tokens, 3000)
-                        if recovery_mode
-                        else settings.anthropic_max_output_tokens
+                call = call_messages_with_resilience(
+                    client,
+                    primary_model=active_model,
+                    fallback_models=(
+                        [settings.anthropic_fallback_model]
+                        if active_model == settings.anthropic_chat_model
+                        else []
                     ),
-                    # Sonnet 5 enables adaptive thinking by default. Routine CAD
-                    # turns should stay fast and predictable; hard-task routing
-                    # can opt into thinking separately when we add it.
-                    thinking={"type": "adaptive"} if recovery_mode else {"type": "disabled"},
-                    **({"output_config": {"effort": "medium"}} if recovery_mode else {}),
-                    system=_system_blocks(
-                        ctx,
-                        selected_feature_id=selected_feature_id,
-                        selected_feature_label=selected_feature_label,
-                        selected_topology_ref=selected_topology_ref,
-                    ),
-                    tools=TOOL_DEFINITIONS,
-                    messages=history,
+                    request_kwargs={
+                        "max_tokens": (
+                            max(settings.anthropic_max_output_tokens, 3000)
+                            if recovery_mode
+                            else settings.anthropic_max_output_tokens
+                        ),
+                        # Sonnet 5 enables adaptive thinking by default. Routine CAD
+                        # turns should stay fast and predictable.
+                        "thinking": (
+                            {"type": "adaptive"}
+                            if recovery_mode
+                            else {"type": "disabled"}
+                        ),
+                        **(
+                            {"output_config": {"effort": "medium"}}
+                            if recovery_mode
+                            else {}
+                        ),
+                        "system": _system_blocks(
+                            ctx,
+                            selected_feature_id=selected_feature_id,
+                            selected_feature_label=selected_feature_label,
+                            selected_topology_ref=selected_topology_ref,
+                        ),
+                        "tools": TOOL_DEFINITIONS,
+                        "messages": history,
+                    },
+                    circuit_scope=credentials.circuit_scope,
+                    max_attempts=settings.anthropic_retry_max_attempts,
+                    base_delay_s=settings.anthropic_retry_base_delay_s,
+                    max_delay_s=settings.anthropic_retry_max_delay_s,
+                    failure_threshold=settings.anthropic_circuit_failure_threshold,
+                    cooldown_s=settings.anthropic_circuit_cooldown_s,
                 )
+                response = call.response
+                active_model = str(getattr(response, "model", None) or call.model)
+                if call.attempts > 1 or call.fallback_used:
+                    yield _sse(
+                        "model_activity",
+                        {
+                            "model": active_model,
+                            "mode": "provider_recovery",
+                            "activity": (
+                                "Dostawca wrócił po ponowieniu; kontynuuję bez utraty projektu."
+                                if not call.fallback_used
+                                else "Model podstawowy był niedostępny; kontynuuję na modelu zapasowym."
+                            ),
+                        },
+                    )
             except Exception as exc:
-                payload = _anthropic_failure_payload(exc)
+                payload = _anthropic_failure_payload(
+                    exc,
+                    billing_source=credentials.billing_source,
+                )
                 logger.exception(
-                    "anthropic_chat_failed design_id=%s iteration=%s status_code=%s request_id=%s code=%s",
+                    "anthropic_chat_failed design_id=%s iteration=%s model=%s billing_source=%s status_code=%s request_id=%s code=%s",
                     design_id,
                     iteration,
+                    active_model,
+                    credentials.billing_source,
                     getattr(exc, "status_code", None),
                     getattr(exc, "request_id", None),
                     payload["code"],
@@ -580,6 +839,7 @@ def stream_turn(
         _persist_history()
         if total_in or total_out or cache_read or cache_write:
             turn_cost_usd = _anthropic_cost_usd(
+                model=active_model,
                 input_tokens=total_in,
                 output_tokens=total_out,
                 cache_read_tokens=cache_read,
@@ -590,7 +850,8 @@ def stream_turn(
                     design_id,
                     {
                         "provider": "anthropic",
-                        "model": settings.anthropic_chat_model,
+                        "model": active_model,
+                        "billing_source": credentials.billing_source,
                         "input_tokens": total_in,
                         "output_tokens": total_out,
                         "cache_read_tokens": cache_read,
@@ -612,12 +873,14 @@ def stream_turn(
             "cache_read_tokens": cache_read,
             "cache_creation_tokens": cache_write,
             "cost_usd": turn_cost_usd,
-            "model": settings.anthropic_chat_model,
+            "model": active_model,
+            "billing_source": credentials.billing_source,
         },
     )
 
 
 _PERSIST_TOOL_RESULT_CAP = 1200
+_PERSIST_TOOL_INPUT_CAP = 600
 
 
 def _compact_for_persist(history: list[dict]) -> list[dict]:
@@ -643,6 +906,35 @@ def _compact_for_persist(history: list[dict]) -> list[dict]:
             continue
         new_blocks: list[dict] = []
         for block in content:
+            if isinstance(block, dict) and block.get("type") == "image":
+                new_blocks.append(
+                    {
+                        "type": "text",
+                        "text": "[Reference image was supplied for this turn and was not persisted.]",
+                    }
+                )
+                continue
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tool_input = block.get("input")
+                if isinstance(tool_input, dict) and isinstance(tool_input.get("script"), str):
+                    script = tool_input["script"]
+                    new_blocks.append(
+                        {
+                            **block,
+                            "input": {
+                                **tool_input,
+                                "script": (
+                                    script[:_PERSIST_TOOL_INPUT_CAP]
+                                    + (
+                                        f" …[source truncated; {len(script) - _PERSIST_TOOL_INPUT_CAP} more chars]"
+                                        if len(script) > _PERSIST_TOOL_INPUT_CAP
+                                        else ""
+                                    )
+                                ),
+                            },
+                        }
+                    )
+                    continue
             if (
                 isinstance(block, dict)
                 and block.get("type") == "tool_result"
@@ -662,6 +954,16 @@ def _compact_for_persist(history: list[dict]) -> list[dict]:
                 new_blocks.append(block)
         out.append({**msg, "content": new_blocks})
     return out
+
+
+def load_repaired_conversation(design_id: str, *, persist: bool = True) -> list[dict]:
+    """Return a transcript safe for both UI hydration and Anthropic replay."""
+    original = load_conversation(design_id)
+    repaired = _repair_dangling_tool_uses(_repair_malformed_thinking_blocks(original))
+    compacted = _compact_for_persist(repaired)
+    if persist and compacted != original:
+        save_conversation(design_id, compacted)
+    return compacted
 
 
 def _repair_dangling_tool_uses(history: list[dict]) -> list[dict]:

@@ -17,7 +17,10 @@ export default function ChatMessage({ entry }: { entry: ChatTurnEntry }) {
     <div style={assistantRowStyle} className="chat-message chat-message-assistant">
       <div style={avatarStyle} aria-hidden>P</div>
       <div style={assistantStyle}>
-        <div style={assistantLabelStyle}>{displayModelName(entry.model)}</div>
+        <div style={assistantLabelStyle}>
+          {displayModelName(entry.model)}
+          {entry.billingSource === "customer_byok" ? " · Twój klucz" : ""}
+        </div>
         {entry.toolCalls.length ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {entry.toolCalls.map((call) => (
