@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { resolveSttUrl } from "../lib/backend";
+import { resolveBackendUrl } from "../lib/backend";
 
 type SpeechToTextButtonProps = {
   disabled?: boolean;
@@ -24,7 +24,7 @@ export default function SpeechToTextButton({
   onStateChange,
 }: SpeechToTextButtonProps) {
   const t = (polish: string, english: string) => language === "en" ? english : polish;
-  const sttUrl = resolveSttUrl();
+  const backendUrl = resolveBackendUrl();
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -66,7 +66,9 @@ export default function SpeechToTextButton({
       const extension = blob.type.includes("ogg") ? "ogg" : "webm";
       form.append("audio", blob, `pulsai-recording.${extension}`);
       form.append("language", language);
-      const response = await fetch(`${sttUrl}/stt`, { method: "POST", body: form });
+      // The browser must go through the authenticated backend. The standalone
+      // STT service is an internal deployment protected by its own token.
+      const response = await fetch(`${backendUrl}/stt`, { method: "POST", body: form });
       const payload = (await response.json().catch(() => null)) as
         | { transcript?: string; detail?: string }
         | null;
