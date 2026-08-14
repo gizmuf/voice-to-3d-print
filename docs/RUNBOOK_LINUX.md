@@ -1,9 +1,10 @@
 # Linux / VPS runbook
 
-Canonical checkout:
+Run every command from the checkout being validated. Resolve it once instead
+of relying on a machine-specific absolute path:
 
-```text
-/home/codex/workspace/repos/candao-3d-stack
+```bash
+PULSAI_REPO_ROOT="$(git rev-parse --show-toplevel)"
 ```
 
 The VPS checkout is the development and validation environment. Production
@@ -21,7 +22,7 @@ and routing.
 ## Backend
 
 ```bash
-cd /home/codex/workspace/repos/candao-3d-stack/backend
+cd "$PULSAI_REPO_ROOT/backend"
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements-dev.txt
@@ -40,7 +41,7 @@ is not proven until a safe model produces a G-code artifact.
 `NEXT_PUBLIC_*` values are embedded at build time:
 
 ```bash
-cd /home/codex/workspace/repos/candao-3d-stack/frontend
+cd "$PULSAI_REPO_ROOT/frontend"
 npm ci
 NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 \
 NEXT_PUBLIC_STT_URL=http://127.0.0.1:8010 \
@@ -54,7 +55,7 @@ build. Do not expose raw backend/STT ports directly to the internet.
 ## STT
 
 ```bash
-cd /home/codex/workspace/repos/candao-3d-stack/stt-service
+cd "$PULSAI_REPO_ROOT/stt-service"
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 PULSAI_ALLOW_PLATFORM_AI_SPEND=false \
@@ -68,14 +69,14 @@ configured and a microphone test passes.
 ## Free validation gate
 
 ```bash
-cd /home/codex/workspace/repos/candao-3d-stack/backend
+cd "$PULSAI_REPO_ROOT/backend"
 PULSAI_AUTH_REQUIRED=false PULSAI_INSECURE_LOCAL_DEV=true \
 PULSAI_PUBLIC_SAFE_MODE=true \
 .venv/bin/python -m pytest -q tests \
   --ignore=tests/ai/evals/test_eval_runner.py \
   --ignore=tests/ai/evals_v2/test_eval_runner_v2.py
 
-cd /home/codex/workspace/repos/candao-3d-stack/frontend
+cd "$PULSAI_REPO_ROOT/frontend"
 npm run test:unit
 npx --no-install tsc --noEmit
 npm run build
