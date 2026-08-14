@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { resolveBackendUrl, normalizeFetchError } from "./backend";
 import { friendlyChatError } from "./chat-errors";
+import { anthropicByokHeaders } from "./anthropic-byok";
+import { hydrateDesignConversation } from "./design-conversation";
 import type { UiLanguage } from "./ui-language";
 import type { ChatTurnEntry, ToolCall } from "../types/chat";
 
@@ -14,6 +16,7 @@ type StreamState = {
   errorMessage?: string;
   activity?: string;
   model?: string;
+  billingSource?: string;
   previewUpdating?: boolean;
 };
 
@@ -21,6 +24,9 @@ type SendOptions = {
   selectedFeatureId?: string | null;
   selectedFeatureLabel?: string | null;
   selectedTopologyRef?: string | null;
+  referenceImageBase64?: string | null;
+  referenceImageMediaType?: string | null;
+  referenceImageName?: string | null;
 };
 
 const parseSSEStream = async function* (
@@ -56,7 +62,11 @@ const parseSSEStream = async function* (
   }
 };
 
-export function useDesignStream(designId: string | null, language: UiLanguage = "pl") {
+export function useDesignStream(
+  designId: string | null,
+  language: UiLanguage = "pl",
+  anthropicApiKey = "",
+) {
   const backendUrl = resolveBackendUrl();
   const [history, setHistory] = useState<ChatTurnEntry[]>([]);
   const [state, setState] = useState<StreamState>({ status: "idle" });
@@ -87,7 +97,7 @@ export function useDesignStream(designId: string | null, language: UiLanguage = 
       .then((res) => (res.ok ? res.json() : null))
       .then((payload) => {
         if (cancelled || !payload) return;
-        const hydrated = hydrate(payload.messages || []);
+        const hydrated = hydrateDesignConversation(payload.messages || []);
         setHistory((current) => (current.length > 0 ? current : hydrated));
         setLifetimeCost(Number(payload.usage_totals?.cost_usd ?? 0));
       })
@@ -132,12 +142,18 @@ export function useDesignStream(designId: string | null, language: UiLanguage = 
       try {
         const response = await fetch(`${backendUrl}/design/${designId}/chat`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...anthropicByokHeaders(anthropicApiKey),
+          },
           body: JSON.stringify({
             message,
             selected_feature_id: options.selectedFeatureId || null,
             selected_feature_label: options.selectedFeatureLabel || null,
             selected_topology_ref: options.selectedTopologyRef || null,
+            reference_image_base64: options.referenceImageBase64 || null,
+            reference_image_media_type: options.referenceImageMediaType || null,
+            reference_image_name: options.referenceImageName || null,
           }),
           signal: controller.signal,
         });
@@ -145,17 +161,24 @@ export function useDesignStream(designId: string | null, language: UiLanguage = 
           throw new Error(`Chat request failed: ${response.status}`);
         }
         let streamFailed = false;
+        let sawTurnEnd = false;
         for await (const ev of parseSSEStream(response)) {
           if (controller.signal.aborted) break;
           if (ev.event === "turn_start") {
             const model = typeof ev.data.model === "string" ? ev.data.model : undefined;
-            setState({ status: "streaming", activity: "Rozumiem zmianę…", model, previewUpdating: false });
-            updateAssistant((entry) => ({ ...entry, model: model ?? entry.model }));
+            const billingSource = typeof ev.data.billing_source === "string" ? ev.data.billing_source : undefined;
+            setState({ status: "streaming", activity: "Rozumiem zmianę…", model, billingSource, previewUpdating: false });
+            updateAssistant((entry) => ({
+              ...entry,
+              model: model ?? entry.model,
+              billingSource: billingSource ?? entry.billingSource,
+            }));
           } else if (ev.event === "model_activity") {
             setState((current) => ({
               status: "streaming",
               activity: String(ev.data.activity ?? "Sprawdzam poprawkę…"),
               model: typeof ev.data.model === "string" ? ev.data.model : current.model,
+              billingSource: current.billingSource,
             }));
           } else if (ev.event === "tool_call_start") {
             const toolName = String(ev.data.name ?? "");
@@ -163,6 +186,7 @@ export function useDesignStream(designId: string | null, language: UiLanguage = 
               status: "streaming",
               activity: activityForTool(toolName),
               model: typeof ev.data.model === "string" ? ev.data.model : current.model,
+              billingSource: current.billingSource,
               previewUpdating: toolUpdatesPreview(toolName) || current.previewUpdating,
             }));
           } else if (ev.event === "tool_call_end") {
@@ -183,11 +207,52 @@ export function useDesignStream(designId: string | null, language: UiLanguage = 
             );
             continue;
           }
+          if (ev.event === "turn_end") sawTurnEnd = true;
           handleEvent(ev, { updateAssistant, setLatestRevisionId, setLifetimeCost });
         }
-        if (!streamFailed) setState((current) => ({ status: "idle", model: current.model }));
+        if (!streamFailed && !controller.signal.aborted && !sawTurnEnd) {
+          const errorMessage = language === "pl"
+            ? "Połączenie przerwało się przed zakończeniem operacji. Projekt zachował ostatnią poprawną wersję — spróbuj ponownie."
+            : "The connection ended before the operation completed. Your design kept its last valid version — please retry.";
+          streamFailed = true;
+          updateAssistant((entry) => ({
+            ...entry,
+            text: entry.text || errorMessage,
+            toolCalls: entry.toolCalls.map((call) =>
+              call.status === "pending" || call.status === "running"
+                ? {
+                    ...call,
+                    status: "error",
+                    isError: true,
+                    result: { error: "operation_interrupted" },
+                  }
+                : call,
+            ),
+          }));
+          setState({ status: "error", errorMessage });
+        }
+        if (!streamFailed) {
+          setState((current) => ({
+            status: "idle",
+            model: current.model,
+            billingSource: current.billingSource,
+          }));
+        }
       } catch (error) {
         if (controller.signal.aborted) {
+          updateAssistant((entry) => ({
+            ...entry,
+            toolCalls: entry.toolCalls.map((call) =>
+              call.status === "pending" || call.status === "running"
+                ? {
+                    ...call,
+                    status: "error",
+                    isError: true,
+                    result: { error: "operation_cancelled" },
+                  }
+                : call,
+            ),
+          }));
           setState({ status: "idle" });
           return;
         }
@@ -196,7 +261,7 @@ export function useDesignStream(designId: string | null, language: UiLanguage = 
         updateAssistant((entry) => ({ ...entry, text: entry.text || errorMessage }));
       }
     },
-    [backendUrl, designId, language],
+    [anthropicApiKey, backendUrl, designId, language],
   );
 
   const cancel = useCallback(() => abortRef.current?.abort(), []);
@@ -291,10 +356,14 @@ function handleEvent(
     if (revisionId) helpers.setLatestRevisionId(revisionId);
   } else if (event === "turn_end") {
     const revisionId = typeof data.revision_id === "string" ? data.revision_id : null;
+    const model = typeof data.model === "string" ? data.model : undefined;
+    const billingSource = typeof data.billing_source === "string" ? data.billing_source : undefined;
     if (revisionId) helpers.setLatestRevisionId(revisionId);
     helpers.updateAssistant((entry) => ({
       ...entry,
       revisionIdAfter: revisionId ?? entry.revisionIdAfter,
+      model: model ?? entry.model,
+      billingSource: billingSource ?? entry.billingSource,
       tokens: {
         input: Number(data.input_tokens ?? 0),
         output: Number(data.output_tokens ?? 0),
@@ -313,73 +382,4 @@ function handleEvent(
       text: entry.text ? `${entry.text}\n\n[error] ${message}` : `[error] ${message}`,
     }));
   }
-}
-
-type ServerMessage = {
-  role: string;
-  content:
-    | string
-    | Array<{
-        type: string;
-        text?: string;
-        id?: string;
-        name?: string;
-        input?: Record<string, unknown>;
-        tool_use_id?: string;
-        content?: string;
-        is_error?: boolean;
-      }>;
-};
-
-function hydrate(messages: ServerMessage[]): ChatTurnEntry[] {
-  const entries: ChatTurnEntry[] = [];
-  for (const message of messages) {
-    if (message.role === "user" && typeof message.content === "string") {
-      entries.push({ kind: "user", text: message.content });
-      continue;
-    }
-    if (message.role === "user" && Array.isArray(message.content)) {
-      const toolResults = message.content.filter((b) => b.type === "tool_result");
-      if (!toolResults.length) continue;
-      for (let i = entries.length - 1; i >= 0; i -= 1) {
-        const entry = entries[i];
-        if (entry.kind !== "assistant") continue;
-        entry.toolCalls = entry.toolCalls.map((c) => {
-          const match = toolResults.find((r) => r.tool_use_id === c.id);
-          if (!match) return c;
-          let parsed: unknown = match.content;
-          try {
-            parsed = match.content ? JSON.parse(match.content) : null;
-          } catch {
-            // keep raw
-          }
-          return {
-            ...c,
-            status: match.is_error ? "error" : "done",
-            result: parsed,
-            isError: match.is_error,
-          };
-        });
-        break;
-      }
-      continue;
-    }
-    if (message.role === "assistant" && Array.isArray(message.content)) {
-      let text = "";
-      const toolCalls: ToolCall[] = [];
-      for (const block of message.content) {
-        if (block.type === "text" && typeof block.text === "string") text += block.text;
-        else if (block.type === "tool_use" && block.id && block.name) {
-          toolCalls.push({
-            id: block.id,
-            name: block.name,
-            input: block.input ?? {},
-            status: "pending",
-          });
-        }
-      }
-      entries.push({ kind: "assistant", text, toolCalls });
-    }
-  }
-  return entries;
 }

@@ -6,6 +6,7 @@ import { resolveBackendUrl } from "./backend";
 
 export type HealthSnapshot = {
   slicer_ready: boolean;
+  platform_ai_spend_enabled: boolean;
   warnings: string[];
 };
 
@@ -22,6 +23,7 @@ async function fetchHealth(): Promise<HealthSnapshot | null> {
       if (!payload) return null;
       cached = {
         slicer_ready: Boolean(payload.slicer_ready),
+        platform_ai_spend_enabled: Boolean(payload.platform_ai_spend_enabled),
         warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
       };
       return cached;

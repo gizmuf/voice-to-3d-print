@@ -144,6 +144,14 @@ class PrintEstimate(BaseModel):
     cost_usd_per_g: float | None = None
 
 
+class SelectionReference(BaseModel):
+    topology_ref: str
+    feature_id: str | None = None
+    feature_name: str | None = None
+    surface_type: str | None = None
+    confidence: Literal["feature_face", "face", "body"] = "face"
+
+
 class Build(BaseModel):
     revision_id: str
     mesh_hash: str
@@ -152,6 +160,7 @@ class Build(BaseModel):
     manufacturability: ManufacturabilityReport | None = None
     parameter_snapshot: dict[str, Any] = Field(default_factory=dict)
     print_estimate: PrintEstimate | None = None
+    selection_map: dict[str, SelectionReference] = Field(default_factory=dict)
     duration_ms: int = 0
     log: str = ""
 

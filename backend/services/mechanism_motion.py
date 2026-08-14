@@ -72,7 +72,10 @@ def _has_glb_node(build: Build | None, node_name: str) -> bool:
         import trimesh
 
         scene = trimesh.load(path, force="scene")
-        return node_name in set(scene.graph.nodes_geometry)
+        # Semantic face previews keep the moving assembly as a parent node and
+        # place selectable B-rep faces below it. A node need not own one flat
+        # geometry blob in order to be a valid separately transformable group.
+        return node_name in set(scene.graph.nodes)
     except Exception:
         return False
 

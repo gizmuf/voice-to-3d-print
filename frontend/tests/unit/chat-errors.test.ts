@@ -25,3 +25,9 @@ test("uses a specific retry message for rate limiting", () => {
   );
 });
 
+test("explains a rejected customer key without exposing provider details", () => {
+  assert.equal(
+    friendlyChatError({ code: "byok_auth_error", message: "internal" }, "en"),
+    "Your Anthropic key is invalid. Check its format, expiration, and permissions.",
+  );
+});

@@ -12,7 +12,11 @@ from services.mechanism_motion import evaluate_mechanism_motion
 
 def test_hamster_wheel_motion_contract_has_separate_node_and_clearance() -> None:
     _, script = get_seed_script("hamster_wheel")
-    sandbox = audit_then_run(script=script, targets=["stl", "glb"])
+    sandbox = audit_then_run(
+        script=script,
+        targets=["stl", "glb"],
+        trusted_source=True,
+    )
     assert sandbox.ok, sandbox.payload
     design = Design(
         id="b" * 32,

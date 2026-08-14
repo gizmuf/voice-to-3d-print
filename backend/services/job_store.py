@@ -18,6 +18,17 @@ JOBS_COLLECTION = "three_d_jobs"
 PROJECTS_COLLECTION = "three_d_projects"
 
 
+def _current_owner() -> str:
+    from services.auth import current_owner_id
+
+    owner_id = current_owner_id()
+    if owner_id:
+        return owner_id
+    if settings.insecure_local_dev:
+        return "local-dev"
+    raise RuntimeError("An authenticated owner is required for project/job persistence.")
+
+
 def _firebase_enabled() -> bool:
     if not (settings.firebase_project_id or settings.firebase_storage_bucket):
         return False
@@ -58,9 +69,11 @@ def _get_bucket() -> Optional[admin_storage.bucket.Bucket]:
 
 
 def _build_storage_url(bucket_name: str, object_path: str) -> str:
-    if settings.storage_public_base_url:
+    if settings.allow_public_artifacts and settings.storage_public_base_url:
         return f"{settings.storage_public_base_url.rstrip('/')}/{object_path}"
-    return f"https://storage.googleapis.com/{bucket_name}/{object_path}"
+    if settings.allow_public_artifacts:
+        return f"https://storage.googleapis.com/{bucket_name}/{object_path}"
+    return f"/cloud-artifacts/{object_path}"
 
 
 def _expand_dotted(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,8 +109,11 @@ def ensure_project(project_id: str, data: Dict[str, Any]) -> None:
 
     payload = dict(data)
     payload["project_id"] = project_id
-    payload["public"] = True
-    payload["owner_id"] = "anon"
+    owner_id = _current_owner()
+    if snapshot.exists and (snapshot.to_dict() or {}).get("owner_id") != owner_id:
+        return
+    payload["public"] = False
+    payload["owner_id"] = owner_id
     payload["updated_at"] = admin_firestore.SERVER_TIMESTAMP
     if not snapshot.exists:
         payload.setdefault("name", "Untitled Project")
@@ -116,6 +132,9 @@ def update_project(project_id: str, data: Dict[str, Any]) -> None:
     if client is None:
         return
     doc = client.collection(PROJECTS_COLLECTION).document(project_id)
+    snapshot = doc.get()
+    if not snapshot.exists or (snapshot.to_dict() or {}).get("owner_id") != _current_owner():
+        return
     payload = dict(data)
     payload["updated_at"] = admin_firestore.SERVER_TIMESTAMP
     try:
@@ -128,20 +147,21 @@ def update_project(project_id: str, data: Dict[str, Any]) -> None:
 
 
 def create_project(name: Optional[str] = None) -> Dict[str, Any]:
+    owner_id = _current_owner()
     client = _get_firestore()
     if client is None:
         return {
             "project_id": uuid.uuid4().hex,
             "name": name or "Untitled Project",
-            "public": True,
-            "owner_id": "anon",
+            "public": False,
+            "owner_id": owner_id,
         }
     project_ref = client.collection(PROJECTS_COLLECTION).document()
     payload = {
         "project_id": project_ref.id,
         "name": name or "Untitled Project",
-        "public": True,
-        "owner_id": "anon",
+        "public": False,
+        "owner_id": owner_id,
         "created_at": admin_firestore.SERVER_TIMESTAMP,
         "updated_at": admin_firestore.SERVER_TIMESTAMP,
     }
@@ -160,6 +180,7 @@ def list_projects(limit: int = 50) -> list[Dict[str, Any]]:
         return []
     query = (
         client.collection(PROJECTS_COLLECTION)
+        .where("owner_id", "==", _current_owner())
         .order_by("updated_at", direction=admin_firestore.Query.DESCENDING)
         .limit(limit)
     )
@@ -182,6 +203,8 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
         return None
     if not snapshot.exists:
         return None
+    if (snapshot.to_dict() or {}).get("owner_id") != _current_owner():
+        return None
     return _serialize_snapshot(snapshot)
 
 
@@ -192,6 +215,7 @@ def list_jobs_for_project(project_id: str, limit: int = 50) -> list[Dict[str, An
     query = (
         client.collection(JOBS_COLLECTION)
         .where("project_id", "==", project_id)
+        .where("owner_id", "==", _current_owner())
         .order_by("created_at", direction=admin_firestore.Query.DESCENDING)
         .limit(limit)
     )
@@ -215,8 +239,11 @@ def ensure_job(job_id: str, data: Dict[str, Any]) -> None:
 
     payload = dict(data)
     payload["job_id"] = job_id
-    payload["public"] = True
-    payload["owner_id"] = "anon"
+    owner_id = _current_owner()
+    if snapshot.exists and (snapshot.to_dict() or {}).get("owner_id") != owner_id:
+        return
+    payload["public"] = False
+    payload["owner_id"] = owner_id
     payload["updated_at"] = admin_firestore.SERVER_TIMESTAMP
     project_id = payload.get("project_id")
     if isinstance(project_id, str) and project_id:
@@ -237,6 +264,9 @@ def update_job(job_id: str, data: Dict[str, Any]) -> None:
     if client is None:
         return
     doc = client.collection(JOBS_COLLECTION).document(job_id)
+    snapshot = doc.get()
+    if not snapshot.exists or (snapshot.to_dict() or {}).get("owner_id") != _current_owner():
+        return
     payload = dict(data)
     payload["updated_at"] = admin_firestore.SERVER_TIMESTAMP
     try:
@@ -276,13 +306,11 @@ def upload_artifact(job_id: str, path: Path) -> Optional[Dict[str, Any]]:
         return None
     object_path = f"three-d/jobs/{job_id}/{path.name}"
     blob = bucket.blob(object_path)
-    blob.cache_control = "public, max-age=31536000"
+    blob.cache_control = "private, max-age=0, no-store"
     try:
         blob.upload_from_filename(str(path), content_type=_content_type_for_path(path))
-        try:
+        if settings.allow_public_artifacts:
             blob.make_public()
-        except Exception:
-            pass
     except Exception as exc:
         logger.warning("Storage upload failed: %s", exc)
         return None

@@ -13,6 +13,10 @@ const copy = {
     pl: "Projektant AI jest chwilowo niedostępny. Projekt pozostał bez zmian — spróbuj ponownie za moment.",
     en: "The AI designer is temporarily unavailable. Your design is unchanged — try again shortly.",
   },
+  byokInvalid: {
+    pl: "Własny klucz Anthropic jest nieprawidłowy. Sprawdź format, ważność i uprawnienia klucza.",
+    en: "Your Anthropic key is invalid. Check its format, expiration, and permissions.",
+  },
 } as const;
 
 export function friendlyChatError(
@@ -24,7 +28,10 @@ export function friendlyChatError(
   if (code === "ai_rate_limited" || /rate.?limit|429/i.test(raw)) {
     return copy.busy[language];
   }
-  if (code === "ai_unavailable" || code === "ai_auth_error") {
+  if (code === "byok_invalid" || code === "byok_auth_error") {
+    return copy.byokInvalid[language];
+  }
+  if (code === "ai_unavailable" || code === "ai_auth_error" || code === "ai_circuit_open") {
     return copy.unavailable[language];
   }
   if (
@@ -36,4 +43,3 @@ export function friendlyChatError(
   }
   return raw && raw.length <= 240 ? raw : copy.retry[language];
 }
-

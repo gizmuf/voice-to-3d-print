@@ -105,6 +105,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         "ok": True,
         "revision_id": build.revision_id,
         "mesh_hash": build.mesh_hash,
+        "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
         "bounding_box_mm": build.bounding_box_mm,
         "artifacts": {k: a.url for k, a in build.artifacts.items()},
         "manufacturability": (

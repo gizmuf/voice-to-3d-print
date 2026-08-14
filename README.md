@@ -1,24 +1,41 @@
-# 3dprint (Serverless Prototype)
+# Pulsai 3D Stack
 
-A voice-driven pipeline that captures speech, extracts 3D design intent, generates a GLB model from a cloud API, repairs geometry with MeshLib, and slices to G-code with PrusaSlicer. The default providers favor lower-cost options for prototyping.
+[![License: AGPL v3 or later](https://img.shields.io/badge/License-AGPL_v3_or_later-blue.svg)](LICENSE)
+
+Pulsai 3D is an AI-first, CAD-first design studio: describe or show a part,
+inspect the editable model, refine it through chat, voice, parameters, or
+selection, then validate and prepare it for manufacturing. The source of truth
+is build123d/OpenCascade CAD and its revisions; GLB/STL are derived artifacts.
 
 ## Stack
-- **Frontend:** Next.js + React + browser SpeechRecognition + `<model-viewer>`
-- **Voice Orchestration:** Browser STT (default) or Deepgram STT + Gemini intent extraction via proxy
-- **3D Generation:** Meshy (default), Tripo, Parametric (free), Trellis2 (image-to-3D via GPU service), TripoSR (local image-to-3D)
-- **Manufacturing:** MeshLib repair + PrusaSlicer CLI
+- **Frontend:** Next.js, React, Three.js / React Three Fiber, and drei.
+- **CAD:** build123d/OpenCascade and CadQuery, with audited Python source,
+  parameter snapshots, named features, revisions, and STEP-first exports.
+- **AI:** deterministic local edits first; Anthropic agent for ambiguous or
+  structural CAD work. Customer BYOK is supported and platform-paid AI is
+  disabled by default.
+- **Mesh / manufacturing:** trimesh, MeshLib, manifold3d, and PrusaSlicer CLI.
+- **Voice:** browser speech recognition or the optional Deepgram STT service.
+- **Persistence:** Firestore metadata and immutable GCS artifacts in managed
+  production; local filesystem is only a development cache.
 
 ## Architecture Flow
-1. User speaks in browser (Web Speech API or Deepgram recording).
-2. Speech is transcribed locally (browser) or via Deepgram.
-3. Gemini extracts a clean text prompt.
-4. Selected provider generates a GLB model from the prompt or image.
-5. MeshLib repairs mesh and exports STL.
-6. PrusaSlicer produces G-code for download.
+1. The user starts with text, voice, an image reference, or imported CAD/mesh.
+2. Deterministic parameter edits run locally; harder requests use the CAD agent
+   only when the customer supplies a key or platform spend is explicitly enabled.
+3. Audited CAD source builds in an isolated, resource-limited subprocess.
+4. A successful revision persists source, parameters, mesh hash, STEP/STL/GLB,
+   and the current preview atomically.
+5. Manufacturability checks gate slicing; PrusaSlicer produces FDM G-code for
+   models that pass the configured profile's hard checks.
 
-## Local Setup (Mac)
+## Local Setup
+
+The canonical Linux/VPS instructions are in
+[`docs/RUNBOOK_LINUX.md`](docs/RUNBOOK_LINUX.md).
+
 ### 1) Backend
-Python 3.10–3.13 recommended (Pipecat does not yet support 3.14).
+Python 3.11–3.13 is supported by the current pinned environment.
 
 ```bash
 cd backend
@@ -47,10 +64,11 @@ npm run dev
 Open http://localhost:3000
 
 ## Notes
-- **Cheapest defaults:** `THREED_PROVIDER=parametric` and Gemini via the existing proxy (`GEMINI_PROXY_URL`).
+- **Cheapest defaults:** `THREED_PROVIDER=parametric` and deterministic parameter edits; both avoid paid model calls.
 - **PrusaSlicer:** Set `PRUSASLICER_PATH` and `PRUSASLICER_CONFIG` in `.env`.
 - **Provider switching:** Set `THREED_PROVIDER=meshy`, `THREED_PROVIDER=tripo`, `THREED_PROVIDER=parametric`, `THREED_PROVIDER=trellis2`, or `THREED_PROVIDER=triposr`.
-- **Gemini proxy:** The default proxy is the Gut Feeling Cloud Run endpoint already wired with a Gemini key.
+- **Legacy Gemini proxy:** There is no default. If enabled for compatibility,
+  it must be owned by this stack and remains subject to the platform-spend gate.
 - **Deepgram STT (optional):** Set `DEEPGRAM_API_KEY` to enable server transcription from recorded audio.
 - **Model library option:** Add GLB links to `backend/data/model_library.json` for local catalog search.
 - **Sketchfab search (optional):** Set `SKETCHFAB_API_TOKEN` to search downloadable models and retrieve GLB links.
@@ -59,15 +77,13 @@ Open http://localhost:3000
 - **Trellis2 API:** Set `TRELLIS2_API_URL` plus `TRELLIS2_IMAGE_ENDPOINT` to enable image-to-3D via a Trellis2 GPU service. Text-to-3D requires a custom `TRELLIS2_TEXT_ENDPOINT`.
 - **TripoSR local:** Set `TRIPOSR_ROOT` (path to the TripoSR repo) and optionally `TRIPOSR_CACHE_DIR` (e.g. an external drive). TripoSR is image-to-3D only and runs on CPU if no CUDA GPU is present.
 
-## Local TripoSR (Optional)
-1) Clone TripoSR somewhere with space (external drive recommended).
-2) Create a TripoSR venv and install its dependencies.
-3) Set in `backend/.env`:
-   - `TRIPOSR_ROOT=/Volumes/Gizmuf external/3dprint/triposr/TripoSR`
-   - `TRIPOSR_CACHE_DIR=/Volumes/Gizmuf external/3dprint/triposr/cache`
-   - `TRIPOSR_PYTHON=/Volumes/Gizmuf external/3dprint/triposr/venv/bin/python`
-   - Optional: `OUTPUT_DIR=/Volumes/Gizmuf external/3dprint/artifacts` to keep artifacts off the Mac disk
-   - Note: wrap paths with spaces in quotes in your shell/env files.
+## Local TripoSR (Optional GPU Worker)
+
+TripoSR is disabled in the baseline and is not required for CAD, preview, or
+slicing. If a dedicated GPU worker is approved later, clone it outside this
+checkout, create an isolated environment, and configure `TRIPOSR_ROOT`,
+`TRIPOSR_CACHE_DIR`, and `TRIPOSR_PYTHON` with VPS/worker-local paths. Do not
+make a laptop checkout or an unrelated product repository a runtime dependency.
 
 ## Endpoints
 
@@ -166,17 +182,29 @@ tools, and is gated by a per-template/source capability matrix.
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6              # verify against current Anthropic docs
+ANTHROPIC_CHAT_MODEL=claude-sonnet-5
 ANTHROPIC_CLASSIFY_MODEL=claude-haiku-4-5-20251001  # used in Phase 2 routing
+ANTHROPIC_FALLBACK_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_OUTPUT_TOKENS=1500
 OPENAI_API_KEY=sk-...                               # optional jewelry concept generation
 OPENAI_IMAGE_MODEL=gpt-image-1.5
 DEFAULT_PRINTER_PROFILE_ID=prusa_mk4_default
 ```
 
-`GEMINI_PROXY_URL` remains supported but is *legacy-only*; it is read solely by
-the deprecated `/workspace/{id}/ai-edit` endpoint, which is scheduled for
-deletion in Phase 2.
+`GEMINI_PROXY_URL` remains supported but is *legacy-only* and has no default.
+If used, it must point to a runtime owned by this 3D Stack; another product is
+never a dependency or credential source.
+
+### Anthropic reliability and customer BYOK
+
+Transient 429/5xx/529 failures use bounded exponential backoff with jitter,
+`Retry-After`, a circuit breaker, and `ANTHROPIC_FALLBACK_MODEL`. The browser
+can optionally send the customer's own Anthropic key for a turn, so Anthropic
+bills that customer's account. The key stays in the current tab's memory and is
+not persisted. BYOK never silently falls back to the Pulsai platform key.
+
+See `docs/SECURITY_AND_SECRETS.md` and `docs/RUNBOOK_LINUX.md` for Cloud Run
+Secret Manager verification and the canonical VPS setup.
 
 ### Tools available to the agent
 
@@ -280,3 +308,15 @@ frontend/
   components/
   styles/
 ```
+
+## License and user designs
+
+The application source is licensed under **GNU AGPL-3.0-or-later**; see
+[`LICENSE`](LICENSE). If you run a modified version as a network service, the
+AGPL generally requires offering its users the corresponding source code for
+that modified service. It does not, by itself, require users to publish the CAD
+models, prompts, images, STL/STEP files, or G-code they create with Pulsai 3D.
+
+“Pulsai” names and logos are not licensed as trademarks. Commercial licensing
+for organizations that cannot use AGPL can be offered separately by the
+copyright holder. This summary is practical project guidance, not legal advice.

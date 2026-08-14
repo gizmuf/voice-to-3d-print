@@ -1,0 +1,188 @@
+"use client";
+
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
+
+import { resolveBackendUrl } from "../../lib/backend";
+
+type AuthConfig = {
+  required: boolean;
+  google_client_id: string;
+};
+
+type GoogleCredentialResponse = { credential?: string };
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (options: {
+            client_id: string;
+            callback: (response: GoogleCredentialResponse) => void;
+            auto_select?: boolean;
+          }) => void;
+          renderButton: (
+            element: HTMLElement,
+            options: Record<string, string | number | boolean>,
+          ) => void;
+          disableAutoSelect: () => void;
+        };
+      };
+    };
+  }
+}
+
+export default function GoogleAuthGate({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const backendUrl = resolveBackendUrl();
+  const [config, setConfig] = useState<AuthConfig | null>(null);
+  const [credential, setCredential] = useState("");
+  const [error, setError] = useState("");
+  const buttonRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fetch(`${backendUrl}/auth/config`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Auth configuration failed: ${response.status}`);
+        return response.json() as Promise<AuthConfig>;
+      })
+      .then(setConfig)
+      .catch(() => setError("Nie udało się sprawdzić konfiguracji logowania."));
+  }, [backendUrl]);
+
+  useEffect(() => {
+    if (!config?.required || !config.google_client_id || credential) return;
+    const initialize = () => {
+      if (!window.google || !buttonRef.current) return;
+      window.google.accounts.id.initialize({
+        client_id: config.google_client_id,
+        auto_select: false,
+        callback: async (response) => {
+          if (!response.credential) {
+            setError("Google nie zwrócił ważnej sesji.");
+            return;
+          }
+          try {
+            const session = await fetch(`${backendUrl}/auth/session`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${response.credential}` },
+              credentials: "include",
+            });
+            if (!session.ok) throw new Error("session rejected");
+            setError("");
+            setCredential(response.credential);
+          } catch {
+            setError("Nie udało się utworzyć bezpiecznej sesji. Spróbuj ponownie.");
+          }
+        },
+      });
+      buttonRef.current.replaceChildren();
+      window.google.accounts.id.renderButton(buttonRef.current, {
+        type: "standard",
+        theme: "outline",
+        size: "large",
+        text: "continue_with",
+        shape: "pill",
+        width: 280,
+      });
+    };
+    const existing = document.querySelector<HTMLScriptElement>("script[data-pulsai-google-login]");
+    if (existing) {
+      if (window.google) initialize();
+      else existing.addEventListener("load", initialize, { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.dataset.pulsaiGoogleLogin = "true";
+    script.addEventListener("load", initialize, { once: true });
+    script.addEventListener("error", () => setError("Nie udało się wczytać Google Login."), { once: true });
+    document.head.appendChild(script);
+  }, [config, credential]);
+
+  useEffect(() => {
+    if (!credential) return;
+    const originalFetch = window.fetch.bind(window);
+    const backendOrigin = new URL(backendUrl, window.location.href).origin;
+    window.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const rawUrl = input instanceof Request ? input.url : String(input);
+      const target = new URL(rawUrl, window.location.href);
+      if (target.origin !== backendOrigin) return originalFetch(input, init);
+      const headers = new Headers(input instanceof Request ? input.headers : undefined);
+      new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+      headers.set("authorization", `Bearer ${credential}`);
+      const response = await originalFetch(input, { ...init, headers, credentials: "include" });
+      if (response.status === 401) {
+        setCredential("");
+        window.google?.accounts.id.disableAutoSelect();
+      }
+      return response;
+    };
+    return () => {
+      window.fetch = originalFetch;
+    };
+  }, [backendUrl, credential]);
+
+  // Google requires the homepage and privacy policy linked from OAuth branding
+  // to remain publicly accessible, including before a user signs in.
+  if (pathname === "/privacy" || pathname === "/terms") {
+    return <AppWithSource>{children}</AppWithSource>;
+  }
+  if (error) return <AuthShell message={error} buttonRef={buttonRef} />;
+  if (!config) return <AuthShell message="Sprawdzam bezpieczne logowanie…" />;
+  if (!config.required) return <AppWithSource>{children}</AppWithSource>;
+  if (!config.google_client_id) {
+    return <AuthShell message="Google Login nie jest jeszcze skonfigurowany po stronie serwera." />;
+  }
+  if (!credential) {
+    return (
+      <AuthShell
+        message="Zaloguj się przez Google, aby projekty i pliki były widoczne tylko dla Ciebie."
+        buttonRef={buttonRef}
+      />
+    );
+  }
+  return <AppWithSource>{children}</AppWithSource>;
+}
+
+function AppWithSource({ children }: { children: ReactNode }) {
+  return (
+    <>
+      {children}
+      <a
+        href="https://github.com/gizmuf/voice-to-3d-print"
+        target="_blank"
+        rel="noreferrer"
+        style={{ position: "fixed", right: 12, bottom: 8, zIndex: 2000, fontSize: 11, opacity: 0.62 }}
+      >
+        Source · AGPL-3.0
+      </a>
+    </>
+  );
+}
+
+function AuthShell({
+  message,
+  buttonRef,
+}: {
+  message: string;
+  buttonRef?: React.RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
+      <section style={{ width: "min(440px, 100%)", padding: 32, border: "1px solid rgba(0,0,0,.12)", borderRadius: 20, background: "rgba(255,255,255,.9)", textAlign: "center", boxShadow: "0 20px 60px rgba(23,34,44,.12)" }}>
+        <strong style={{ display: "block", fontSize: 24, marginBottom: 12 }}>Pulsai 3D</strong>
+        <p style={{ lineHeight: 1.55, opacity: 0.75 }}>{message}</p>
+        {buttonRef ? <div ref={buttonRef} style={{ display: "flex", justifyContent: "center", marginTop: 20 }} /> : null}
+        <nav style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 22, fontSize: 12 }}>
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="https://github.com/gizmuf/voice-to-3d-print" target="_blank" rel="noreferrer">Source</a>
+        </nav>
+      </section>
+    </main>
+  );
+}

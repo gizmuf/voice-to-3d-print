@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-
 import type { ToolCall } from "../../types/chat";
 
 const STATUS_LABELS: Record<ToolCall["status"], string> = {
@@ -19,39 +17,19 @@ const STATUS_COLORS: Record<ToolCall["status"], string> = {
 };
 
 export default function ToolCallCard({ call }: { call: ToolCall }) {
-  const [open, setOpen] = useState(call.isError === true);
   const summary = summariseCall(call);
   const resultLine = summariseResult(call);
 
   return (
     <div className="tool-call-card" style={cardStyle(call.status)}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={headerStyle}
-        aria-expanded={open}
-      >
+      <div style={headerStyle}>
         <span style={dotStyle(call.status)} />
         <span style={{ fontWeight: 600 }}>{call.name}</span>
         <span style={{ flex: 1, opacity: 0.8, marginLeft: 6 }}>{summary}</span>
         <span style={{ opacity: 0.7, fontSize: 11 }}>{STATUS_LABELS[call.status]}</span>
-      </button>
+      </div>
       {resultLine ? (
         <div style={resultLineStyle(call.status)}>{resultLine}</div>
-      ) : null}
-      {open ? (
-        <div style={bodyStyle}>
-          <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 4 }}>input</div>
-          <pre style={preStyle}>{JSON.stringify(call.input, null, 2)}</pre>
-          {call.result !== undefined ? (
-            <>
-              <div style={{ fontSize: 11, opacity: 0.6, margin: "8px 0 4px" }}>
-                result
-              </div>
-              <pre style={preStyle}>{JSON.stringify(call.result, null, 2)}</pre>
-            </>
-          ) : null}
-        </div>
       ) : null}
     </div>
   );
@@ -62,8 +40,7 @@ function summariseResult(call: ToolCall): string | null {
   const r = call.result as Record<string, unknown> | undefined;
   if (!r) return null;
   if (call.isError || r.error) {
-    const err = String(r.error ?? "Tool returned an error");
-    return `✕ ${err.slice(0, 220)}`;
+    return "✕ Nie udało się bezpiecznie zastosować tej operacji. Projekt pozostał bez zmian.";
   }
   if (call.name === "update_parameter") {
     const name = call.input.name as string | undefined;
@@ -118,6 +95,13 @@ function formatValue(v: unknown): string {
 }
 
 function summariseCall(call: ToolCall): string {
+  if (call.name === "rewrite_design") return "przebudowa modelu CAD";
+  if (call.name === "run_build") return "budowanie i kontrola artefaktów";
+  if (call.name === "update_parameter") {
+    const name = String(call.input.name ?? "parametr");
+    const value = call.input.new_value;
+    return `${name} → ${formatValue(value)}`;
+  }
   if (call.name === "mutate_parameter") {
     const node = call.input.node_id;
     const param = call.input.param_name;
@@ -158,23 +142,8 @@ const headerStyle: React.CSSProperties = {
   background: "transparent",
   color: "inherit",
   padding: "6px 10px",
-  cursor: "pointer",
+  cursor: "default",
   textAlign: "left",
-};
-
-const bodyStyle: React.CSSProperties = {
-  borderTop: "1px solid rgba(255,255,255,0.08)",
-  padding: "8px 10px",
-  background: "rgba(0,0,0,0.18)",
-};
-
-const preStyle: React.CSSProperties = {
-  margin: 0,
-  whiteSpace: "pre-wrap",
-  wordBreak: "break-word",
-  fontSize: 11,
-  fontFamily:
-    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
 };
 
 function dotStyle(status: ToolCall["status"]): React.CSSProperties {

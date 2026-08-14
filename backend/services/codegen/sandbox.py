@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -52,6 +54,12 @@ def _runner_command() -> list[str]:
     return [interpreter, "-I", str(here)]
 
 
+def _positive_limit(value: int | None, default: int) -> int:
+    """Return a usable byte limit without allowing zero/negative disablement."""
+    candidate = default if value is None else int(value)
+    return candidate if candidate > 0 else default
+
+
 def _build_env(workdir: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k in SAFE_ENV_KEYS}
     env["HOME"] = str(workdir)
@@ -69,6 +77,79 @@ def _build_env(workdir: Path) -> dict[str, str]:
     return env
 
 
+def _kill_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _run_bounded(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_s: float,
+    output_limit: int,
+) -> tuple[int, str, str, bool, bool]:
+    """Run a child while bounding combined stdout/stderr and all descendants."""
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None and process.stderr is not None
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + timeout_s
+    timed_out = False
+    output_limited = False
+
+    while process.poll() is None or selector.get_map():
+        if process.poll() is None and time.monotonic() >= deadline:
+            timed_out = True
+            _kill_process_group(process)
+        events = selector.select(timeout=0.1) if selector.get_map() else []
+        for key, _ in events:
+            chunk = os.read(key.fileobj.fileno(), 65536)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            remaining = output_limit - sum(len(value) for value in buffers.values())
+            if remaining <= 0 or len(chunk) > remaining:
+                output_limited = True
+                if remaining > 0:
+                    buffers[key.data].extend(chunk[:remaining])
+                _kill_process_group(process)
+            else:
+                buffers[key.data].extend(chunk)
+        if process.poll() is not None and not events:
+            for fileobj in list(selector.get_map().values()):
+                try:
+                    selector.unregister(fileobj.fileobj)
+                except Exception:
+                    pass
+
+    try:
+        return_code = process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_process_group(process)
+        return_code = process.wait(timeout=1.0)
+    return (
+        return_code,
+        buffers["stdout"].decode("utf-8", "replace"),
+        buffers["stderr"].decode("utf-8", "replace"),
+        timed_out,
+        output_limited,
+    )
+
+
 def run_design(
     *,
     script: str,
@@ -78,42 +159,51 @@ def run_design(
     job_id: str | None = None,
     wall_clock_timeout_s: float = WALL_CLOCK_TIMEOUT_S,
     imported_files: dict[str, str] | None = None,
+    artifact_file_limit_bytes: int | None = None,
+    artifact_total_limit_bytes: int | None = None,
 ) -> SandboxResult:
     """Run a design script in an isolated subprocess and return the result."""
     job_id = job_id or uuid.uuid4().hex
     base = workspace_dir or settings.output_dir / "designs" / job_id
     base.mkdir(parents=True, exist_ok=True)
 
+    file_limit = _positive_limit(
+        artifact_file_limit_bytes,
+        settings.max_cad_artifact_bytes,
+    )
+    total_limit = _positive_limit(
+        artifact_total_limit_bytes,
+        settings.max_cad_artifact_total_bytes,
+    )
+
     job_payload = {
         "script": script,
         "parameter_overrides": parameter_overrides or {},
         "targets": targets or ["stl", "step", "glb"],
         "imported_files": imported_files or {},
+        "artifact_limits": {
+            "per_file_bytes": file_limit,
+            "aggregate_bytes": total_limit,
+        },
     }
+    # Never allow a killed or failed child to inherit an earlier success result
+    # from a reused workspace.
+    (base / "result.json").unlink(missing_ok=True)
     (base / "job.json").write_text(json.dumps(job_payload))
 
-    cmd = _runner_command() + [str(base)]
+    # Pass the per-file limit on argv so the runner can install RLIMIT_FSIZE
+    # before importing CAD libraries or reading attacker-influenced source.
+    cmd = _runner_command() + [str(base), str(file_limit)]
     env = _build_env(base)
 
     started = time.perf_counter()
-    timed_out = False
-    try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(base),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=wall_clock_timeout_s,
-            check=False,
-        )
-        return_code = completed.returncode
-        stdout, stderr = completed.stdout, completed.stderr
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        return_code = -1
-        stdout = (exc.stdout or b"").decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = (exc.stderr or b"").decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+    return_code, stdout, stderr, timed_out, output_limited = _run_bounded(
+        cmd,
+        cwd=base,
+        env=env,
+        timeout_s=wall_clock_timeout_s,
+        output_limit=settings.max_subprocess_output_bytes,
+    )
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     result_path = base / "result.json"
@@ -139,6 +229,9 @@ def run_design(
         payload["error"] = (
             f"Sandbox subprocess exceeded {wall_clock_timeout_s:.0f}s wall clock; killed."
         )
+    if output_limited:
+        payload["ok"] = False
+        payload["error"] = "Sandbox subprocess exceeded the output limit; killed."
 
     return SandboxResult(
         ok=bool(payload.get("ok")),

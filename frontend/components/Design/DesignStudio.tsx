@@ -8,6 +8,10 @@ import SelectionChip from "../SelectionChip";
 import SpeechToTextButton, { type VoiceState } from "../SpeechToTextButton";
 import RevisionTimeline from "./RevisionTimeline";
 import { resolveBackendUrl, resolveUrl } from "../../lib/backend";
+import {
+  anthropicByokHeaders,
+  looksLikeAnthropicApiKey,
+} from "../../lib/anthropic-byok";
 import { displayModelName, formatUsd } from "../../lib/ai-cost";
 import { cadPointToViewer } from "../../lib/cad-coordinates";
 import { uiText, useUiLanguage, type UiLanguage } from "../../lib/ui-language";
@@ -134,6 +138,9 @@ export default function DesignStudio() {
   const [openingDeepLink, setOpeningDeepLink] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
+  // BYOK is deliberately memory-only: never localStorage/sessionStorage and
+  // never persisted with a design. Reloading or closing the tab clears it.
+  const [anthropicApiKey, setAnthropicApiKey] = useState("");
   const [jewelryContext, setJewelryContext] = useState(JEWELRY_CONTEXTS[0]);
   const [jewelryBrief, setJewelryBrief] = useState("");
   const [jewelryReferenceLabel, setJewelryReferenceLabel] = useState("overall width");
@@ -439,14 +446,13 @@ export default function DesignStudio() {
     [backendUrl],
   );
 
-  const stream = useDesignStream(design?.design_id ?? null, uiLanguage);
-  const lastRevision = stream.latestRevisionId;
-  const [externalSessionCost, setExternalSessionCost] = useState(0);
-  useEffect(() => setExternalSessionCost(0), [design?.design_id]);
-  const sessionCost = useMemo(
-    () => externalSessionCost + stream.lifetimeCost,
-    [externalSessionCost, stream.lifetimeCost],
+  const stream = useDesignStream(
+    design?.design_id ?? null,
+    uiLanguage,
+    anthropicApiKey,
   );
+  const lastRevision = stream.latestRevisionId;
+  const sessionCost = stream.lifetimeCost;
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -512,7 +518,10 @@ export default function DesignStudio() {
         else body.prompt = creationPrompt;
         const res = await fetch(`${backendUrl}/design/create`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...anthropicByokHeaders(anthropicApiKey),
+          },
           body: JSON.stringify(body),
         });
         if (!res.ok) {
@@ -572,7 +581,7 @@ export default function DesignStudio() {
         setCreating(false);
       }
     },
-    [backendUrl, process],
+    [anthropicApiKey, backendUrl, process],
   );
 
   const onImportCAD = useCallback(
@@ -934,7 +943,7 @@ export default function DesignStudio() {
   const handleViewerSelect = useCallback(
     (payload: SelectionPayload) => {
       if (!design) return;
-      const featureId = inferFeatureFromPoint(design, payload.point);
+      const featureId = payload.featureId || inferFeatureFromPoint(design, payload.point);
       setSelectedTopologyRef(payload.topologyRef);
       if (featureId) {
         setSelectedFeatureId(featureId);
@@ -965,6 +974,12 @@ export default function DesignStudio() {
             </p>
           </div>
           <div style={headerActionsStyle}>
+            <AnthropicBillingControl
+              apiKey={anthropicApiKey}
+              onChange={setAnthropicApiKey}
+              language={uiLanguage}
+              platformBillingEnabled={Boolean(health?.platform_ai_spend_enabled)}
+            />
             <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
           </div>
         </header>
@@ -1493,10 +1508,10 @@ export default function DesignStudio() {
         <section style={{ ...infoCardStyle, order: 4 }}>
           <strong>{tx("Co wyróżnia Pulsai", "Why this is different")}</strong>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18, lineHeight: 1.55 }}>
-            <li>The design is a build123d Python script Claude can read and rewrite — no fixed templates.</li>
-            <li>Triangular holes, hex grids, fillets, shells, threads — anything build123d expresses, the AI can build.</li>
+            <li>The design is an audited build123d Python script the CAD agent can inspect and revise.</li>
+            <li>Named features and reusable CAD snippets support holes, patterns, fillets, shells, and other validated operations.</li>
             <li>Outputs STL + GLB + STEP + DXF. STEP/DXF go straight into Fusion or your CAM tool.</li>
-            <li>Manufacturability runs after every build, FDM and CNC modes both supported.</li>
+            <li>Manufacturability checks cover FDM preparation and a scoped CNC handoff; CNC toolpaths still require CAM.</li>
             <li>Scripts run in a sandbox (AST audit, no network, no env passthrough, CPU/memory limits).</li>
           </ul>
         </section>
@@ -1518,6 +1533,13 @@ export default function DesignStudio() {
           </p>
         </div>
         <div style={headerActionsStyle}>
+          <AnthropicBillingControl
+            apiKey={anthropicApiKey}
+            onChange={setAnthropicApiKey}
+            language={uiLanguage}
+            platformBillingEnabled={Boolean(health?.platform_ai_spend_enabled)}
+            disabled={stream.state.status === "streaming"}
+          />
           <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
           {printerCatalog && printerCatalog.profiles.length > 0 ? (
             <label style={printerPickerStyle} title="Manufacturability checks and slicer profile use this printer.">
@@ -1908,6 +1930,7 @@ export default function DesignStudio() {
               src={buildArtifactUrl}
               label={design.name}
               motionReport={design.motion_report}
+              selectionMap={design.latest_build?.selection_map}
               isUpdating={Boolean(stream.state.previewUpdating)}
               language={uiLanguage}
               defaultCameraPreset="iso"
@@ -2033,19 +2056,20 @@ export default function DesignStudio() {
             <div ref={chatEndRef} />
           </div>
           <DesignChatInput
-            backendUrl={backendUrl}
-            designId={design.design_id}
-            onExternalCost={(cost) => setExternalSessionCost((current) => current + cost)}
             disabled={stream.state.status === "streaming"}
+            byokConfigured={looksLikeAnthropicApiKey(anthropicApiKey)}
             selectedFeature={selectedFeature}
             parameters={design.parameters}
             language={uiLanguage}
             onCancel={stream.cancel}
-            onSend={(text) =>
+            onSend={(text, referenceImage) =>
               stream.send(text, {
                 selectedFeatureId: selectedFeature?.id ?? null,
                 selectedFeatureLabel: selectedFeature?.name ?? null,
                 selectedTopologyRef,
+                referenceImageBase64: referenceImage?.base64 ?? null,
+                referenceImageMediaType: referenceImage?.mediaType ?? null,
+                referenceImageName: referenceImage?.name ?? null,
               })
             }
             onApplyDirect={async (text, edit) => {
@@ -2248,10 +2272,29 @@ function ParameterControl({
 }
 
 
+type ReferenceImagePayload = {
+  base64: string;
+  mediaType: string;
+  name: string;
+};
+
+
+function fileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Nie udało się odczytać zdjęcia."));
+    reader.onload = () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      const comma = value.indexOf(",");
+      if (comma < 0) reject(new Error("Nieprawidłowy format zdjęcia."));
+      else resolve(value.slice(comma + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+
 function DesignChatInput({
-  backendUrl,
-  designId,
-  onExternalCost,
   onSend,
   onCancel,
   onApplyDirect,
@@ -2260,11 +2303,9 @@ function DesignChatInput({
   selectedFeature,
   parameters,
   language,
+  byokConfigured,
 }: {
-  backendUrl: string;
-  designId: string;
-  onExternalCost: (costUsd: number) => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, referenceImage?: ReferenceImagePayload) => Promise<void> | void;
   onCancel: () => void;
   onApplyDirect: (text: string, edit: { name: string; value: number | boolean | string }) => Promise<void> | void;
   disabled: boolean;
@@ -2272,6 +2313,7 @@ function DesignChatInput({
   selectedFeature: Design["features"][number] | null;
   parameters: Design["parameters"];
   language: UiLanguage;
+  byokConfigured: boolean;
 }) {
   const [draft, setDraft] = useState("");
   const [applying, setApplying] = useState(false);
@@ -2322,37 +2364,17 @@ function DesignChatInput({
   };
 
   const analyzeReferenceImage = async (file: File) => {
-    setReferenceImage(file);
-    setImageState("analyzing");
-    setImageMessage("Gemini 3.5 Flash-Lite · analizuje zdjęcie");
     try {
-      if (!file.type.startsWith("image/")) throw new Error("Wybierz plik obrazu.");
-      if (file.size > 12 * 1024 * 1024) throw new Error("Zdjęcie może mieć maksymalnie 12 MB.");
-      const form = new FormData();
-      form.append("image", file);
-      form.append("input_type", "cad_reference");
-      form.append("design_id", designId);
-      const response = await fetch(`${backendUrl}/image-intent`, { method: "POST", body: form });
-      const payload = (await response.json().catch(() => null)) as {
-        prompt?: string;
-        model?: string;
-        input_tokens?: number;
-        output_tokens?: number;
-        cost_usd?: number;
-        detail?: string;
-      } | null;
-      if (!response.ok || !payload?.prompt) {
-        throw new Error(payload?.detail || "Nie udało się przeanalizować zdjęcia.");
+      if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
+        throw new Error("Obsługiwane obrazy: JPEG, PNG, WebP lub GIF.");
       }
-      setDraft((current) => {
-        const description = `Na podstawie zdjęcia referencyjnego: ${payload.prompt}`;
-        return current.trim() ? `${current.trim()}\n\n${description}` : description;
-      });
+      if (file.size > 5 * 1024 * 1024) throw new Error("Zdjęcie może mieć maksymalnie 5 MB.");
+      setReferenceImage(file);
       setImageState("ready");
-      const cost = Number(payload.cost_usd ?? 0);
-      if (Number.isFinite(cost) && cost > 0) onExternalCost(cost);
       setImageMessage(
-        `${displayModelName(payload.model)} opisał zdjęcie${cost > 0 ? ` · ${formatUsd(cost)}` : ""} — sprawdź opis`,
+        byokConfigured
+          ? "Claude zobaczy zdjęcie w następnym żądaniu · obraz nie zostanie zapisany"
+          : "Dodaj własny klucz Anthropic, aby Claude mógł zobaczyć zdjęcie",
       );
     } catch (error) {
       setImageState("error");
@@ -2360,16 +2382,33 @@ function DesignChatInput({
     }
   };
 
+  const submitDraft = async () => {
+    if (!draft.trim() || disabled) return;
+    setImageState(referenceImage ? "analyzing" : "idle");
+    try {
+      const imagePayload = referenceImage
+        ? {
+            base64: await fileAsBase64(referenceImage),
+            mediaType: referenceImage.type,
+            name: referenceImage.name,
+          }
+        : undefined;
+      await onSend(draft.trim(), imagePayload);
+      setDraft("");
+      setReferenceImage(null);
+      setImageState("idle");
+      setImageMessage(null);
+    } catch (error) {
+      setImageState("error");
+      setImageMessage(error instanceof Error ? error.message : "Nie udało się wysłać zdjęcia.");
+    }
+  };
+
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (!draft.trim() || disabled) return;
-        onSend(draft.trim());
-        setDraft("");
-        setReferenceImage(null);
-        setImageState("idle");
-        setImageMessage(null);
+        void submitDraft();
       }}
       style={{ display: "flex", flexDirection: "column", gap: 6 }}
     >
@@ -2409,11 +2448,7 @@ function DesignChatInput({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && draft.trim() && !disabled) {
               e.preventDefault();
-              onSend(draft.trim());
-              setDraft("");
-              setReferenceImage(null);
-              setImageState("idle");
-              setImageMessage(null);
+              void submitDraft();
             }
           }}
         />
@@ -2464,7 +2499,7 @@ function DesignChatInput({
             <button type="button" onClick={onCancel} style={composerSendButtonStyle} aria-label={uiText(language, "Zatrzymaj", "Stop")} title={uiText(language, "Zatrzymaj", "Stop")}>
               ■
             </button>
-          ) : routeBadge?.directEdit ? (
+          ) : routeBadge?.directEdit && !referenceImage ? (
             <button
               type="button"
               onClick={handleApplyDirect}
@@ -4095,6 +4130,110 @@ function PrintResultCard({
         ) : null}
       </div>
     </div>
+  );
+}
+
+function AnthropicBillingControl({
+  apiKey,
+  onChange,
+  language,
+  platformBillingEnabled,
+  disabled = false,
+}: {
+  apiKey: string;
+  onChange: (value: string) => void;
+  language: UiLanguage;
+  platformBillingEnabled: boolean;
+  disabled?: boolean;
+}) {
+  const configured = Boolean(apiKey.trim());
+  const valid = !configured || looksLikeAnthropicApiKey(apiKey);
+  return (
+    <details style={{ position: "relative" }}>
+      <summary
+        style={{
+          listStyle: "none",
+          cursor: "pointer",
+          border: "1px solid rgba(15,23,32,0.14)",
+          borderRadius: 8,
+          padding: "6px 9px",
+          background: configured ? "rgba(63,183,155,0.14)" : "rgba(255,255,255,0.78)",
+          fontSize: 10,
+          fontWeight: 800,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {configured
+          ? uiText(language, "AI: Twój klucz", "AI: Your key")
+          : platformBillingEnabled
+            ? uiText(language, "AI: konto Pulsai", "AI: Pulsai account")
+            : uiText(language, "AI: dodaj swój klucz", "AI: add your key")}
+      </summary>
+      <div
+        style={{
+          position: "absolute",
+          zIndex: 40,
+          right: 0,
+          top: "calc(100% + 6px)",
+          width: 310,
+          padding: 12,
+          borderRadius: 10,
+          border: "1px solid rgba(15,23,32,0.16)",
+          background: "#fff",
+          color: "#17212b",
+          boxShadow: "0 14px 36px rgba(15,23,32,0.22)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        <strong style={{ fontSize: 12 }}>
+          {uiText(language, "Rozliczaj Claude na swoim koncie", "Bill Claude to your account")}
+        </strong>
+        <input
+          type="password"
+          name="pulsai-anthropic-byok"
+          autoComplete="new-password"
+          spellCheck={false}
+          value={apiKey}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="sk-ant-…"
+          aria-invalid={!valid}
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            border: `1px solid ${valid ? "rgba(15,23,32,0.2)" : "#c2413b"}`,
+            borderRadius: 7,
+            padding: "8px 9px",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            fontSize: 11,
+          }}
+        />
+        <span style={{ fontSize: 10, lineHeight: 1.45, opacity: 0.68 }}>
+          {uiText(
+            language,
+            "Klucz pozostaje tylko w pamięci tej karty i jest wysyłany przez HTTPS wyłącznie z żądaniem do projektanta. Nie zapisujemy go w projekcie ani przeglądarce.",
+            "The key stays only in this tab's memory and is sent over HTTPS only with a designer request. It is not stored with the project or in browser storage.",
+          )}
+        </span>
+        {!valid ? (
+          <span role="alert" style={{ color: "#a62f29", fontSize: 10 }}>
+            {uiText(language, "Klucz powinien zaczynać się od sk-ant-.", "The key should start with sk-ant-.")}
+          </span>
+        ) : null}
+        {configured ? (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange("")}
+            style={{ alignSelf: "flex-start", border: 0, background: "transparent", color: "#156b61", padding: 0, fontWeight: 800, cursor: "pointer" }}
+          >
+            {uiText(language, "Wyczyść klucz", "Clear key")}
+          </button>
+        ) : null}
+      </div>
+    </details>
   );
 }
 

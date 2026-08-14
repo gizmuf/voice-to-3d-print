@@ -5,16 +5,17 @@ import re
 import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 
 _DESIGN_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_ANTHROPIC_BYOK_HEADER = "x-pulsai-anthropic-key"
 
 
 def _validate_design_id(design_id: str) -> str:
@@ -30,7 +31,10 @@ def _validate_design_id(design_id: str) -> str:
     return design_id
 
 from services.ai.agent import load_conversation, stream_turn
-from services.ai.agent_v2 import stream_turn as stream_design_turn
+from services.ai.agent_v2 import (
+    load_repaired_conversation,
+    stream_turn as stream_design_turn,
+)
 from services.editability import assess as assess_editability
 from services.export_bundle import export_bundle as export_bundle_service
 from services.export_bundle import export_dry_run as export_bundle_dry_run
@@ -40,6 +44,7 @@ from services.codegen.engine import (
     audit_then_run,
     build_design,
     build_from_sandbox_result,
+    trusted_script_metadata,
     derive_named_features,
     derive_parameters,
 )
@@ -66,6 +71,13 @@ from services.mechanism_motion import evaluate_mechanism_motion
 from services.spec_compliance import evaluate_spec_compliance, record_spec_targets
 
 from config import settings
+from services.auth import (
+    Principal,
+    current_owner_id,
+    reset_current_principal,
+    set_current_principal,
+    verify_google_credential,
+)
 from services.ai_edit import ai_edit_workspace_model
 from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt, extract_prompt_from_image_with_usage
@@ -78,6 +90,7 @@ from services.jewelry_trace import (
     trace_preview_to_script,
 )
 from services.job_store import (
+    _get_bucket,
     create_project,
     ensure_job,
     ensure_project,
@@ -128,6 +141,12 @@ from slicer_service import ProcessResult, _slice_mesh, process_model, validate_m
 
 app = FastAPI(title="3dprint Backend")
 
+if not settings.auth_required and not settings.insecure_local_dev:
+    raise RuntimeError(
+        "Authentication can be disabled only with PULSAI_INSECURE_LOCAL_DEV=true. "
+        "Bind that mode to 127.0.0.1 only."
+    )
+
 # CORS: `*` + `allow_credentials=True` is rejected by browsers (the spec
 # disallows the combination), so the previous config silently dropped
 # credentials. We default to permissive origins WITHOUT credentials, which
@@ -138,6 +157,23 @@ app = FastAPI(title="3dprint Backend")
 _cors_origins_env = settings.cors_origins.strip()
 if _cors_origins_env:
     _cors_origins = [origin.strip() for origin in _cors_origins_env.split(",") if origin.strip()]
+    for origin in _cors_origins:
+        parsed_origin = urlsplit(origin)
+        local_http = (
+            settings.insecure_local_dev
+            and parsed_origin.scheme == "http"
+            and parsed_origin.hostname in {"127.0.0.1", "localhost"}
+        )
+        if (
+            origin in {"*", "null"}
+            or parsed_origin.scheme not in {"http", "https"}
+            or not parsed_origin.netloc
+            or (parsed_origin.scheme != "https" and not local_http)
+            or parsed_origin.path not in {"", "/"}
+            or parsed_origin.query
+            or parsed_origin.fragment
+        ):
+            raise RuntimeError(f"Unsafe credentialed CORS origin: {origin!r}")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins,
@@ -154,13 +190,213 @@ else:
         allow_headers=["*"],
     )
 
+_PUBLIC_PATHS = {
+    "/health",
+    "/auth/config",
+    "/auth/session",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/design/templates",
+    "/design/flagship",
+    "/printer-profiles",
+}
+_DESIGN_OWNER_PATH_RE = re.compile(r"^/(?:design|artifacts/designs)/([a-f0-9]{32})(?:/|$)")
+_CLOUD_DESIGN_PATH_RE = re.compile(r"^/cloud-artifacts/three-d/designs/([a-f0-9]{32})(?:/|$)")
+_SAFE_MODE_BLOCKED_PREFIXES = (
+    "/workspace",
+    "/projects",
+    "/process-model",
+    "/preview-useful",
+    "/build-useful",
+    "/import-model",
+    "/import-step",
+    "/upload-stl",
+    "/analyze-model",
+    "/preview-edit",
+    "/apply-edit",
+    "/bundle/",
+    "/generate",
+    "/intent",
+    "/image-intent",
+    "/stt",
+    "/library/",
+    "/integrations/onshape",
+)
+
+
+def _design_belongs_to(design_id: str, owner_id: str) -> bool:
+    try:
+        design = get_design(design_id)
+    except HTTPException:
+        return False
+    return design.metadata.get("owner_id") == owner_id
+
+
+@app.middleware("http")
+async def google_auth_and_owner_isolation(request: Request, call_next):
+    """Fail closed on Cloud Run and prevent cross-account design access."""
+    if request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if settings.public_safe_mode and request.url.path.startswith(_SAFE_MODE_BLOCKED_PREFIXES):
+        return JSONResponse(status_code=404, content={"detail": "Not available in public safe mode."})
+
+    principal: Principal | None = None
+    if settings.auth_required:
+        if not settings.google_oauth_client_id:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Google Login is required but not configured."},
+            )
+        authorization = request.headers.get("authorization", "")
+        scheme, _, credential = authorization.partition(" ")
+        if (scheme.lower() != "bearer" or not credential) and request.method in {"GET", "HEAD"}:
+            credential = request.cookies.get("pulsai_google_id", "")
+        if not credential:
+            return JSONResponse(status_code=401, content={"detail": "Google Login required."})
+        try:
+            principal = verify_google_credential(credential, settings.google_oauth_client_id)
+        except Exception:
+            return JSONResponse(status_code=401, content={"detail": "Invalid Google session."})
+    else:
+        principal = Principal(subject="local-dev", email="local@localhost")
+
+    owner_match = _DESIGN_OWNER_PATH_RE.match(request.url.path)
+    cloud_match = _CLOUD_DESIGN_PATH_RE.match(request.url.path)
+    design_id = (owner_match or cloud_match).group(1) if (owner_match or cloud_match) else None
+    if design_id and principal and not _design_belongs_to(design_id, principal.subject):
+        # Use 404 so design identifiers cannot be used to enumerate accounts.
+        return JSONResponse(status_code=404, content={"detail": "Design not found."})
+
+    context_token = set_current_principal(principal)
+    request.state.principal = principal
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_principal(context_token)
+
 artifacts_path = Path(settings.output_dir)
 artifacts_path.mkdir(parents=True, exist_ok=True)
-app.mount("/artifacts", StaticFiles(directory=artifacts_path), name="artifacts")
+
+
+@app.api_route("/artifacts/{object_path:path}", methods=["GET", "HEAD"])
+def private_local_artifact_endpoint(object_path: str, request: Request):
+    """Serve only canonical, owner-authorized design artifacts."""
+    if not object_path or object_path.startswith("/") or "//" in object_path:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    parts = object_path.split("/")
+    if ".." in parts or len(parts) < 3 or parts[0] != "designs":
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    design_id = _validate_design_id(parts[1])
+    principal = getattr(request.state, "principal", None)
+    if principal is None or not _design_belongs_to(design_id, principal.subject):
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    root = artifacts_path.resolve()
+    candidate = (root / object_path).resolve()
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return FileResponse(candidate, headers={"Cache-Control": "private, max-age=0, no-store"})
+
+
+@app.get("/auth/config")
+def auth_config_endpoint() -> dict:
+    return {
+        "required": settings.auth_required,
+        # OAuth client IDs are public identifiers; secrets never cross this boundary.
+        "google_client_id": settings.google_oauth_client_id if settings.auth_required else "",
+    }
+
+
+@app.post("/auth/session", status_code=204)
+def auth_session_endpoint(request: Request) -> Response:
+    if not settings.auth_required or not settings.google_oauth_client_id:
+        return Response(status_code=204)
+    authorization = request.headers.get("authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not credential:
+        raise HTTPException(status_code=401, detail="Google credential required.")
+    try:
+        verify_google_credential(credential, settings.google_oauth_client_id)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google session.") from exc
+    response = Response(status_code=204)
+    response.set_cookie(
+        "pulsai_google_id",
+        credential,
+        max_age=3300,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+    return response
+
+
+@app.delete("/auth/session", status_code=204)
+def auth_session_delete_endpoint() -> Response:
+    response = Response(status_code=204)
+    response.delete_cookie(
+        "pulsai_google_id",
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+    return response
+
+
+@app.get("/cloud-artifacts/{object_path:path}")
+def private_cloud_artifact_endpoint(object_path: str):
+    """Proxy a private GCS artifact without exposing a permanent public URL.
+
+    Owner authorization will be added at this boundary with account support.
+    Until then, the 128-bit design/job id is an unguessable bearer locator,
+    which is safer than a publicly readable bucket but not tenant isolation.
+    """
+    normalized = object_path
+    if (
+        normalized != normalized.strip("/")
+        or not normalized.startswith("three-d/designs/")
+        or ".." in normalized.split("/")
+        or "//" in normalized
+    ):
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    bucket = _get_bucket()
+    if bucket is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    blob = bucket.blob(normalized)
+    try:
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        stream = blob.open("rb")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Artifact storage unavailable.") from exc
+    return StreamingResponse(
+        stream,
+        media_type=blob.content_type or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=0, no-store"},
+    )
 
 
 def _compact_payload(payload: dict) -> dict:
     return {key: value for key, value in payload.items() if value is not None}
+
+
+async def _read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
+    """Read multipart content without ever buffering more than the limit."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(min(1024 * 1024, max_bytes - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="Uploaded file is too large.")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _artifact_url(upload: dict | None, path: Path, job_id: str) -> str:
@@ -445,7 +681,7 @@ class STTResponse(BaseModel):
 
 
 @app.get("/telemetry/tool-summary")
-def telemetry_tool_summary(token: str | None = None) -> dict:
+def telemetry_tool_summary(request: Request) -> dict:
     """Per-tool success/failure aggregates from production telemetry.
 
     Hidden behind ``PULSAI_ADMIN_TOKEN`` to avoid leaking tool call counts
@@ -453,7 +689,8 @@ def telemetry_tool_summary(token: str | None = None) -> dict:
     """
     if not settings.admin_token:
         raise HTTPException(status_code=404, detail="not found")
-    if token != settings.admin_token:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or token != settings.admin_token:
         raise HTTPException(status_code=401, detail="invalid admin token")
     from services.ai.telemetry import summarize_tool_calls
 
@@ -467,8 +704,8 @@ def health() -> dict:
     triposr_enabled = bool(settings.triposr_root and Path(settings.triposr_root).exists())
     slicer_ready = Path(settings.prusaslicer_path).exists()
     providers = {
-        "meshy": {"enabled": bool(settings.meshy_api_key), "cost": "paid", "modes": ["text", "image"]},
-        "tripo": {"enabled": bool(settings.tripo_api_key), "cost": "paid", "modes": ["text", "image"]},
+        "meshy": {"enabled": bool(settings.allow_platform_ai_spend and settings.meshy_api_key), "cost": "paid", "modes": ["text", "image"]},
+        "tripo": {"enabled": bool(settings.allow_platform_ai_spend and settings.tripo_api_key), "cost": "paid", "modes": ["text", "image"]},
         "trellis2": {
             "enabled": trellis2_text_enabled or trellis2_image_enabled,
             "cost": "gpu",
@@ -479,6 +716,8 @@ def health() -> dict:
         "library_sketchfab": {"enabled": bool(settings.sketchfab_api_token), "cost": "token", "modes": ["search"]},
     }
     warnings = []
+    if not settings.allow_platform_ai_spend:
+        warnings.append("Platform-paid AI spend disabled; customer BYOK required")
     if not settings.meshy_api_key:
         warnings.append("MESHY_API_KEY missing")
     if not settings.tripo_api_key:
@@ -496,6 +735,9 @@ def health() -> dict:
         "preview_ready": True,
         "slicer_ready": slicer_ready,
         "sketchfab_enabled": bool(settings.sketchfab_api_token),
+        "platform_ai_spend_enabled": settings.allow_platform_ai_spend,
+        "auth_required": settings.auth_required,
+        "google_login_configured": bool(settings.google_oauth_client_id),
     }
 
 
@@ -900,7 +1142,7 @@ async def import_step_endpoint(
     if not filename.lower().endswith((".step", ".stp")):
         raise HTTPException(status_code=400, detail="Only STEP files are supported at this endpoint.")
 
-    content = await model.read()
+    content = await _read_upload_limited(model, settings.max_upload_bytes)
     workspace_id = uuid.uuid4().hex
     try:
         imported = import_step_reference(content, filename, settings.output_dir / "workspaces" / workspace_id)
@@ -952,7 +1194,7 @@ async def import_model_endpoint(
     )
 
     try:
-        content = await model.read()
+        content = await _read_upload_limited(model, settings.max_upload_bytes)
         imported = import_model(content, filename, job_id)
     except Exception as exc:
         record_error(job_id, "import-model", str(exc))
@@ -1313,7 +1555,7 @@ async def generate_image(
         ),
     )
     try:
-        content = await image.read()
+        content = await _read_upload_limited(image, settings.max_image_upload_bytes)
         update_job(job_id, {"input.image_size": len(content)})
         result: GenerationResult = await generate_model_from_image(
             content,
@@ -1494,13 +1736,14 @@ async def image_intent(
         ),
     )
     try:
-        content = await image.read()
+        content = await _read_upload_limited(image, settings.max_image_upload_bytes)
         update_job(job_id, {"input.image_size": len(content)})
         result = await extract_prompt_from_image_with_usage(content, image.content_type or "image/jpeg")
         prompt = result.prompt
     except Exception as exc:
-        record_error(job_id, "image-intent", str(exc))
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        public_error = "Image understanding provider is unavailable."
+        record_error(job_id, "image-intent", public_error)
+        raise HTTPException(status_code=502, detail=public_error) from exc
 
     if not prompt:
         record_error(job_id, "image-intent", "Failed to extract prompt.")
@@ -1509,6 +1752,9 @@ async def image_intent(
     update_job(job_id, {"status": "intent_ready", "input.prompt_final": prompt})
     if design_id:
         _validate_design_id(design_id)
+        owner_id = current_owner_id()
+        if not owner_id or not _design_belongs_to(design_id, owner_id):
+            raise HTTPException(status_code=404, detail="Design not found.")
         record_ai_usage(
             design_id,
             {
@@ -1564,7 +1810,7 @@ async def stt(
     language: str = Form("pl"),
 ) -> STTResponse:
     try:
-        content = await audio.read()
+        content = await _read_upload_limited(audio, 15 * 1024 * 1024)
         if not content:
             raise ValueError("The recording is empty.")
         if len(content) > 15 * 1024 * 1024:
@@ -1609,7 +1855,11 @@ class WorkspaceChatRequest(BaseModel):
 
 
 @app.post("/workspace/{workspace_id}/chat")
-async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatRequest):
+async def workspace_chat_endpoint(
+    workspace_id: str,
+    request: WorkspaceChatRequest,
+    http_request: Request,
+):
     """Stream one chat turn as Server-Sent Events.
 
     Routes to the powerful code-driven agent (services/ai/agent_v2.py) when a
@@ -1658,6 +1908,7 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
                         script=seed_script,
                         parameter_overrides=overrides_for_seed,
                         targets=["stl", "glb"],
+                        trusted_source=True,
                     )
                 except DesignBuildError:
                     sandbox_seed = None
@@ -1675,7 +1926,11 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
                         parameters=parameters,
                         features=features,
                         process="fdm",
-                        metadata={"template_id": template_id, "bridged_from_workspace": True},
+                        metadata={
+                            "template_id": template_id,
+                            "bridged_from_workspace": True,
+                            **trusted_script_metadata(seed_script),
+                        },
                         design_id=workspace_id,  # same id so the URL doesn't change
                     )
                     # Relocate the audit artifacts to the design's persistent dir
@@ -1709,16 +1964,26 @@ async def workspace_chat_endpoint(workspace_id: str, request: WorkspaceChatReque
             printer_profile_id=request.printer_profile_id,
             selected_feature_id=request.selected_feature_id,
             selected_feature_label=request.selected_feature_label,
+            anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
         )
-        return StreamingResponse(generator, media_type="text/event-stream")
+        return StreamingResponse(
+            generator,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     # Legacy fallback (no build123d seeder for this template — e.g. STEP imports).
     generator = stream_turn(
         workspace_id,
         request.message,
         printer_profile_id=request.printer_profile_id,
+        anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
     )
-    return StreamingResponse(generator, media_type="text/event-stream")
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/workspace/{workspace_id}/conversation")
@@ -1837,7 +2102,11 @@ class JewelryConceptRequest(BaseModel):
     count: int = 3
 
 
-def _seed_design_record(request: DesignCreateRequest):
+def _seed_design_record(
+    request: DesignCreateRequest,
+    *,
+    anthropic_available: bool | None = None,
+):
     if request.script:
         name = request.name or "Custom design"
         return None, name, request.script
@@ -1851,7 +2120,9 @@ def _seed_design_record(request: DesignCreateRequest):
         if matched_template_id:
             template_id, display, script = seed_template_for(request.prompt)
             return template_id, request.name or display, script
-        if not settings.anthropic_api_key:
+        if anthropic_available is None:
+            anthropic_available = bool(settings.anthropic_api_key)
+        if not anthropic_available:
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -1868,8 +2139,18 @@ def _seed_design_record(request: DesignCreateRequest):
 
 
 @app.post("/design/create", response_model=DesignCreateResponse)
-def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse:
-    template_id, name, script = _seed_design_record(request)
+def design_create_endpoint(
+    request: DesignCreateRequest,
+    http_request: Request,
+) -> DesignCreateResponse:
+    request_byok = http_request.headers.get(_ANTHROPIC_BYOK_HEADER)
+    template_id, name, script = _seed_design_record(
+        request,
+        anthropic_available=bool(
+            request_byok
+            or (settings.allow_platform_ai_spend and settings.anthropic_api_key)
+        ),
+    )
     requires_agent = bool(
         request.prompt
         and not prompt_seed_is_complete(request.prompt, template_id)
@@ -1879,7 +2160,11 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
         # Initial seed only needs STL + GLB so the user sees the model fast.
         # STEP export is heavy (OCCT serializer on hundreds of holes); request
         # it explicitly via /design/{id}/build when needed for CNC handoff.
-        sandbox_result = audit_then_run(script=script, targets=["stl", "glb"])
+        sandbox_result = audit_then_run(
+            script=script,
+            targets=["stl", "glb"],
+            trusted_source=request.script is None,
+        )
     except DesignBuildError as exc:
         raise HTTPException(
             status_code=400,
@@ -1898,7 +2183,9 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
     parameters = derive_parameters(sandbox_result.payload)
     features = derive_named_features(sandbox_result.payload, script, created_by="system")
 
-    metadata: dict[str, object] = {}
+    metadata: dict[str, object] = (
+        trusted_script_metadata(script) if request.script is None else {}
+    )
     if template_id:
         metadata["template_id"] = template_id
     if request.prompt:
@@ -1983,6 +2270,7 @@ def design_create_endpoint(request: DesignCreateRequest) -> DesignCreateResponse
         initial_build={
             "revision_id": build.revision_id,
             "mesh_hash": build.mesh_hash,
+            "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
@@ -2025,7 +2313,7 @@ async def design_jewelry_trace_preview_endpoint(
     trace_mode: str = Form("auto"),
     detail: str = Form("medium"),
 ) -> dict:
-    content = await image.read()
+    content = await _read_upload_limited(image, settings.max_image_upload_bytes)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded jewelry image is empty.")
     try:
@@ -2062,7 +2350,9 @@ def _create_design_from_jewelry_trace(
     script = trace.script
     design_name = name or "Jewelry relief from trace"
     try:
-        sandbox_result = audit_then_run(script=script, targets=["stl", "glb"])
+        sandbox_result = audit_then_run(
+            script=script, targets=["stl", "glb"], trusted_source=True
+        )
     except DesignBuildError as exc:
         raise HTTPException(
             status_code=400,
@@ -2082,6 +2372,7 @@ def _create_design_from_jewelry_trace(
     features = derive_named_features(sandbox_result.payload, script, created_by="system")
     metadata = {
         **trace.metadata,
+        **trusted_script_metadata(script),
         "source_filename": trace_payload.get("source_filename"),
         "source_content_type": trace_payload.get("source_content_type"),
     }
@@ -2128,6 +2419,7 @@ def _create_design_from_jewelry_trace(
         initial_build={
             "revision_id": build.revision_id,
             "mesh_hash": build.mesh_hash,
+            "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
@@ -2159,7 +2451,7 @@ async def design_jewelry_trace_endpoint(
     trace_mode: str = Form("auto"),
     detail: str = Form("medium"),
 ) -> DesignCreateResponse:
-    content = await image.read()
+    content = await _read_upload_limited(image, settings.max_image_upload_bytes)
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded jewelry image is empty.")
     try:
@@ -2232,6 +2524,7 @@ def _import_cad_bytes_as_design(
         script=seed_script,
         targets=["stl", "glb"],
         imported_files={scope_var: str(source_dest)},
+        trusted_source=True,
     )
     if not sandbox_result.ok:
         raise HTTPException(
@@ -2252,6 +2545,7 @@ def _import_cad_bytes_as_design(
 
     metadata = {
         "template_id": template_id,
+        **trusted_script_metadata(seed_script),
         "imported_files": {scope_var: str(source_dest)},
         "source_filename": filename,
         "source_format": ext.lstrip("."),
@@ -2294,6 +2588,7 @@ def _import_cad_bytes_as_design(
         initial_build={
             "revision_id": build.revision_id,
             "mesh_hash": build.mesh_hash,
+            "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
@@ -2317,7 +2612,7 @@ async def design_import_stl_endpoint(
     kept as a compatibility alias for older clients.
     """
     filename = (model.filename or "imported.stl").strip() or "imported.stl"
-    content = await model.read()
+    content = await _read_upload_limited(model, settings.max_upload_bytes)
     return _import_cad_bytes_as_design(
         content=content,
         filename=filename,
@@ -2498,7 +2793,9 @@ def design_flagship_fork(request: DesignFlagshipForkRequest) -> DesignCreateResp
     name = request.name or spec["name"]
 
     try:
-        sandbox_result = audit_then_run(script=script, targets=["stl", "glb"])
+        sandbox_result = audit_then_run(
+            script=script, targets=["stl", "glb"], trusted_source=True
+        )
     except DesignBuildError as exc:
         raise HTTPException(
             status_code=500,
@@ -2521,7 +2818,11 @@ def design_flagship_fork(request: DesignFlagshipForkRequest) -> DesignCreateResp
         parameters=parameters,
         features=features,
         process="either",
-        metadata={"flagship_id": request.flagship_id, "source": "flagship"},
+        metadata={
+            "flagship_id": request.flagship_id,
+            "source": "flagship",
+            **trusted_script_metadata(script),
+        },
     )
 
     from pathlib import Path
@@ -2557,6 +2858,7 @@ def design_flagship_fork(request: DesignFlagshipForkRequest) -> DesignCreateResp
         initial_build={
             "revision_id": build.revision_id,
             "mesh_hash": build.mesh_hash,
+            "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
@@ -2597,6 +2899,9 @@ def design_get_endpoint(design_id: str) -> dict:
             {
                 "revision_id": record.latest_build.revision_id,
                 "mesh_hash": record.latest_build.mesh_hash,
+                "selection_map": {
+                    k: v.model_dump() for k, v in record.latest_build.selection_map.items()
+                },
                 "bounding_box_mm": record.latest_build.bounding_box_mm,
                 "artifacts": {k: a.model_dump() for k, a in record.latest_build.artifacts.items()},
                 "manufacturability": (
@@ -2632,7 +2937,9 @@ def design_motion_check_endpoint(design_id: str) -> dict:
 
 
 @app.get("/design")
-def design_list_endpoint() -> dict:
+def design_list_endpoint(request: Request) -> dict:
+    principal = getattr(request.state, "principal", None)
+    owner_id = getattr(principal, "subject", None)
     return {
         "designs": [
             {
@@ -2644,6 +2951,7 @@ def design_list_endpoint() -> dict:
                 "feature_count": len(d.features),
             }
             for d in list_designs()
+            if owner_id and d.metadata.get("owner_id") == owner_id
         ]
     }
 
@@ -2676,11 +2984,26 @@ class DesignChatRequest(BaseModel):
     selected_feature_id: str | None = None
     selected_feature_label: str | None = None
     selected_topology_ref: str | None = None
+    reference_image_base64: str | None = Field(default=None, max_length=7_000_000)
+    reference_image_media_type: str | None = None
+    reference_image_name: str | None = Field(default=None, max_length=200)
 
 
 @app.post("/design/{design_id}/chat")
-async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
+async def design_chat_endpoint(
+    design_id: str,
+    request: DesignChatRequest,
+    http_request: Request,
+):
     _validate_design_id(design_id)
+    image_media_type = request.reference_image_media_type
+    if request.reference_image_base64 and image_media_type not in {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+    }:
+        raise HTTPException(status_code=400, detail="Unsupported reference image type.")
     generator = stream_design_turn(
         design_id,
         request.message,
@@ -2688,8 +3011,16 @@ async def design_chat_endpoint(design_id: str, request: DesignChatRequest):
         selected_feature_id=request.selected_feature_id,
         selected_feature_label=request.selected_feature_label,
         selected_topology_ref=request.selected_topology_ref,
+        anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+        reference_image_base64=request.reference_image_base64,
+        reference_image_media_type=image_media_type,
+        reference_image_name=request.reference_image_name,
     )
-    return StreamingResponse(generator, media_type="text/event-stream")
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/design/{design_id}/conversation")
@@ -2698,7 +3029,7 @@ def design_conversation_endpoint(design_id: str) -> dict:
     design = get_design(design_id)
     return {
         "design_id": design_id,
-        "messages": load_design_conversation(design_id),
+        "messages": load_repaired_conversation(design_id),
         "usage_totals": design.metadata.get("ai_usage_totals") or {},
     }
 
@@ -3003,6 +3334,7 @@ def design_parameter_endpoint(design_id: str, request: DesignParameterUpdate) ->
         "build": {
             "revision_id": build.revision_id,
             "mesh_hash": build.mesh_hash,
+            "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
@@ -3082,6 +3414,7 @@ def design_printer_endpoint(design_id: str, request: DesignPrinterUpdate) -> dic
         "build": {
             "revision_id": build.revision_id,
             "mesh_hash": build.mesh_hash,
+            "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
             "bounding_box_mm": build.bounding_box_mm,
             "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
             "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,
@@ -3162,6 +3495,7 @@ def design_build_endpoint(design_id: str, request: DesignBuildRequest) -> dict:
         "design_id": design_id,
         "revision_id": build.revision_id,
         "mesh_hash": build.mesh_hash,
+        "selection_map": {k: v.model_dump() for k, v in build.selection_map.items()},
         "bounding_box_mm": build.bounding_box_mm,
         "artifacts": {k: a.model_dump() for k, a in build.artifacts.items()},
         "manufacturability": build.manufacturability.model_dump() if build.manufacturability else None,

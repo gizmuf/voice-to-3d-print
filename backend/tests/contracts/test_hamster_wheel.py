@@ -23,7 +23,7 @@ def test_polish_hamster_wheel_prompt_does_not_fall_back_to_box() -> None:
 
 def test_hamster_wheel_seed_builds_at_requested_default_diameter() -> None:
     _, script = get_seed_script("hamster_wheel")
-    result = audit_then_run(script=script, targets=["stl", "glb"])
+    result = audit_then_run(script=script, targets=["stl", "glb"], trusted_source=True)
 
     assert result.ok, result.payload
     bbox = result.payload["bbox_mm"]
@@ -35,7 +35,8 @@ def test_hamster_wheel_seed_builds_at_requested_default_diameter() -> None:
     glb_extents = glb.bounds[1] - glb.bounds[0]
     assert glb_extents[1] >= 120.0  # glTF preview is Y-up, so the wheel stays upright.
     assert glb_extents[2] < 60.0
-    assert {"wheel", "stand", "axle"}.issubset(set(glb.graph.nodes_geometry))
+    # Semantic face nodes remain grouped below the labelled motion assembly.
+    assert {"wheel", "stand", "axle"}.issubset(set(glb.graph.nodes))
 
 
 def test_unknown_prompt_is_not_reported_as_a_matched_box() -> None:
@@ -63,7 +64,7 @@ def test_polish_rung_wheel_prompt_is_fully_parameterized_without_an_agent() -> N
     assert "with BuildPart() as wheel:" not in script
     assert prompt_seed_is_complete(prompt, template_id)
 
-    result = audit_then_run(script=script, targets=["stl", "glb"])
+    result = audit_then_run(script=script, targets=["stl", "glb"], trusted_source=True)
     assert result.ok, result.payload
     parameter_names = [parameter.name for parameter in derive_parameters(result.payload)]
     assert len(parameter_names) == len(set(parameter_names))
@@ -100,7 +101,7 @@ def test_larger_wheel_compound_contacts_do_not_create_false_thin_wall_error() ->
         "szerokość bieżnika 4 cm, dokładnie 24 szczebelki."
     )
     _, _, script = seed_for(prompt)
-    result = audit_then_run(script=script, targets=["stl"])
+    result = audit_then_run(script=script, targets=["stl"], trusted_source=True)
     assert result.ok, result.payload
 
     report = run_manufacturability(

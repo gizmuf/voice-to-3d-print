@@ -139,6 +139,7 @@ def test_cup_side_hole_ring_stays_single_body_at_75_percent_height(tmp_path: Pat
         script=SAFE_CUP_RING_SCRIPT,
         targets=["stl"],
         workspace_dir=tmp_path,
+        trusted_source=True,
     )
 
     assert result.ok, result.payload

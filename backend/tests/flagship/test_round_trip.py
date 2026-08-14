@@ -34,6 +34,7 @@ def test_flagship_default_build(flagship_id: str) -> None:
             script=spec["script"],
             workspace_dir=Path(td),
             targets=["stl"],
+            trusted_source=True,
         )
     assert result.ok, (
         f"Flagship '{flagship_id}' default build failed: "
@@ -63,6 +64,7 @@ def test_flagship_param_mutation_changes_mesh(flagship_id: str) -> None:
             script=spec["script"],
             workspace_dir=Path(td_a),
             targets=["stl"],
+            trusted_source=True,
         )
     assert baseline.ok, f"baseline build for '{flagship_id}' failed"
     baseline_hash = baseline.payload["mesh_hash"]
@@ -73,6 +75,7 @@ def test_flagship_param_mutation_changes_mesh(flagship_id: str) -> None:
             parameter_overrides={spec["test_param"]: spec["test_value"]},
             workspace_dir=Path(td_b),
             targets=["stl"],
+            trusted_source=True,
         )
     assert mutated.ok, (
         f"mutated build for '{flagship_id}' failed: "

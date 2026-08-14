@@ -78,7 +78,14 @@ def test_ai_usage_ledger_accumulates_and_persists(tmp_path: Path, monkeypatch) -
     design = store.create_design(name="Costed design", script="result = Box(10, 10, 10)")
     store.record_ai_usage(
         design.id,
-        {"provider": "anthropic", "model": "claude-sonnet-5", "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.0004},
+        {
+            "provider": "anthropic",
+            "model": "claude-sonnet-5",
+            "billing_source": "customer_byok",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cost_usd": 0.0004,
+        },
     )
     totals = store.record_ai_usage(
         design.id,
@@ -88,5 +95,8 @@ def test_ai_usage_ledger_accumulates_and_persists(tmp_path: Path, monkeypatch) -
     assert totals["input_tokens"] == 150
     assert totals["output_tokens"] == 30
     assert totals["cost_usd"] == 0.0005
+    events = store.get_design(design.id).metadata["ai_usage_events"]
+    assert events[0]["billing_source"] == "customer_byok"
+    assert "api_key" not in events[0]
     shutil.rmtree(tmp_path / "designs" / design.id)
     assert store.get_design(design.id).metadata["ai_usage_totals"]["cost_usd"] == 0.0005

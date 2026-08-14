@@ -373,6 +373,67 @@ result = Compound(children=[wheel_shape, stand.part, axle.part], label="hamster_
 '''
 
 
+STYLIZED_PARAMOTOR = '''\
+"""Stylized paramotor pilot relief, built as one supported FDM silhouette.
+
+It is intentionally geometric rather than photorealistic. A shallow cage disc
+supports the pilot, propeller and risers so thin-looking details remain joined
+and printable instead of becoming loose islands.
+"""
+from build123d import *
+from pulsai import param
+
+overall_height = param("overall_height", 120.0, type="length_mm", min=60.0, max=240.0)
+base_width = param("base_width", 72.0, type="length_mm", min=50.0, max=100.0)
+cage_diameter = param("cage_diameter", 68.0, type="length_mm", min=52.0, max=82.0)
+detail_strength = param("detail_strength", 1.0, type="ratio", min=0.75, max=1.35)
+
+# @feature: print_base
+print_base = Box(base_width, 24.0, 6.0,
+                 align=(Align.CENTER, Align.CENTER, Align.MIN))
+# @end
+
+# @feature: pilot
+left_leg = Box(9.0, 10.0, 48.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((-6.0, 0.0, 4.0)))
+right_leg = Box(9.0, 10.0, 48.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((6.0, 0.0, 4.0)))
+torso = Box(25.0, 14.0, 38.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((0.0, 0.0, 48.0)))
+helmet = Sphere(12.0).moved(Location((0.0, 0.0, 94.0)))
+left_arm = Box(20.0, 9.0, 9.0).moved(Location((-17.0, 0.0, 67.0)))
+right_arm = Box(20.0, 9.0, 9.0).moved(Location((17.0, 0.0, 67.0)))
+pilot = left_leg + right_leg + torso + helmet + left_arm + right_arm
+# @end
+
+# @feature: paramotor_cage
+cage_radius = cage_diameter / 2.0
+cage_back = Cylinder(cage_radius, 4.0,
+                     align=(Align.CENTER, Align.CENTER, Align.CENTER)).rotate(Axis.X, 90.0).moved(Location((0.0, 5.0, 70.0)))
+cage_ring = Torus(cage_radius - 3.0, 2.8,
+                  rotation=(90.0, 0.0, 0.0)).moved(Location((0.0, 1.0, 70.0)))
+paramotor_cage = cage_back + cage_ring
+# @end
+
+
+# @feature: propeller
+propeller_hub = Cylinder(5.0, 8.0,
+                         align=(Align.CENTER, Align.CENTER, Align.CENTER)).rotate(Axis.X, 90.0).moved(Location((0.0, -2.0, 70.0)))
+propeller_blade = Box(55.0, 5.0 * detail_strength, 5.0 * detail_strength).rotate(Axis.Y, 20.0).moved(Location((0.0, -3.0, 70.0)))
+propeller = propeller_hub + propeller_blade
+# @end
+
+# @feature: canopy
+left_riser = Box(5.0, 7.0, 18.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((-24.0, 4.0, 99.0)))
+right_riser = Box(5.0, 7.0, 18.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((24.0, 4.0, 99.0)))
+canopy_mast = Box(6.0, 8.0, 20.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((0.0, 4.0, 100.0)))
+canopy = Box(84.0, 8.0, 10.0, align=(Align.CENTER, Align.CENTER, Align.MIN)).moved(Location((0.0, 4.0, 110.0)))
+canopy_assembly = left_riser + right_riser + canopy_mast + canopy
+# @end
+
+assembled = print_base + pilot + paramotor_cage + propeller + canopy_assembly
+scale_factor = overall_height / 120.0
+result = assembled if abs(scale_factor - 1.0) < 0.000001 else assembled.scale(scale_factor)
+'''
+
+
 JEWELRY_PIECE = '''\
 """Editable flat jewelry starter for sketches, charms, pendants, earrings, brooches, and links."""
 from build123d import *
@@ -778,6 +839,7 @@ _SEED_SCRIPTS: dict[str, tuple[str, str]] = {
     "simple_box": ("Simple box", SIMPLE_BOX),
     "cylindrical_holder": ("Cylindrical holder", CYLINDRICAL_HOLDER),
     "hamster_wheel": ("Hamster wheel", HAMSTER_WHEEL),
+    "stylized_paramotor": ("Stylized paramotor pilot", STYLIZED_PARAMOTOR),
     "jewelry_piece": ("Jewelry sketch starter", JEWELRY_PIECE),
     "jewelry_cross": ("Cross pendant starter", JEWELRY_CROSS),
     "imported_stl": ("Imported STL", IMPORTED_STL),

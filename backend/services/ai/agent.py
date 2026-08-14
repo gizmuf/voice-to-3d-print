@@ -16,6 +16,11 @@ from typing import Any
 from anthropic import Anthropic
 
 from config import settings
+from services.ai.anthropic_resilience import (
+    InvalidAnthropicApiKey,
+    call_messages_with_resilience,
+    resolve_anthropic_credentials,
+)
 from services.ai.capabilities import capability_for
 from services.ai.prompts import SYSTEM_PROMPT, render_turn_context
 from services.ai.tools import TOOL_DEFINITIONS, execute as execute_tool
@@ -77,6 +82,7 @@ def stream_turn(
     user_message: str,
     *,
     printer_profile_id: str | None = None,
+    anthropic_api_key: str | None = None,
 ) -> Iterator[str]:
     """Stream one chat turn as server-sent events.
 
@@ -85,10 +91,30 @@ def stream_turn(
     """
     started = time.perf_counter()
 
-    if not settings.anthropic_api_key:
+    try:
+        credentials = resolve_anthropic_credentials(
+            anthropic_api_key,
+            settings.anthropic_api_key,
+            allow_platform_billing=settings.allow_platform_ai_spend,
+        )
+    except InvalidAnthropicApiKey:
         yield _sse(
             "error",
-            {"message": "ANTHROPIC_API_KEY is not configured on the backend."},
+            {
+                "code": "byok_invalid",
+                "message": "Własny klucz Anthropic ma nieprawidłowy format.",
+                "retryable": False,
+            },
+        )
+        return
+    if credentials is None:
+        yield _sse(
+            "error",
+            {
+                "code": "ai_auth_error",
+                "message": "Projektant AI jest chwilowo niedostępny.",
+                "retryable": False,
+            },
         )
         return
 
@@ -105,16 +131,22 @@ def stream_turn(
     history = load_conversation(workspace_id)
     user_block = {"role": "user", "content": user_message}
     history.append(user_block)
+    active_model = settings.anthropic_chat_model
     yield _sse(
         "turn_start",
         {
             "workspace_id": workspace_id,
             "revision_id": ctx.model.revision_id,
-            "model": settings.anthropic_chat_model,
+            "model": active_model,
+            "billing_source": credentials.billing_source,
         },
     )
 
-    client = Anthropic(api_key=settings.anthropic_api_key)
+    client = Anthropic(
+        api_key=credentials.api_key,
+        max_retries=0,
+        timeout=settings.anthropic_timeout_s,
+    )
     total_input_tokens = 0
     total_output_tokens = 0
     cache_read_tokens = 0
@@ -122,16 +154,39 @@ def stream_turn(
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         try:
-            response = client.messages.create(
-                model=settings.anthropic_chat_model,
-                max_tokens=settings.anthropic_max_output_tokens,
-                thinking={"type": "disabled"},
-                system=_system_blocks(ctx.model),
-                tools=TOOL_DEFINITIONS,
-                messages=history,
+            call = call_messages_with_resilience(
+                client,
+                primary_model=active_model,
+                fallback_models=(
+                    [settings.anthropic_fallback_model]
+                    if active_model == settings.anthropic_chat_model
+                    else []
+                ),
+                request_kwargs={
+                    "max_tokens": settings.anthropic_max_output_tokens,
+                    "thinking": {"type": "disabled"},
+                    "system": _system_blocks(ctx.model),
+                    "tools": TOOL_DEFINITIONS,
+                    "messages": history,
+                },
+                circuit_scope=credentials.circuit_scope,
+                max_attempts=settings.anthropic_retry_max_attempts,
+                base_delay_s=settings.anthropic_retry_base_delay_s,
+                max_delay_s=settings.anthropic_retry_max_delay_s,
+                failure_threshold=settings.anthropic_circuit_failure_threshold,
+                cooldown_s=settings.anthropic_circuit_cooldown_s,
             )
-        except Exception as exc:
-            yield _sse("error", {"message": f"Anthropic call failed: {exc}"})
+            response = call.response
+            active_model = str(getattr(response, "model", None) or call.model)
+        except Exception:
+            yield _sse(
+                "error",
+                {
+                    "code": "ai_unavailable",
+                    "message": "Projektant AI jest chwilowo niedostępny. Projekt pozostał bez zmian.",
+                    "retryable": True,
+                },
+            )
             return
 
         usage = getattr(response, "usage", None)
@@ -215,6 +270,8 @@ def stream_turn(
             "output_tokens": total_output_tokens,
             "cache_read_tokens": cache_read_tokens,
             "cache_creation_tokens": cache_creation_tokens,
+            "model": active_model,
+            "billing_source": credentials.billing_source,
         },
     )
 

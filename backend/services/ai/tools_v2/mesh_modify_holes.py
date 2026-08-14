@@ -22,8 +22,10 @@ from services.ai.tools_v2 import DesignContext
 from services.codegen.engine import (
     audit_then_run,
     build_from_sandbox_result,
+    design_script_is_trusted,
     derive_named_features,
     derive_parameters,
+    trusted_script_metadata,
 )
 from services.codegen.store import new_revision_id, save_build, save_design
 
@@ -237,6 +239,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
             break
     new_script = "\n".join(lines[:insert_idx] + ["", block] + lines[insert_idx:])
 
+    source_is_trusted = design_script_is_trusted(ctx.design)
     overrides = {p.name: p.value for p in ctx.design.parameters}
     sandbox_result = audit_then_run(
         script=new_script,
@@ -244,6 +247,7 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
         targets=["stl"],
         workspace_dir=settings.output_dir / "designs" / ctx.design.id,
         imported_files=ctx.design.metadata.get("imported_files") or None,
+        trusted_source=source_is_trusted,
     )
     if not sandbox_result.ok:
         return {
@@ -258,6 +262,10 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
     ctx.design.parent_revision_id = ctx.design.revision_id
     ctx.design.revision_id = new_revision_id()
     ctx.design.script = new_script
+    ctx.design.metadata.pop("trusted_script", None)
+    ctx.design.metadata.pop("trusted_script_sha256", None)
+    if source_is_trusted:
+        ctx.design.metadata.update(trusted_script_metadata(new_script))
     ctx.design.parameters = derive_parameters(sandbox_result.payload)
     ctx.design.features = derive_named_features(
         sandbox_result.payload,

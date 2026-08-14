@@ -1,0 +1,105 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "pulsai-3d-tenant-hardening-20260814",
+  "sourceEvidence": {
+    "kind": "source_collection",
+    "label": "Pulsai 3D API, persistence, provider, and roadmap source",
+    "collectionSha256": "10c8305ad9b3b6f30b5be075c95711399bdfd19a11ad862fb9f6c2ba4408ce78",
+    "artifactCount": 5,
+    "sourceDrift": "present",
+    "targetRevision": "b6d656847dabd65bd88cf5ac79a1ed9966ce4c2c"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Identity, spend authorization, and artifact access need one tenant boundary before public multi-user launch."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": ["immediate", "incremental"],
+    "nonNegotiables": [
+      "Anonymous requests cannot spend platform provider credits.",
+      "Private designs and artifacts require an authorized owner or member.",
+      "Deterministic local CAD and BYOK remain available."
+    ],
+    "assumptions": ["No measured authentication latency budget was supplied."]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "tenant-authorization",
+      "title": "Centralize identity, spend, and artifact authorization",
+      "summary": "Move resource ownership and paid capability checks behind one request principal and policy boundary.",
+      "diagnosis": "Design ids, ambient provider credentials, and public artifact URLs currently act as authority in different parts of the stack.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E-AUTH-1", "path": "backend/services/job_store.py", "claim": "Projects and jobs are persisted as public and owned by anon."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E-AUTH-2", "path": "backend/app.py", "claim": "Design endpoints do not evaluate an authenticated principal against resource ownership."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E-COST-1", "path": "backend/services/generation.py", "claim": "Paid providers use process-wide credentials."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E-ART-1", "path": "backend/services/job_store.py", "claim": "Legacy artifact upload made objects public."},
+        {"claimType": "inferred", "sourceKind": "source", "evidenceId": "E-ROADMAP-1", "path": "docs/ROADMAP.md", "claim": "Auth, quotas, billing, and sharing need a common product boundary rather than separate endpoint conventions."}
+      ],
+      "desiredInvariants": [
+        "Every durable resource has one owner and optional explicit members.",
+        "Every private read or write is authorized against the final resource identity.",
+        "Platform-paid operations require an authenticated entitlement and quota reservation.",
+        "Public sharing is explicit, read-only, revocable, and separate from ownership.",
+        "Private GCS objects are returned through short-lived or authorized delivery paths."
+      ],
+      "proposalPath": "proposals/tenant-authorization.md",
+      "options": [
+        {
+          "optionId": "anonymous-containment",
+          "title": "Tactical anonymous containment",
+          "kind": "baseline",
+          "summary": "Disable platform spend and public objects while retaining bearer-like random design ids.",
+          "diagramPaths": {"before": "diagrams/tenant-authorization-before.mmd", "after": "diagrams/tenant-authorization-anonymous-containment-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E-AUTH-1", "effect": "unknown", "tacticalFixRequired": true, "rationale": "Anonymous ownership remains."},
+            {"evidenceId": "E-AUTH-2", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Random ids reduce guessing but do not authorize access."},
+            {"evidenceId": "E-COST-1", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Fail-closed spend gate blocks ambient paid credentials."},
+            {"evidenceId": "E-ART-1", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Objects are private but the proxy still lacks tenant identity."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Stops anonymous platform spend and direct public bucket reads; ownership remains unresolved.", "validationPlan": "Exercise each paid provider with configured platform keys and no BYOK; verify no network call."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "Boolean gates are local; artifact proxy adds a backend hop.", "validationPlan": "Compare GLB download latency and backend egress."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "Streaming proxy retains no full artifact buffer.", "validationPlan": "Measure RSS during a large G-code download."},
+            {"dimension": "reliability", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "Private proxy depends on backend availability but provider failures are contained.", "validationPlan": "Run artifact fetch and provider-denial integration tests."},
+            {"dimension": "operability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "One env switch makes platform spend visible and auditable.", "validationPlan": "Alert on any production instance reporting spend enabled."},
+            {"dimension": "migration", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Free CAD and BYOK remain compatible; legacy paid endpoints fail closed.", "validationPlan": "Run free E2E and BYOK contract tests."}
+          ],
+          "residualRisks": ["Anyone obtaining a design id can still read or mutate it.", "No per-user quota or revocation exists."],
+          "implementationReadiness": {"affectedComponents": ["backend/config.py", "backend/services/ai", "backend/services/generation.py", "backend/services/job_store.py"], "workPackages": ["Default platform spend and public artifacts off.", "Add denial and privacy regression tests."], "acceptanceCriteria": ["Anonymous paid-provider requests cannot reach provider network calls."], "migrationNotes": ["Explicitly enable only in a protected operator environment."], "rollback": "Revert the gates only in a private environment; never on the public API."}
+        },
+        {
+          "optionId": "oidc-tenant-boundary",
+          "title": "Required OIDC tenant boundary",
+          "kind": "structural",
+          "summary": "Verify a standard OIDC JWT once, authorize every resource centrally, reserve quota before paid work, and use explicit share grants.",
+          "diagramPaths": {"before": "diagrams/tenant-authorization-before.mmd", "after": "diagrams/tenant-authorization-oidc-tenant-boundary-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E-AUTH-1", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Resources receive a stable owner subject."},
+            {"evidenceId": "E-AUTH-2", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Central policy checks owner/member/share grants."},
+            {"evidenceId": "E-COST-1", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Spend requires entitlement and atomic quota reservation."},
+            {"evidenceId": "E-ART-1", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Artifact delivery is authorized or short-lived."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Removes identifier-as-authority and ambient paid capability from public requests.", "validationPlan": "Run cross-tenant read/write/export/artifact and quota bypass tests."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "JWT verification and owner lookup add work to API calls; JWKS and policy results can be cached.", "validationPlan": "Measure p50/p95 API latency with cached and cold JWKS."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Bounded JWKS and policy caches add small resident state.", "validationPlan": "Measure per-instance RSS under representative tenant count."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Quota reservation and idempotency contain provider retries; identity provider availability becomes a dependency.", "validationPlan": "Test JWKS cache behavior during identity-provider outage."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Requires OIDC configuration, auth telemetry, rate-limit storage, and support workflows.", "validationPlan": "Run key rotation, account deletion, and quota reset drills."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Existing anon resources need quarantine, claim, or deletion; APIs gain principal requirements.", "validationPlan": "Dry-run ownership migration and verify rollback snapshots."}
+          ],
+          "residualRisks": ["Compromised user tokens retain that user's authority until expiry/revocation.", "Incorrect share-grant policy can still expose selected designs."],
+          "implementationReadiness": {"affectedComponents": ["backend/app.py", "backend/services/codegen/store.py", "backend/services/codegen/cloud_store.py", "frontend/app", "Firestore indexes/rules"], "workPackages": ["OIDC principal middleware.", "Owner/member schema and centralized authorize helper.", "Atomic quota reservation and idempotency.", "Authorized artifact delivery and explicit share grants.", "Anonymous-resource migration."], "acceptanceCriteria": ["Cross-tenant access is denied for every design subresource.", "No paid call starts without entitlement and quota reservation."], "migrationNotes": ["Keep tactical spend and private-object gates throughout migration."], "rollback": "Disable new account creation, restore the pre-migration data snapshot, and keep platform spend disabled."}
+        }
+      ],
+      "recommendedOptionId": "oidc-tenant-boundary",
+      "recommendation": "Keep anonymous containment as the immediate gate, then require the OIDC tenant boundary before external multi-user testing."
+    }
+  ],
+  "openQuestions": [
+    "Which OIDC provider should be the first hosted default?",
+    "Should anonymous designs be ephemeral-only or disabled entirely?",
+    "Which globally consistent quota store fits the target hosting model?"
+  ]
+}

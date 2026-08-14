@@ -78,6 +78,10 @@ DENIED_NAMES: frozenset[str] = frozenset(
         "locals",
         "memoryview",
         "help",
+        "getattr",
+        "setattr",
+        "delattr",
+        "print",
     }
 )
 
@@ -102,6 +106,59 @@ DENIED_ATTRS: frozenset[str] = frozenset(
         "__cached__",
         "__path__",
         "__name__",  # actually fine in normal use, but blocks `__name__.__class__` chains
+    }
+)
+
+# Allowed CAD and utility modules can retain references to modules they import.
+# For example, build123d currently exposes both ``os`` and ``sys``, which would
+# otherwise bypass the top-level import allowlist. Process controls are blocked
+# here as well so a future direct re-export cannot become a launch primitive.
+DENIED_TRANSITIVE_ATTRS: frozenset[str] = frozenset(
+    {
+        "os",
+        "sys",
+        "subprocess",
+        "socket",
+        "pathlib",
+        "shutil",
+        "importlib",
+        "builtins",
+        "abort",
+        "_exit",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "fork",
+        "forkpty",
+        "vfork",
+        "kill",
+        "killpg",
+        "popen",
+        "Popen",
+        "posix_spawn",
+        "posix_spawnp",
+        "setpgid",
+        "setpgrp",
+        "setsid",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "startfile",
+        "system",
+        "run",
+        "call",
+        "check_call",
+        "check_output",
+        "getoutput",
+        "getstatusoutput",
+        "send_signal",
+        "terminate",
     }
 )
 
@@ -199,6 +256,17 @@ def _contains_build123d_primitive_call(node: ast.AST) -> bool:
     return False
 
 
+def _denied_transitive_component(dotted_name: str) -> str | None:
+    return next(
+        (
+            component
+            for component in dotted_name.split(".")
+            if component in DENIED_TRANSITIVE_ATTRS
+        ),
+        None,
+    )
+
+
 def _top_level_result_assignments(tree: ast.Module) -> list[ast.Assign | ast.AnnAssign]:
     assignments: list[ast.Assign | ast.AnnAssign] = []
     for node in tree.body:
@@ -227,21 +295,46 @@ def audit_script(source: str) -> AuditResult:
                     errors.append(
                         f"line {node.lineno}: import '{alias.name}' is not allowed"
                     )
+                else:
+                    denied_component = _denied_transitive_component(alias.name)
+                    if denied_component is not None:
+                        errors.append(
+                            f"line {node.lineno}: import '{alias.name}' exposes "
+                            f"dangerous attribute '{denied_component}'"
+                        )
         elif isinstance(node, ast.ImportFrom):
             top = (node.module or "").split(".")[0]
             if top not in ALLOWED_TOP_LEVEL_MODULES:
                 errors.append(
                     f"line {node.lineno}: from-import '{node.module}' is not allowed"
                 )
+            else:
+                denied_component = _denied_transitive_component(node.module or "")
+                if denied_component is not None:
+                    errors.append(
+                        f"line {node.lineno}: from-import '{node.module}' exposes "
+                        f"dangerous attribute '{denied_component}'"
+                    )
+                for alias in node.names:
+                    if alias.name in DENIED_TRANSITIVE_ATTRS:
+                        errors.append(
+                            f"line {node.lineno}: from-import of dangerous attribute "
+                            f"'{alias.name}' is not allowed"
+                        )
         elif isinstance(node, ast.Name):
             if node.id in DENIED_NAMES and isinstance(node.ctx, ast.Load):
                 errors.append(
                     f"line {node.lineno}: use of '{node.id}' is not allowed"
                 )
         elif isinstance(node, ast.Attribute):
-            if node.attr in DENIED_ATTRS:
+            if node.attr in DENIED_ATTRS or node.attr in DENIED_TRANSITIVE_ATTRS:
                 errors.append(
                     f"line {node.lineno}: attribute access '.{node.attr}' is not allowed"
+                )
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if "__" in node.value:
+                errors.append(
+                    f"line {node.lineno}: dunder strings are not allowed in CAD source"
                 )
 
     builder_audit = _Build123dBuilderAudit()
@@ -272,5 +365,6 @@ __all__ = [
     "AuditResult",
     "ALLOWED_TOP_LEVEL_MODULES",
     "DENIED_NAMES",
+    "DENIED_TRANSITIVE_ATTRS",
     "BUILD123D_PRIMITIVES",
 ]

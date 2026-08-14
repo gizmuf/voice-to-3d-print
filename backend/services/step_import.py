@@ -20,7 +20,8 @@ class ImportedStep:
 
 def import_step_reference(content: bytes, filename: str, output_dir: Path) -> ImportedStep:
     output_dir.mkdir(parents=True, exist_ok=True)
-    step_path = output_dir / filename
+    suffix = Path(filename).suffix.lower()
+    step_path = output_dir / f"source{suffix if suffix in {'.step', '.stp'} else '.step'}"
     step_path.write_bytes(content)
 
     imported = cq_importers.importStep(str(step_path))
@@ -59,4 +60,3 @@ def import_step_reference(content: bytes, filename: str, output_dir: Path) -> Im
         ),
     )
     return ImportedStep(workspace_model=model, glb_path=glb_path, stl_path=stl_path, import_mode="reference")
-

@@ -35,6 +35,7 @@ export type ChatTurnEntry =
       toolCalls: ToolCall[];
       revisionIdAfter?: string;
       model?: string;
+      billingSource?: string;
       tokens?: {
         input: number;
         output: number;

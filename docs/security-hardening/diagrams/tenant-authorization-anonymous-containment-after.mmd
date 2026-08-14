@@ -1,0 +1,8 @@
+flowchart LR
+  U["Anonymous browser"] --> API["Public FastAPI"]
+  U --> BYOK["Request-scoped BYOK"]
+  API --> ID["Random design ID"]
+  API --> GATE["Platform spend disabled"]
+  BYOK --> PAID["Anthropic on customer account"]
+  ID --> PROXY["Private GCS proxy"]
+  GATE -. "denies" .-> KEYS["Platform provider keys"]

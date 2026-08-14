@@ -132,7 +132,7 @@ def _summarize(
     client: Anthropic | None,
 ) -> str | None:
     if client is None:
-        if not settings.anthropic_api_key:
+        if not settings.allow_platform_ai_spend or not settings.anthropic_api_key:
             return None
         client = Anthropic(api_key=settings.anthropic_api_key)
     text = _flatten_text(older)

@@ -14,12 +14,16 @@ directory.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import os
 import shutil
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from config import settings
 from services.codegen.ast_audit import audit_script
@@ -42,6 +46,86 @@ from services.printer_profiles import PrinterProfile, get_profile
 
 
 SUPPORTED_TARGETS: tuple[str, ...] = ("stl", "step", "dxf", "glb")
+
+
+class _DesignThreadLock:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
+
+
+_design_thread_locks_guard = threading.Lock()
+_design_thread_locks: dict[str, _DesignThreadLock] = {}
+
+
+@contextmanager
+def _serialized_design_build(design_id: str) -> Iterator[None]:
+    """Serialize one design's shared-workspace build across threads/processes.
+
+    The runner writes fixed filenames inside the design work directory. A
+    process-local keyed lock prevents thread overlap, while Linux ``flock``
+    coordinates independent Uvicorn/Gunicorn workers that share ``output_dir``.
+    Lock filenames are hashes so an unexpected design ID cannot influence the
+    lock path. Lock files intentionally remain on disk: unlinking one while
+    another process is waiting could create two lock inodes for the same design.
+    """
+    lock_key = hashlib.sha256(design_id.encode("utf-8")).hexdigest()
+    with _design_thread_locks_guard:
+        thread_entry = _design_thread_locks.get(lock_key)
+        if thread_entry is None:
+            thread_entry = _DesignThreadLock()
+            _design_thread_locks[lock_key] = thread_entry
+        thread_entry.users += 1
+
+    thread_acquired = False
+    descriptor: int | None = None
+    lock_file = None
+    try:
+        thread_entry.lock.acquire()
+        thread_acquired = True
+        lock_dir = settings.output_dir / ".build-locks"
+        lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = (
+            os.O_CREAT
+            | os.O_RDWR
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(lock_dir / f"{lock_key}.lock", flags, 0o600)
+        lock_file = os.fdopen(descriptor, "a+b", buffering=0)
+        descriptor = None
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if lock_file is not None:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
+        if thread_acquired:
+            thread_entry.lock.release()
+        with _design_thread_locks_guard:
+            thread_entry.users -= 1
+            if (
+                thread_entry.users == 0
+                and _design_thread_locks.get(lock_key) is thread_entry
+            ):
+                _design_thread_locks.pop(lock_key, None)
+
+
+def trusted_script_metadata(script: str) -> dict[str, str]:
+    """Bind trusted provenance to the exact reviewed script bytes."""
+    return {"trusted_script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest()}
+
+
+def design_script_is_trusted(design: Design) -> bool:
+    import secrets
+
+    expected = str(design.metadata.get("trusted_script_sha256") or "")
+    actual = hashlib.sha256(design.script.encode("utf-8")).hexdigest()
+    return bool(expected and secrets.compare_digest(expected, actual))
 
 
 class DesignBuildError(RuntimeError):
@@ -84,6 +168,7 @@ def audit_then_run(
     targets: Iterable[str] | None = None,
     workspace_dir: Path | None = None,
     imported_files: dict[str, str] | None = None,
+    trusted_source: bool = False,
 ) -> SandboxResult:
     """AST-audit a script and run it in the sandbox.
 
@@ -92,6 +177,19 @@ def audit_then_run(
     not raised — callers decide whether to retry, surface to the agent, or
     bubble up.
     """
+    if len(script.encode("utf-8")) > settings.max_cad_source_bytes:
+        raise DesignBuildError(
+            "CAD source exceeds the configured size limit.",
+            audit_errors=["CAD source is too large."],
+        )
+    if not trusted_source and not settings.allow_untrusted_cad_code:
+        raise DesignBuildError(
+            "Untrusted Python CAD execution is disabled in this deployment.",
+            audit_errors=[
+                "Use a reviewed built-in template or deterministic parameter edit. "
+                "Arbitrary Python requires a separately isolated build worker."
+            ],
+        )
     audit = audit_script(script)
     if not audit.ok:
         raise DesignBuildError(
@@ -133,33 +231,35 @@ def build_design(
     defaults baked into the script source — the slider edits would never
     actually reach the geometry pipeline.
     """
-    started = time.perf_counter()
-    workdir = _design_workdir(design.id)
-    imported_files = design.metadata.get("imported_files") or None
-    if parameter_overrides is None:
-        parameter_overrides = {p.name: p.value for p in design.parameters}
-    sandbox_result = audit_then_run(
-        script=design.script,
-        parameter_overrides=parameter_overrides,
-        targets=targets,
-        workspace_dir=workdir,
-        imported_files=imported_files,
-    )
-
-    if not sandbox_result.ok:
-        raise DesignBuildError(
-            f"Sandbox build failed: {sandbox_result.payload.get('error')}",
-            sandbox=sandbox_result,
+    with _serialized_design_build(design.id):
+        started = time.perf_counter()
+        workdir = _design_workdir(design.id)
+        imported_files = design.metadata.get("imported_files") or None
+        if parameter_overrides is None:
+            parameter_overrides = {p.name: p.value for p in design.parameters}
+        sandbox_result = audit_then_run(
+            script=design.script,
+            parameter_overrides=parameter_overrides,
+            targets=targets,
+            workspace_dir=workdir,
+            imported_files=imported_files,
+            trusted_source=design_script_is_trusted(design),
         )
 
-    return build_from_sandbox_result(
-        design,
-        sandbox_result,
-        parameter_overrides=parameter_overrides,
-        printer_profile_id=printer_profile_id,
-        process=process,
-        started=started,
-    )
+        if not sandbox_result.ok:
+            raise DesignBuildError(
+                f"Sandbox build failed: {sandbox_result.payload.get('error')}",
+                sandbox=sandbox_result,
+            )
+
+        return build_from_sandbox_result(
+            design,
+            sandbox_result,
+            parameter_overrides=parameter_overrides,
+            printer_profile_id=printer_profile_id,
+            process=process,
+            started=started,
+        )
 
 
 def build_from_sandbox_result(
@@ -209,6 +309,7 @@ def build_from_sandbox_result(
         artifacts=artifacts,
         manufacturability=manufacturability_report,
         parameter_snapshot=parameter_snapshot(design, parameter_overrides),
+        selection_map=sandbox_result.payload.get("selection_map") or {},
         duration_ms=int((time.perf_counter() - started) * 1000),
         log=sandbox_result.payload.get("log") or "",
     )

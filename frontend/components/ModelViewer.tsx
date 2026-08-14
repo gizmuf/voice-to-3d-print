@@ -11,6 +11,9 @@ import type { MotionReport } from "../types/design";
 export type SelectionPayload = {
   objectName: string;
   topologyRef: string;
+  featureId?: string | null;
+  featureName?: string | null;
+  selectionConfidence?: "feature_face" | "face" | "body";
   triangleIndex: number | null;
   point: { x: number; y: number; z: number };
   normal: { x: number; y: number; z: number } | null;
@@ -50,6 +53,12 @@ type ModelViewerProps = {
   annotations?: ReactNode;
   language?: UiLanguage;
   motionReport?: MotionReport | null;
+  selectionMap?: Record<string, {
+    topology_ref: string;
+    feature_id?: string | null;
+    feature_name?: string | null;
+    confidence: "feature_face" | "face" | "body";
+  }>;
 };
 
 type LoadedModelProps = {
@@ -65,6 +74,7 @@ type LoadedModelProps = {
   fitView?: boolean;
   motionRunning?: boolean;
   onMotionAvailable?: (available: boolean) => void;
+  selectionMap?: ModelViewerProps["selectionMap"];
 };
 
 type ModelLoadState =
@@ -112,6 +122,7 @@ function LoadedModel({
   fitView = false,
   motionRunning = false,
   onMotionAvailable,
+  selectionMap,
 }: LoadedModelProps) {
   const gltf = useGLTF(src);
   const { camera, size, invalidate } = useThree();
@@ -259,10 +270,20 @@ function LoadedModel({
   const handleClick = (event: ThreeEvent<MouseEvent>) => {
     if (ghost) return;
     event.stopPropagation();
+    let selectedNode = event.object;
+    let semantic = selectionMap?.[selectedNode.name];
+    while (!semantic && selectedNode.parent) {
+      selectedNode = selectedNode.parent;
+      semantic = selectionMap?.[selectedNode.name];
+    }
+    const objectName = event.object.name || selectedNode.name || "mesh";
     onSelect?.(
       {
-        objectName: event.object.name || "mesh",
-        topologyRef: `${event.object.name || "mesh"}#triangle:${event.faceIndex ?? "unknown"}`,
+        objectName,
+        topologyRef: semantic?.topology_ref ?? `body:${objectName}`,
+        featureId: semantic?.feature_id ?? null,
+        featureName: semantic?.feature_name ?? null,
+        selectionConfidence: semantic?.confidence ?? "body",
         triangleIndex: event.faceIndex ?? null,
         point: {
           x: Number(event.point.x.toFixed(3)),
@@ -417,6 +438,7 @@ export default function ModelViewer({
   annotations,
   language = "pl",
   motionReport = null,
+  selectionMap,
 }: ModelViewerProps) {
   const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
@@ -618,6 +640,7 @@ export default function ModelViewer({
               fitDirection={cameraPosition}
               fitView
               motionRunning={motionRunning}
+              selectionMap={selectionMap}
               onMotionAvailable={setMotionAvailable}
               onHover={setHoveredObjectId}
               onSelect={(payload, objectId) => {
