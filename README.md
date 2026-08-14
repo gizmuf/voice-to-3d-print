@@ -203,8 +203,9 @@ can optionally send the customer's own Anthropic key for a turn, so Anthropic
 bills that customer's account. The key stays in the current tab's memory and is
 not persisted. BYOK never silently falls back to the Pulsai platform key.
 
-See `docs/SECURITY_AND_SECRETS.md` and `docs/RUNBOOK_LINUX.md` for Cloud Run
-Secret Manager verification and the canonical VPS setup.
+See `docs/SECURITY_AND_SECRETS.md`, `docs/RUNBOOK_LINUX.md`, and
+`docs/PRODUCTION_RUNBOOK.md` for Cloud Run Secret Manager verification, the
+canonical VPS setup, and the no-traffic production release procedure.
 
 ### Tools available to the agent
 
