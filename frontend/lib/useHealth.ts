@@ -10,6 +10,15 @@ export type HealthSnapshot = {
   warnings: string[];
 };
 
+export type AccountAiSettings = {
+  anthropic: {
+    platform_access: boolean;
+    billing_source: "platform" | "customer_byok";
+    model: string;
+  };
+  keys_persisted: boolean;
+};
+
 let cached: HealthSnapshot | null = null;
 let inflight: Promise<HealthSnapshot | null> | null = null;
 
@@ -53,4 +62,21 @@ export function useHealth(): HealthSnapshot | null {
     };
   }, []);
   return snapshot;
+}
+
+export function useAccountAiSettings(): AccountAiSettings | null {
+  const [settings, setSettings] = useState<AccountAiSettings | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${resolveBackendUrl()}/account/ai-settings`, { credentials: "include" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        if (alive && payload) setSettings(payload as AccountAiSettings);
+      })
+      .catch(() => null);
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return settings;
 }

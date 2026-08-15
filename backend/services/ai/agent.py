@@ -83,6 +83,7 @@ def stream_turn(
     *,
     printer_profile_id: str | None = None,
     anthropic_api_key: str | None = None,
+    allow_platform_billing: bool | None = None,
 ) -> Iterator[str]:
     """Stream one chat turn as server-sent events.
 
@@ -95,7 +96,11 @@ def stream_turn(
         credentials = resolve_anthropic_credentials(
             anthropic_api_key,
             settings.anthropic_api_key,
-            allow_platform_billing=settings.allow_platform_ai_spend,
+            allow_platform_billing=(
+                settings.allow_platform_ai_spend
+                if allow_platform_billing is None
+                else allow_platform_billing
+            ),
         )
     except InvalidAnthropicApiKey:
         yield _sse(

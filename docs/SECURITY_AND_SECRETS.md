@@ -24,6 +24,9 @@ recover a user's project; use an explicit owner migration instead.
 
 - Repository files contain names and pointers only, never secret values.
 - Cloud Run receives server credentials through Secret Manager references.
+- Hosted Anthropic access is granted through the secret-backed
+  `ANTHROPIC_PLATFORM_EMAIL_ALLOWLIST`. The provider key remains server-side;
+  allowlisted users receive only an account entitlement flag.
 - VPS services receive credentials through `*_FILE` paths backed by systemd
   credentials, Docker secrets, or another approved secret mount.
 - A customer Anthropic key is request-scoped BYOK data. It is held in the

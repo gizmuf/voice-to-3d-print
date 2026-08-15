@@ -47,10 +47,16 @@ def create_workspace(
     project_id: str | None = None,
     workspace_id: str | None = None,
 ) -> WorkspaceRecord:
+    from services.auth import current_owner_id
+
     workspace_id = workspace_id or uuid.uuid4().hex
+    owner_id = current_owner_id()
+    if not owner_id and settings.insecure_local_dev:
+        owner_id = "local-dev"
     record = WorkspaceRecord(
         workspace_id=workspace_id,
         editable_model=editable_model.model_copy(update={"source": source}),
+        owner_id=owner_id,
         project_id=project_id,
     )
     return _write_record(record)

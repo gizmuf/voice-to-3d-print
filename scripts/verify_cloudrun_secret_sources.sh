@@ -4,7 +4,7 @@ set -euo pipefail
 project="${1:-pulsai-app}"
 region="${2:-us-central1}"
 services=(pulsai-3d-backend pulsai-3d-stt)
-secret_name_pattern='(^|_)(API_KEY|API_TOKEN|SECRET_KEY|CLIENT_SECRET|ADMIN_TOKEN|TOKEN)$'
+secret_name_pattern='(^|_)(API_KEY|API_TOKEN|SECRET_KEY|CLIENT_SECRET|ADMIN_TOKEN|TOKEN|EMAIL_ALLOWLIST)$'
 failed=0
 
 command -v gcloud >/dev/null || {
@@ -46,7 +46,7 @@ frontend_json=$(gcloud run services describe pulsai-3d-frontend \
   --format=json)
 if jq -e '
   [.spec.template.spec.containers[].env[]?
-   | select(.name | test("(^|_)(API_KEY|API_TOKEN|SECRET_KEY|CLIENT_SECRET|ADMIN_TOKEN|TOKEN)$"))]
+   | select(.name | test("(^|_)(API_KEY|API_TOKEN|SECRET_KEY|CLIENT_SECRET|ADMIN_TOKEN|TOKEN|EMAIL_ALLOWLIST)$"))]
   | length > 0
 ' <<<"$frontend_json" >/dev/null; then
   echo "FAIL: frontend contains a secret-like environment variable, including a browser-public name"

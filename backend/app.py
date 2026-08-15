@@ -90,7 +90,9 @@ from services.jewelry_trace import (
     trace_preview_to_script,
 )
 from services.job_store import (
+    JOBS_COLLECTION,
     _get_bucket,
+    _get_firestore,
     create_project,
     ensure_job,
     ensure_project,
@@ -182,6 +184,7 @@ if _cors_origins_env:
         allow_headers=["*"],
     )
 else:
+    _cors_origins = []
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -203,6 +206,9 @@ _PUBLIC_PATHS = {
 }
 _DESIGN_OWNER_PATH_RE = re.compile(r"^/(?:design|artifacts/designs)/([a-f0-9]{32})(?:/|$)")
 _CLOUD_DESIGN_PATH_RE = re.compile(r"^/cloud-artifacts/three-d/designs/([a-f0-9]{32})(?:/|$)")
+_WORKSPACE_OWNER_PATH_RE = re.compile(r"^/(?:workspace|artifacts/workspaces)/([a-f0-9]{32})(?:/|$)")
+_JOB_OWNER_PATH_RE = re.compile(r"^/(?:bundle|artifacts)/([a-f0-9]{32})(?:/|$)")
+_CLOUD_JOB_PATH_RE = re.compile(r"^/cloud-artifacts/three-d/jobs/([a-f0-9]{32})(?:/|$)")
 _SAFE_MODE_BLOCKED_PREFIXES = (
     "/workspace",
     "/projects",
@@ -233,6 +239,62 @@ def _design_belongs_to(design_id: str, owner_id: str) -> bool:
     return design.metadata.get("owner_id") == owner_id
 
 
+def _workspace_belongs_to(workspace_id: str, owner_id: str) -> bool:
+    try:
+        workspace = get_workspace(workspace_id)
+    except HTTPException:
+        return False
+    if workspace.owner_id:
+        return workspace.owner_id == owner_id
+    return settings.insecure_local_dev and owner_id == "local-dev"
+
+
+def _job_belongs_to(job_id: str, owner_id: str) -> bool:
+    metadata_path = settings.output_dir / job_id / "metadata.json"
+    try:
+        payload = json.loads(metadata_path.read_text())
+        metadata_owner = payload.get("owner_id")
+        if metadata_owner:
+            return metadata_owner == owner_id
+    except (OSError, ValueError, TypeError):
+        pass
+
+    client = _get_firestore()
+    if client is not None:
+        try:
+            snapshot = client.collection(JOBS_COLLECTION).document(job_id).get()
+            if snapshot.exists:
+                return (snapshot.to_dict() or {}).get("owner_id") == owner_id
+        except Exception:
+            pass
+    # Legacy workspace uploads use the historical `three-d/jobs/{workspace}`
+    # object prefix even when no job document exists.
+    workspace_record = settings.output_dir / "workspaces" / job_id / "workspace.json"
+    if workspace_record.is_file():
+        return _workspace_belongs_to(job_id, owner_id)
+    return settings.insecure_local_dev and owner_id == "local-dev"
+
+
+def _anthropic_platform_billing_allowed(request: Request) -> bool:
+    """Grant the shared Anthropic key only to explicitly entitled accounts."""
+    if not settings.anthropic_api_key:
+        return False
+    if settings.allow_platform_ai_spend:
+        return True
+    principal = getattr(request.state, "principal", None)
+    email = str(getattr(principal, "email", "") or "").strip().casefold()
+    return bool(email and email in settings.anthropic_platform_email_allowlist)
+
+
+def _cookie_session_request_allowed(request: Request) -> bool:
+    """Permit cookie-backed mutations only behind a strict CORS preflight."""
+    if request.method in {"GET", "HEAD"}:
+        return True
+    origin = request.headers.get("origin", "").rstrip("/")
+    csrf_marker = request.headers.get("x-pulsai-csrf", "")
+    return bool(origin and csrf_marker == "same-origin" and origin in _cors_origins)
+
+
 @app.middleware("http")
 async def google_auth_and_owner_isolation(request: Request, call_next):
     """Fail closed on Cloud Run and prevent cross-account design access."""
@@ -250,8 +312,9 @@ async def google_auth_and_owner_isolation(request: Request, call_next):
             )
         authorization = request.headers.get("authorization", "")
         scheme, _, credential = authorization.partition(" ")
-        if (scheme.lower() != "bearer" or not credential) and request.method in {"GET", "HEAD"}:
-            credential = request.cookies.get("pulsai_google_id", "")
+        if scheme.lower() != "bearer" or not credential:
+            if _cookie_session_request_allowed(request):
+                credential = request.cookies.get("pulsai_google_id", "")
         if not credential:
             return JSONResponse(status_code=401, content={"detail": "Google Login required."})
         try:
@@ -268,6 +331,14 @@ async def google_auth_and_owner_isolation(request: Request, call_next):
         # Use 404 so design identifiers cannot be used to enumerate accounts.
         return JSONResponse(status_code=404, content={"detail": "Design not found."})
 
+    workspace_match = _WORKSPACE_OWNER_PATH_RE.match(request.url.path)
+    if workspace_match and principal and not _workspace_belongs_to(workspace_match.group(1), principal.subject):
+        return JSONResponse(status_code=404, content={"detail": "Workspace not found."})
+
+    job_match = _JOB_OWNER_PATH_RE.match(request.url.path) or _CLOUD_JOB_PATH_RE.match(request.url.path)
+    if job_match and principal and not _job_belongs_to(job_match.group(1), principal.subject):
+        return JSONResponse(status_code=404, content={"detail": "Job not found."})
+
     context_token = set_current_principal(principal)
     request.state.principal = principal
     try:
@@ -281,15 +352,28 @@ artifacts_path.mkdir(parents=True, exist_ok=True)
 
 @app.api_route("/artifacts/{object_path:path}", methods=["GET", "HEAD"])
 def private_local_artifact_endpoint(object_path: str, request: Request):
-    """Serve only canonical, owner-authorized design artifacts."""
+    """Serve canonical artifacts only to their design/workspace/job owner."""
     if not object_path or object_path.startswith("/") or "//" in object_path:
         raise HTTPException(status_code=404, detail="Artifact not found.")
     parts = object_path.split("/")
-    if ".." in parts or len(parts) < 3 or parts[0] != "designs":
+    if ".." in parts:
         raise HTTPException(status_code=404, detail="Artifact not found.")
-    design_id = _validate_design_id(parts[1])
     principal = getattr(request.state, "principal", None)
-    if principal is None or not _design_belongs_to(design_id, principal.subject):
+    if principal is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+
+    if len(parts) >= 3 and parts[0] == "designs":
+        design_id = _validate_design_id(parts[1])
+        authorized = _design_belongs_to(design_id, principal.subject)
+    elif len(parts) >= 3 and parts[0] == "workspaces":
+        workspace_id = _validate_design_id(parts[1])
+        authorized = _workspace_belongs_to(workspace_id, principal.subject)
+    elif len(parts) >= 2:
+        job_id = _validate_design_id(parts[0])
+        authorized = _job_belongs_to(job_id, principal.subject)
+    else:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    if not authorized:
         raise HTTPException(status_code=404, detail="Artifact not found.")
     root = artifacts_path.resolve()
     candidate = (root / object_path).resolve()
@@ -304,6 +388,20 @@ def auth_config_endpoint() -> dict:
         "required": settings.auth_required,
         # OAuth client IDs are public identifiers; secrets never cross this boundary.
         "google_client_id": settings.google_oauth_client_id if settings.auth_required else "",
+    }
+
+
+@app.get("/account/ai-settings")
+def account_ai_settings_endpoint(request: Request) -> dict:
+    """Return account-scoped AI access without returning provider secrets."""
+    platform_access = _anthropic_platform_billing_allowed(request)
+    return {
+        "anthropic": {
+            "platform_access": platform_access,
+            "billing_source": "platform" if platform_access else "customer_byok",
+            "model": settings.anthropic_chat_model,
+        },
+        "keys_persisted": False,
     }
 
 
@@ -332,6 +430,27 @@ def auth_session_endpoint(request: Request) -> Response:
     return response
 
 
+@app.get("/auth/session")
+def auth_session_status_endpoint(request: Request) -> JSONResponse:
+    """Bootstrap a valid HttpOnly Google session after a browser reload."""
+    if not settings.auth_required or not settings.google_oauth_client_id:
+        return JSONResponse(
+            {"authenticated": not settings.auth_required},
+            headers={"Cache-Control": "private, no-store"},
+        )
+    credential = request.cookies.get("pulsai_google_id", "")
+    if not credential:
+        raise HTTPException(status_code=401, detail="Google Login required.")
+    try:
+        verify_google_credential(credential, settings.google_oauth_client_id)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google session.") from exc
+    return JSONResponse(
+        {"authenticated": True},
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @app.delete("/auth/session", status_code=204)
 def auth_session_delete_endpoint() -> Response:
     response = Response(status_code=204)
@@ -347,19 +466,16 @@ def auth_session_delete_endpoint() -> Response:
 
 @app.get("/cloud-artifacts/{object_path:path}")
 def private_cloud_artifact_endpoint(object_path: str):
-    """Proxy a private GCS artifact without exposing a permanent public URL.
-
-    Owner authorization will be added at this boundary with account support.
-    Until then, the 128-bit design/job id is an unguessable bearer locator,
-    which is safer than a publicly readable bucket but not tenant isolation.
-    """
+    """Proxy an owner-authorized private GCS design or legacy job artifact."""
     normalized = object_path
-    if (
-        normalized != normalized.strip("/")
-        or not normalized.startswith("three-d/designs/")
-        or ".." in normalized.split("/")
-        or "//" in normalized
-    ):
+    parts = normalized.split("/")
+    canonical_prefix = (
+        len(parts) >= 4
+        and parts[0] == "three-d"
+        and parts[1] in {"designs", "jobs"}
+        and _DESIGN_ID_RE.match(parts[2])
+    )
+    if normalized != normalized.strip("/") or not canonical_prefix or ".." in parts or "//" in normalized:
         raise HTTPException(status_code=404, detail="Artifact not found.")
     bucket = _get_bucket()
     if bucket is None:
@@ -414,7 +530,11 @@ def _workspace_artifact_url(upload: dict | None, workspace_id: str, path: Path) 
 def _write_metadata(job_id: str, metadata: dict) -> None:
     metadata_path = settings.output_dir / job_id / "metadata.json"
     try:
-        metadata_path.write_text(json.dumps(metadata, indent=2))
+        payload = dict(metadata)
+        owner_id = current_owner_id()
+        if owner_id:
+            payload["owner_id"] = owner_id
+        metadata_path.write_text(json.dumps(payload, indent=2))
     except Exception:
         pass
 
@@ -1965,6 +2085,7 @@ async def workspace_chat_endpoint(
             selected_feature_id=request.selected_feature_id,
             selected_feature_label=request.selected_feature_label,
             anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+            allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
         )
         return StreamingResponse(
             generator,
@@ -1978,6 +2099,7 @@ async def workspace_chat_endpoint(
         request.message,
         printer_profile_id=request.printer_profile_id,
         anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+        allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
     )
     return StreamingResponse(
         generator,
@@ -2148,7 +2270,7 @@ def design_create_endpoint(
         request,
         anthropic_available=bool(
             request_byok
-            or (settings.allow_platform_ai_spend and settings.anthropic_api_key)
+            or _anthropic_platform_billing_allowed(http_request)
         ),
     )
     requires_agent = bool(
@@ -3015,6 +3137,7 @@ async def design_chat_endpoint(
         reference_image_base64=request.reference_image_base64,
         reference_image_media_type=image_media_type,
         reference_image_name=request.reference_image_name,
+        allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
     )
     return StreamingResponse(
         generator,

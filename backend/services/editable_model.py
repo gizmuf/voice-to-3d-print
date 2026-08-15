@@ -90,6 +90,7 @@ class BuildArtifact(BaseModel):
 class WorkspaceRecord(BaseModel):
     workspace_id: str
     editable_model: EditableModel
+    owner_id: str | None = None
     project_id: str | None = None
     latest_preview: PreviewArtifact | None = None
     latest_build: BuildArtifact | None = None
@@ -115,4 +116,3 @@ class WorkspaceCreateRequest(BaseModel):
     editable_model: EditableModel | None = None
     project_id: str | None = None
     source: WorkspaceSource = "native"
-

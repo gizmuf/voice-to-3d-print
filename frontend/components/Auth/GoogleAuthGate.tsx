@@ -38,6 +38,8 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
   const backendUrl = resolveBackendUrl();
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [credential, setCredential] = useState("");
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
   const [error, setError] = useState("");
   const buttonRef = useRef<HTMLDivElement>(null);
 
@@ -52,7 +54,20 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
   }, [backendUrl]);
 
   useEffect(() => {
-    if (!config?.required || !config.google_client_id || credential) return;
+    if (!config) return;
+    if (!config.required) {
+      setAuthenticated(true);
+      setSessionChecked(true);
+      return;
+    }
+    fetch(`${backendUrl}/auth/session`, { credentials: "include" })
+      .then((response) => setAuthenticated(response.ok))
+      .catch(() => setAuthenticated(false))
+      .finally(() => setSessionChecked(true));
+  }, [backendUrl, config]);
+
+  useEffect(() => {
+    if (!config?.required || !config.google_client_id || !sessionChecked || authenticated) return;
     const initialize = () => {
       if (!window.google || !buttonRef.current) return;
       window.google.accounts.id.initialize({
@@ -72,6 +87,7 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
             if (!session.ok) throw new Error("session rejected");
             setError("");
             setCredential(response.credential);
+            setAuthenticated(true);
           } catch {
             setError("Nie udało się utworzyć bezpiecznej sesji. Spróbuj ponownie.");
           }
@@ -101,10 +117,13 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
     script.addEventListener("load", initialize, { once: true });
     script.addEventListener("error", () => setError("Nie udało się wczytać Google Login."), { once: true });
     document.head.appendChild(script);
-  }, [config, credential]);
+  }, [authenticated, backendUrl, config, sessionChecked]);
 
   useEffect(() => {
-    if (!credential) return;
+    // Local development deliberately runs without auth. Installing the
+    // credentialed fetch wrapper there would make wildcard-CORS responses
+    // invalid in browsers (`*` cannot be combined with credentials).
+    if (!config?.required || !authenticated) return;
     const originalFetch = window.fetch.bind(window);
     const backendOrigin = new URL(backendUrl, window.location.href).origin;
     window.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -113,10 +132,12 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
       if (target.origin !== backendOrigin) return originalFetch(input, init);
       const headers = new Headers(input instanceof Request ? input.headers : undefined);
       new Headers(init.headers).forEach((value, key) => headers.set(key, value));
-      headers.set("authorization", `Bearer ${credential}`);
+      if (credential) headers.set("authorization", `Bearer ${credential}`);
+      else headers.set("x-pulsai-csrf", "same-origin");
       const response = await originalFetch(input, { ...init, headers, credentials: "include" });
       if (response.status === 401) {
         setCredential("");
+        setAuthenticated(false);
         window.google?.accounts.id.disableAutoSelect();
       }
       return response;
@@ -124,7 +145,7 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
     return () => {
       window.fetch = originalFetch;
     };
-  }, [backendUrl, credential]);
+  }, [authenticated, backendUrl, config?.required, credential]);
 
   // Google requires the homepage and privacy policy linked from OAuth branding
   // to remain publicly accessible, including before a user signs in.
@@ -137,7 +158,8 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
   if (!config.google_client_id) {
     return <AuthShell message="Google Login nie jest jeszcze skonfigurowany po stronie serwera." />;
   }
-  if (!credential) {
+  if (!sessionChecked) return <AuthShell message="Sprawdzam istniejącą sesję Google…" />;
+  if (!authenticated) {
     return (
       <AuthShell
         message="Zaloguj się przez Google, aby projekty i pliki były widoczne tylko dla Ciebie."
