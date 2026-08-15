@@ -8,6 +8,13 @@ test("provider settings accept multiple memory-only keys and routing choices", a
     else if (path === "/health") body = { slicer_ready: true, platform_ai_spend_enabled: false, warnings: [] };
     else if (path === "/account/ai-settings") body = {
       anthropic: { platform_access: false, billing_source: "customer_byok", model: "claude-sonnet-5" },
+      providers: {
+        anthropic: { platform_access: false },
+        openai: { platform_access: false },
+        gemini: { platform_access: false },
+        meshy: { platform_access: false },
+        tripo: { platform_access: false },
+      },
       keys_persisted: false,
     };
     else if (path === "/design/templates") body = { templates: [] };
@@ -26,8 +33,39 @@ test("provider settings accept multiple memory-only keys and routing choices", a
 
   await expect(page.locator('input[name="pulsai-anthropic-byok"]')).toHaveValue("sk-ant-example");
   await expect(page.locator('input[name="pulsai-openai-byok"]')).toHaveValue("sk-example");
-  await expect(page.locator("summary").filter({ hasText: /AI:/ })).toContainText("2 keys");
+  await expect(page.getByTestId("provider-access-anthropic")).toHaveText("Your key: added");
+  await expect(page.getByTestId("provider-access-openai")).toHaveText("Your key: added");
+  await expect(page.getByTestId("provider-access-tripo")).toHaveText("No key added");
+  await expect(page.locator("summary").filter({ hasText: /AI:/ })).toContainText("2 own keys");
   await expect(page.getByText(/Keys stay only in this tab's memory/)).toBeVisible();
+});
+
+test("account-funded provider is visible without exposing a key", async ({ page }) => {
+  await page.route("http://localhost:8000/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    let body: unknown = {};
+    if (path === "/auth/config") body = { required: false, google_client_id: "" };
+    else if (path === "/health") body = { slicer_ready: true, platform_ai_spend_enabled: false, warnings: [] };
+    else if (path === "/account/ai-settings") body = {
+      anthropic: { platform_access: true, billing_source: "platform", model: "claude-sonnet-5" },
+      providers: { anthropic: { platform_access: true } },
+      keys_persisted: false,
+    };
+    else if (path === "/design/templates") body = { templates: [] };
+    else if (path === "/design/recent") body = { designs: [] };
+    else if (path === "/printers") body = { profiles: [], default_id: null };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto("/design");
+  await expect(page.locator("summary").filter({ hasText: /AI:/ })).toContainText("Pulsai active (1)");
+  await page.locator("summary").filter({ hasText: /AI:/ }).click();
+  await expect(page.getByTestId("provider-access-anthropic")).toHaveText("Pulsai: active");
+  await expect(page.locator('input[name="pulsai-anthropic-byok"]')).toHaveAttribute(
+    "placeholder",
+    "Optional: use your own key",
+  );
+  await expect(page.locator('input[name="pulsai-anthropic-byok"]')).toHaveValue("");
 });
 
 test("organic prompt uses Tripo, repairs the mesh, and imports it into Design Studio", async ({ page }) => {

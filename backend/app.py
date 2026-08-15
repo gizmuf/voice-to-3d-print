@@ -412,12 +412,25 @@ def auth_config_endpoint() -> dict:
 @app.get("/account/ai-settings")
 def account_ai_settings_endpoint(request: Request) -> dict:
     """Return account-scoped AI access without returning provider secrets."""
-    platform_access = _anthropic_platform_billing_allowed(request)
+    anthropic_access = _anthropic_platform_billing_allowed(request)
+    provider_access = {
+        "anthropic": anthropic_access,
+        "openai": bool(settings.allow_platform_ai_spend and settings.openai_api_key),
+        "gemini": bool(settings.allow_platform_ai_spend and settings.gemini_api_key),
+        "meshy": bool(settings.allow_platform_ai_spend and settings.meshy_api_key),
+        "tripo": bool(settings.allow_platform_ai_spend and settings.tripo_api_key),
+    }
     return {
         "anthropic": {
-            "platform_access": platform_access,
-            "billing_source": "platform" if platform_access else "customer_byok",
+            "platform_access": anthropic_access,
+            "billing_source": "platform" if anthropic_access else "customer_byok",
             "model": settings.anthropic_chat_model,
+        },
+        # This reports account entitlement, never whether a platform secret merely
+        # exists. A configured provider with spending disabled remains unavailable.
+        "providers": {
+            provider: {"platform_access": allowed}
+            for provider, allowed in provider_access.items()
         },
         "keys_persisted": False,
     }

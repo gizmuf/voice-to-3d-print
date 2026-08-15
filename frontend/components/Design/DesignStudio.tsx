@@ -145,6 +145,20 @@ export default function DesignStudio() {
   const platformBillingEnabled = Boolean(
     health?.platform_ai_spend_enabled || accountAiSettings?.anthropic.platform_access,
   );
+  const providerPlatformAccess = useMemo<Partial<Record<ProviderKeyId, boolean>>>(() => {
+    const providerAccess = accountAiSettings?.providers ?? {};
+    return {
+      anthropic: Boolean(
+        providerAccess.anthropic?.platform_access
+        ?? accountAiSettings?.anthropic.platform_access
+        ?? health?.platform_ai_spend_enabled,
+      ),
+      openai: Boolean(providerAccess.openai?.platform_access ?? health?.platform_ai_spend_enabled),
+      gemini: Boolean(providerAccess.gemini?.platform_access ?? health?.platform_ai_spend_enabled),
+      meshy: Boolean(providerAccess.meshy?.platform_access ?? health?.platform_ai_spend_enabled),
+      tripo: Boolean(providerAccess.tripo?.platform_access ?? health?.platform_ai_spend_enabled),
+    };
+  }, [accountAiSettings, health?.platform_ai_spend_enabled]);
   const printerCatalog = usePrinterProfiles();
   const [templates, setTemplates] = useState<DesignTemplate[]>([]);
   const [design, setDesign] = useState<Design | null>(null);
@@ -1104,6 +1118,7 @@ export default function DesignStudio() {
               onGenerationQualityChange={setGenerationQuality}
               language={uiLanguage}
               platformBillingEnabled={platformBillingEnabled}
+              providerPlatformAccess={providerPlatformAccess}
             />
             <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
           </div>
@@ -1667,6 +1682,7 @@ export default function DesignStudio() {
             onGenerationQualityChange={setGenerationQuality}
             language={uiLanguage}
             platformBillingEnabled={platformBillingEnabled}
+            providerPlatformAccess={providerPlatformAccess}
             disabled={stream.state.status === "streaming"}
           />
           <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
@@ -4273,6 +4289,7 @@ function ProviderBillingControl({
   onGenerationQualityChange,
   language,
   platformBillingEnabled,
+  providerPlatformAccess,
   disabled = false,
 }: {
   keys: ProviderKeys;
@@ -4283,6 +4300,7 @@ function ProviderBillingControl({
   onGenerationQualityChange: (value: GenerationQuality) => void;
   language: UiLanguage;
   platformBillingEnabled: boolean;
+  providerPlatformAccess: Partial<Record<ProviderKeyId, boolean>>;
   disabled?: boolean;
 }) {
   const providers: { id: ProviderKeyId; label: string; placeholder: string }[] = [
@@ -4294,6 +4312,7 @@ function ProviderBillingControl({
   ];
   const configuredCount = providers.filter(({ id }) => Boolean(keys[id].trim())).length;
   const configured = configuredCount > 0;
+  const managedCount = providers.filter(({ id }) => providerPlatformAccess[id]).length;
   return (
     <details style={{ position: "relative" }}>
       <summary
@@ -4309,11 +4328,13 @@ function ProviderBillingControl({
           whiteSpace: "nowrap",
         }}
       >
-        {configured
-          ? uiText(language, `AI: ${configuredCount} klucze`, `AI: ${configuredCount} keys`)
-          : platformBillingEnabled
-            ? uiText(language, "AI: konto Pulsai", "AI: Pulsai account")
-            : uiText(language, "AI: dodaj swój klucz", "AI: add your key")}
+        {managedCount && configured
+          ? uiText(language, `AI: Pulsai + ${configuredCount} własne`, `AI: Pulsai + ${configuredCount} own`)
+          : configured
+            ? uiText(language, `AI: ${configuredCount} własne klucze`, `AI: ${configuredCount} own keys`)
+            : managedCount
+              ? uiText(language, `AI: Pulsai aktywny (${managedCount})`, `AI: Pulsai active (${managedCount})`)
+              : uiText(language, "AI: dodaj swój klucz", "AI: add your key")}
       </summary>
       <div
         style={{
@@ -4338,9 +4359,41 @@ function ProviderBillingControl({
         </strong>
         {providers.map(({ id, label, placeholder }) => {
           const valid = !keys[id].trim() || looksLikeProviderKey(id, keys[id]);
+          const ownKeyPresent = Boolean(keys[id].trim());
+          const managedAccess = Boolean(providerPlatformAccess[id]);
           return (
             <label key={id} style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10, fontWeight: 750 }}>
-              {label}
+              <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span>{label}</span>
+                <span
+                  data-testid={`provider-access-${id}`}
+                  style={{
+                    borderRadius: 999,
+                    padding: "2px 6px",
+                    background: managedAccess || (ownKeyPresent && valid)
+                      ? "rgba(63,183,155,0.16)"
+                      : ownKeyPresent
+                        ? "rgba(194,65,59,0.12)"
+                        : "rgba(15,23,32,0.07)",
+                    color: managedAccess || (ownKeyPresent && valid)
+                      ? "#156b61"
+                      : ownKeyPresent
+                        ? "#a73530"
+                        : "rgba(23,33,43,0.62)",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {managedAccess && ownKeyPresent && valid
+                    ? uiText(language, "Pulsai + Twój klucz", "Pulsai + your key")
+                    : managedAccess
+                      ? uiText(language, "Pulsai: aktywny", "Pulsai: active")
+                    : ownKeyPresent && valid
+                      ? uiText(language, "Twój klucz: dodany", "Your key: added")
+                      : ownKeyPresent
+                        ? uiText(language, "Sprawdź format klucza", "Check key format")
+                        : uiText(language, "Klucz niepodany", "No key added")}
+                </span>
+              </span>
               <input
                 type="password"
                 name={`pulsai-${id}-byok`}
@@ -4349,7 +4402,9 @@ function ProviderBillingControl({
                 value={keys[id]}
                 disabled={disabled}
                 onChange={(event) => onKeyChange(id, event.target.value)}
-                placeholder={placeholder}
+                placeholder={managedAccess
+                  ? uiText(language, "Opcjonalnie: użyj własnego klucza", "Optional: use your own key")
+                  : placeholder}
                 aria-invalid={!valid}
                 style={{
                   width: "100%",
@@ -4361,6 +4416,19 @@ function ProviderBillingControl({
                   fontSize: 11,
                 }}
               />
+              <span style={{ fontSize: 9, fontWeight: 600, opacity: 0.62 }}>
+                {managedAccess
+                  ? uiText(
+                      language,
+                      "Możesz projektować bez podawania własnego klucza.",
+                      "You can design without adding your own key.",
+                    )
+                  : uiText(
+                      language,
+                      "Ten provider wymaga teraz Twojego klucza.",
+                      "This provider currently requires your own key.",
+                    )}
+              </span>
             </label>
           );
         })}
@@ -4383,11 +4451,11 @@ function ProviderBillingControl({
           </label>
         </div>
         <span style={{ fontSize: 10, lineHeight: 1.45, opacity: 0.68 }}>
-          {platformBillingEnabled && !configured
+          {platformBillingEnabled
             ? uiText(
                 language,
-                "To konto ma dostęp do zarządzanego projektanta CAD. Własne klucze poniżej są używane tylko dla wskazanego zadania.",
-                "This account has access to a managed CAD designer. Your keys below are used only for the selected task.",
+                "Zielony status „Pulsai: aktywny” oznacza dostęp opłacany przez Pulsai dla tego konta. Własny klucz jest opcjonalnym nadpisaniem i pozostaje tylko w pamięci tej karty.",
+                "A green “Pulsai: active” status means this account has Pulsai-funded access. Your own key is an optional override and stays only in this tab's memory.",
               )
             : uiText(
                 language,

@@ -7,10 +7,11 @@ import { expect, test } from "@playwright/test";
  * chat → exports a ZIP bundle. Asserts the manifest is well-formed, the
  * editability badge is shown, and the export succeeds.
  *
- * Requires:
+ * Requires for the paid agent case:
  *   - Frontend running (Playwright config starts `npm run dev` by default).
  *   - Backend running on localhost:8000 with ANTHROPIC_API_KEY set
  *     and PrusaSlicer + CadQuery available.
+ *   - PLAYWRIGHT_LIVE_AI=1 as an explicit spend opt-in.
  *
  * Run:  npx playwright test killer-flow.spec.ts
  */
@@ -21,6 +22,10 @@ test("anonymous user creates, edits, and exports a perforated disc bundle", asyn
   page,
   request,
 }) => {
+  test.skip(
+    process.env.PLAYWRIGHT_LIVE_AI !== "1",
+    "Live Anthropic E2E requires an explicit paid-evaluation opt-in.",
+  );
   // 1. Backend health check — fail fast if the API isn't up.
   const health = await request.get(`${BACKEND_URL}/health`);
   expect(health.ok()).toBeTruthy();
@@ -37,7 +42,10 @@ test("anonymous user creates, edits, and exports a perforated disc bundle", asyn
         constraints: {
           center_hole_diameter_mm: 16,
           hole_diameter_mm: 7,
-          ring_count: 12,
+          // Seven 18 mm rings fit inside a 320 mm disc with the requested
+          // edge margin. Twelve rings were an invalid fixture, correctly
+          // rejected by the geometry boundary validator.
+          ring_count: 7,
           radial_spacing_mm: 18,
           tangential_spacing_mm: 14,
           edge_margin_mm: 6,

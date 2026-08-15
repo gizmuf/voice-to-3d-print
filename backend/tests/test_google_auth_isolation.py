@@ -52,11 +52,20 @@ def test_anthropic_platform_access_is_limited_to_allowlisted_google_email(
         assert allowed.status_code == 200
         assert allowed.json()["anthropic"]["platform_access"] is True
         assert allowed.json()["anthropic"]["billing_source"] == "platform"
+        assert allowed.json()["providers"]["anthropic"]["platform_access"] is True
+        assert allowed.json()["providers"]["openai"]["platform_access"] is False
+        assert allowed.json()["providers"]["gemini"]["platform_access"] is False
+        assert allowed.json()["providers"]["meshy"]["platform_access"] is False
+        assert allowed.json()["providers"]["tripo"]["platform_access"] is False
         assert allowed.json()["keys_persisted"] is False
         assert "sk-ant-platform" not in allowed.text
         assert denied.status_code == 200
         assert denied.json()["anthropic"]["platform_access"] is False
         assert denied.json()["anthropic"]["billing_source"] == "customer_byok"
+        assert not any(
+            provider["platform_access"]
+            for provider in denied.json()["providers"].values()
+        )
     finally:
         object.__setattr__(config.settings, "auth_required", original_required)
         object.__setattr__(config.settings, "google_oauth_client_id", original_client_id)

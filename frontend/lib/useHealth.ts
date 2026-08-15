@@ -16,6 +16,9 @@ export type AccountAiSettings = {
     billing_source: "platform" | "customer_byok";
     model: string;
   };
+  providers?: Partial<Record<"anthropic" | "openai" | "gemini" | "meshy" | "tripo", {
+    platform_access: boolean;
+  }>>;
   keys_persisted: boolean;
 };
 
