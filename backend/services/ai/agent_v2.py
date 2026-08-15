@@ -279,6 +279,7 @@ def stream_turn(
     reference_image_base64: str | None = None,
     reference_image_media_type: str | None = None,
     reference_image_name: str | None = None,
+    allow_platform_billing: bool | None = None,
 ) -> Iterator[str]:
     started = time.perf_counter()
 
@@ -500,7 +501,11 @@ def stream_turn(
         credentials = resolve_anthropic_credentials(
             anthropic_api_key,
             settings.anthropic_api_key,
-            allow_platform_billing=settings.allow_platform_ai_spend,
+            allow_platform_billing=(
+                settings.allow_platform_ai_spend
+                if allow_platform_billing is None
+                else allow_platform_billing
+            ),
         )
     except InvalidAnthropicApiKey as exc:
         yield _sse("error", _anthropic_failure_payload(exc, billing_source="customer_byok"))

@@ -16,7 +16,7 @@ import { displayModelName, formatUsd } from "../../lib/ai-cost";
 import { cadPointToViewer } from "../../lib/cad-coordinates";
 import { uiText, useUiLanguage, type UiLanguage } from "../../lib/ui-language";
 import { useDesignStream } from "../../lib/useDesignStream";
-import { useHealth } from "../../lib/useHealth";
+import { useAccountAiSettings, useHealth } from "../../lib/useHealth";
 import { usePrinterProfiles } from "../../lib/usePrinterProfiles";
 import type { Design, DesignTemplate, ManufacturabilityIssue } from "../../types/design";
 import type { SelectionPayload } from "../ModelViewer";
@@ -131,6 +131,10 @@ export default function DesignStudio() {
     [uiLanguage],
   );
   const health = useHealth();
+  const accountAiSettings = useAccountAiSettings();
+  const platformBillingEnabled = Boolean(
+    health?.platform_ai_spend_enabled || accountAiSettings?.anthropic.platform_access,
+  );
   const printerCatalog = usePrinterProfiles();
   const [templates, setTemplates] = useState<DesignTemplate[]>([]);
   const [design, setDesign] = useState<Design | null>(null);
@@ -978,7 +982,7 @@ export default function DesignStudio() {
               apiKey={anthropicApiKey}
               onChange={setAnthropicApiKey}
               language={uiLanguage}
-              platformBillingEnabled={Boolean(health?.platform_ai_spend_enabled)}
+              platformBillingEnabled={platformBillingEnabled}
             />
             <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
           </div>
@@ -1537,7 +1541,7 @@ export default function DesignStudio() {
             apiKey={anthropicApiKey}
             onChange={setAnthropicApiKey}
             language={uiLanguage}
-            platformBillingEnabled={Boolean(health?.platform_ai_spend_enabled)}
+            platformBillingEnabled={platformBillingEnabled}
             disabled={stream.state.status === "streaming"}
           />
           <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
@@ -2057,7 +2061,9 @@ export default function DesignStudio() {
           </div>
           <DesignChatInput
             disabled={stream.state.status === "streaming"}
-            byokConfigured={looksLikeAnthropicApiKey(anthropicApiKey)}
+            byokConfigured={
+              looksLikeAnthropicApiKey(anthropicApiKey) || platformBillingEnabled
+            }
             selectedFeature={selectedFeature}
             parameters={design.parameters}
             language={uiLanguage}
@@ -4188,7 +4194,9 @@ function AnthropicBillingControl({
         }}
       >
         <strong style={{ fontSize: 12 }}>
-          {uiText(language, "Rozliczaj Claude na swoim koncie", "Bill Claude to your account")}
+          {platformBillingEnabled && !configured
+            ? uiText(language, "Claude w ramach dostępu Pulsai", "Claude through Pulsai access")
+            : uiText(language, "Rozliczaj Claude na swoim koncie", "Bill Claude to your account")}
         </strong>
         <input
           type="password"
@@ -4211,11 +4219,17 @@ function AnthropicBillingControl({
           }}
         />
         <span style={{ fontSize: 10, lineHeight: 1.45, opacity: 0.68 }}>
-          {uiText(
-            language,
-            "Klucz pozostaje tylko w pamięci tej karty i jest wysyłany przez HTTPS wyłącznie z żądaniem do projektanta. Nie zapisujemy go w projekcie ani przeglądarce.",
-            "The key stays only in this tab's memory and is sent over HTTPS only with a designer request. It is not stored with the project or in browser storage.",
-          )}
+          {platformBillingEnabled && !configured
+            ? uiText(
+                language,
+                "To konto ma dostęp do klucza zarządzanego przez Pulsai. Sekret pozostaje na serwerze i nigdy nie trafia do przeglądarki.",
+                "This account can use a Pulsai-managed key. The secret stays on the server and never reaches the browser.",
+              )
+            : uiText(
+                language,
+                "Klucz pozostaje tylko w pamięci tej karty i jest wysyłany przez HTTPS wyłącznie z żądaniem do projektanta. Nie zapisujemy go w projekcie ani przeglądarce.",
+                "The key stays only in this tab's memory and is sent over HTTPS only with a designer request. It is not stored with the project or in browser storage.",
+              )}
         </span>
         {!valid ? (
           <span role="alert" style={{ color: "#a62f29", fontSize: 10 }}>

@@ -61,6 +61,16 @@ def _secret_env(name: str) -> str:
     return os.getenv(name, "")
 
 
+def _secret_email_allowlist(name: str) -> frozenset[str]:
+    """Parse a secret-backed comma/newline separated email allowlist."""
+    raw = _secret_env(name)
+    return frozenset(
+        email.strip().casefold()
+        for email in raw.replace("\n", ",").split(",")
+        if email.strip()
+    )
+
+
 def _resolve_path(value: str | None, default: Path) -> Path:
     path = Path(value) if value else default
     if not path.is_absolute():
@@ -128,6 +138,11 @@ class Settings:
     # at deploy time. Pinned from a single constant so we never scatter version
     # strings across the codebase.
     anthropic_api_key: str = _secret_env("ANTHROPIC_API_KEY")
+    # Entitled accounts may use the server-side key without exposing it to
+    # their browser. Keep grants separate from the provider credential.
+    anthropic_platform_email_allowlist: frozenset[str] = _secret_email_allowlist(
+        "ANTHROPIC_PLATFORM_EMAIL_ALLOWLIST"
+    )
     anthropic_chat_model: str = os.getenv("ANTHROPIC_CHAT_MODEL", "claude-sonnet-5")
     anthropic_classify_model: str = os.getenv(
         "ANTHROPIC_CLASSIFY_MODEL", "claude-haiku-4-5-20251001"

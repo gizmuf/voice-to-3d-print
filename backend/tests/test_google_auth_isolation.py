@@ -12,6 +12,63 @@ from services.editable_model import BodyNode, EditableModel
 from services.workspace import create_workspace
 
 
+def test_anthropic_platform_access_is_limited_to_allowlisted_google_email(
+    monkeypatch,
+) -> None:
+    original_required = config.settings.auth_required
+    original_client_id = config.settings.google_oauth_client_id
+    original_spend = config.settings.allow_platform_ai_spend
+    original_key = config.settings.anthropic_api_key
+    original_allowlist = config.settings.anthropic_platform_email_allowlist
+    object.__setattr__(config.settings, "auth_required", True)
+    object.__setattr__(
+        config.settings,
+        "google_oauth_client_id",
+        "client.apps.googleusercontent.com",
+    )
+    object.__setattr__(config.settings, "allow_platform_ai_spend", False)
+    object.__setattr__(config.settings, "anthropic_api_key", "sk-ant-platform")
+    object.__setattr__(
+        config.settings,
+        "anthropic_platform_email_allowlist",
+        frozenset({"olga@example.com"}),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "verify_google_credential",
+        lambda token, audience: Principal(subject=token, email=token),
+    )
+    try:
+        with TestClient(app_module.app) as client:
+            allowed = client.get(
+                "/account/ai-settings",
+                headers={"authorization": "Bearer Olga@Example.com"},
+            )
+            denied = client.get(
+                "/account/ai-settings",
+                headers={"authorization": "Bearer stranger@example.com"},
+            )
+
+        assert allowed.status_code == 200
+        assert allowed.json()["anthropic"]["platform_access"] is True
+        assert allowed.json()["anthropic"]["billing_source"] == "platform"
+        assert allowed.json()["keys_persisted"] is False
+        assert "sk-ant-platform" not in allowed.text
+        assert denied.status_code == 200
+        assert denied.json()["anthropic"]["platform_access"] is False
+        assert denied.json()["anthropic"]["billing_source"] == "customer_byok"
+    finally:
+        object.__setattr__(config.settings, "auth_required", original_required)
+        object.__setattr__(config.settings, "google_oauth_client_id", original_client_id)
+        object.__setattr__(config.settings, "allow_platform_ai_spend", original_spend)
+        object.__setattr__(config.settings, "anthropic_api_key", original_key)
+        object.__setattr__(
+            config.settings,
+            "anthropic_platform_email_allowlist",
+            original_allowlist,
+        )
+
+
 def test_google_auth_blocks_anonymous_and_cross_owner_access(tmp_path, monkeypatch) -> None:
     original_output = config.settings.output_dir
     original_artifacts_path = app_module.artifacts_path

@@ -37,6 +37,9 @@ done
   `https://3d.pulsai.app`
 - `CORS_ORIGINS=https://3d.pulsai.app`
 - `PULSAI_ALLOW_PLATFORM_AI_SPEND=false`
+- `ANTHROPIC_PLATFORM_EMAIL_ALLOWLIST` is a Secret Manager reference containing
+  only explicitly approved Google account emails; it never enables other paid
+  providers
 - `PULSAI_ALLOW_PUBLIC_ARTIFACTS=false`
 - every variable containing a credential is a Secret Manager reference
 - Cloud Run service accounts receive only the secret versions they use

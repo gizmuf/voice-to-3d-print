@@ -275,6 +275,17 @@ def _job_belongs_to(job_id: str, owner_id: str) -> bool:
     return settings.insecure_local_dev and owner_id == "local-dev"
 
 
+def _anthropic_platform_billing_allowed(request: Request) -> bool:
+    """Grant the shared Anthropic key only to explicitly entitled accounts."""
+    if not settings.anthropic_api_key:
+        return False
+    if settings.allow_platform_ai_spend:
+        return True
+    principal = getattr(request.state, "principal", None)
+    email = str(getattr(principal, "email", "") or "").strip().casefold()
+    return bool(email and email in settings.anthropic_platform_email_allowlist)
+
+
 def _cookie_session_request_allowed(request: Request) -> bool:
     """Permit cookie-backed mutations only behind a strict CORS preflight."""
     if request.method in {"GET", "HEAD"}:
@@ -377,6 +388,20 @@ def auth_config_endpoint() -> dict:
         "required": settings.auth_required,
         # OAuth client IDs are public identifiers; secrets never cross this boundary.
         "google_client_id": settings.google_oauth_client_id if settings.auth_required else "",
+    }
+
+
+@app.get("/account/ai-settings")
+def account_ai_settings_endpoint(request: Request) -> dict:
+    """Return account-scoped AI access without returning provider secrets."""
+    platform_access = _anthropic_platform_billing_allowed(request)
+    return {
+        "anthropic": {
+            "platform_access": platform_access,
+            "billing_source": "platform" if platform_access else "customer_byok",
+            "model": settings.anthropic_chat_model,
+        },
+        "keys_persisted": False,
     }
 
 
@@ -2060,6 +2085,7 @@ async def workspace_chat_endpoint(
             selected_feature_id=request.selected_feature_id,
             selected_feature_label=request.selected_feature_label,
             anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+            allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
         )
         return StreamingResponse(
             generator,
@@ -2073,6 +2099,7 @@ async def workspace_chat_endpoint(
         request.message,
         printer_profile_id=request.printer_profile_id,
         anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+        allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
     )
     return StreamingResponse(
         generator,
@@ -2243,7 +2270,7 @@ def design_create_endpoint(
         request,
         anthropic_available=bool(
             request_byok
-            or (settings.allow_platform_ai_spend and settings.anthropic_api_key)
+            or _anthropic_platform_billing_allowed(http_request)
         ),
     )
     requires_agent = bool(
@@ -3110,6 +3137,7 @@ async def design_chat_endpoint(
         reference_image_base64=request.reference_image_base64,
         reference_image_media_type=image_media_type,
         reference_image_name=request.reference_image_name,
+        allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
     )
     return StreamingResponse(
         generator,
