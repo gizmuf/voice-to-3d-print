@@ -1182,6 +1182,7 @@ export default function DesignStudio() {
               onSave={saveProviderKeys}
               onClear={clearProviderKeys}
               saveState={providerKeySaveState}
+              persistenceAvailable={Boolean(accountAiSettings?.keys_persisted)}
               meshProviderPreference={meshProviderPreference}
               onMeshProviderPreferenceChange={setMeshProviderPreference}
               generationQuality={generationQuality}
@@ -1749,6 +1750,7 @@ export default function DesignStudio() {
             onSave={saveProviderKeys}
             onClear={clearProviderKeys}
             saveState={providerKeySaveState}
+            persistenceAvailable={Boolean(accountAiSettings?.keys_persisted)}
             meshProviderPreference={meshProviderPreference}
             onMeshProviderPreferenceChange={setMeshProviderPreference}
             generationQuality={generationQuality}
@@ -4361,6 +4363,7 @@ function ProviderBillingControl({
   onSave,
   onClear,
   saveState,
+  persistenceAvailable,
   meshProviderPreference,
   onMeshProviderPreferenceChange,
   generationQuality,
@@ -4375,6 +4378,7 @@ function ProviderBillingControl({
   onSave: () => Promise<void>;
   onClear: () => Promise<void>;
   saveState: "idle" | "saving" | "saved" | "error";
+  persistenceAvailable: boolean;
   meshProviderPreference: MeshProviderPreference;
   onMeshProviderPreferenceChange: (value: MeshProviderPreference) => void;
   generationQuality: GenerationQuality;
@@ -4546,16 +4550,22 @@ function ProviderBillingControl({
           </label>
         </div>
         <span style={{ fontSize: 10, lineHeight: 1.45, opacity: 0.68 }}>
-          {uiText(
-            language,
-            "Do kliknięcia „Zapisz zmiany” klucz pozostaje tylko w pamięci tej karty. Po zapisaniu jest szyfrowany dla Twojego konta i nigdy nie jest ponownie wyświetlany. Wysyłamy go wyłącznie do wybranego providera.",
-            "Until you click “Save changes”, a key stays only in this tab's memory. Saved keys are encrypted for your account and never displayed again. They are sent only to the selected provider.",
-          )}
+          {persistenceAvailable
+            ? uiText(
+                language,
+                "Do kliknięcia „Zapisz zmiany” klucz pozostaje tylko w pamięci tej karty. Po zapisaniu jest szyfrowany dla Twojego konta i nigdy nie jest ponownie wyświetlany. Wysyłamy go wyłącznie do wybranego providera.",
+                "Until you click “Save changes”, a key stays only in this tab's memory. Saved keys are encrypted for your account and never displayed again. They are sent only to the selected provider.",
+              )
+            : uiText(
+                language,
+                "Bezpieczny zapis na koncie jest chwilowo niedostępny. Wpisany klucz działa tylko w tej karcie i zniknie po jej zamknięciu.",
+                "Secure account storage is temporarily unavailable. An entered key works only in this tab and disappears when it closes.",
+              )}
         </span>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <button
             type="button"
-            disabled={disabled || !hasDraft || !draftsValid || saveState === "saving"}
+            disabled={disabled || !persistenceAvailable || !hasDraft || !draftsValid || saveState === "saving"}
             onClick={() => void onSave()}
             style={{ border: 0, borderRadius: 7, background: "#156b61", color: "#fff", padding: "7px 10px", fontWeight: 800, cursor: "pointer" }}
           >

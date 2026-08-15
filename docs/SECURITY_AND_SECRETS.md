@@ -41,6 +41,12 @@ recover a user's project; use an explicit owner migration instead.
 - Public safe mode executes only repository-controlled templates and
   deterministic macro code. Caller/model-authored Python remains disabled
   until a separate no-network, no-secret, non-root build worker is deployed.
+- Authenticated Meshy/Tripo BYOK generation is allowed only through the
+  owner-scoped organic pipeline: the backend validates and downloads the
+  provider-returned HTTPS GLB with size and private-address protections, stores
+  it as a private owned artifact, and lets repair/slicing consume only the exact
+  artifact recorded on that owner's generation job. `/process-model` never
+  accepts an arbitrary remote URL in public mode.
 - `PULSAI_ALLOW_PLATFORM_AI_SPEND=false` is the default and prevents Anthropic,
   Meshy, Tripo, Gemini, OpenAI image, and Deepgram calls from spending platform
   credentials. A production exception requires an authenticated entitlement,

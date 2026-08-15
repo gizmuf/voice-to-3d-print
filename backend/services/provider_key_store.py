@@ -24,6 +24,10 @@ COLLECTION = "three_d_provider_keys"
 PROVIDERS = ("anthropic", "openai", "gemini", "meshy", "tripo")
 
 
+class ProviderKeyStoreUnavailable(RuntimeError):
+    """Secure provider-key state could not be read or validated."""
+
+
 def _document_id(owner_id: str) -> str:
     return hashlib.sha256(owner_id.encode("utf-8")).hexdigest()
 
@@ -43,7 +47,7 @@ def _client():
         return job_store._get_firestore()
     except Exception as exc:
         logger.warning("Provider-key storage is unavailable: %s", type(exc).__name__)
-        return None
+        raise ProviderKeyStoreUnavailable("Provider-key storage is unavailable.") from exc
 
 
 def persistence_configured() -> bool:
@@ -53,7 +57,10 @@ def persistence_configured() -> bool:
         _fernet()
     except RuntimeError:
         return False
-    return _client() is not None
+    try:
+        return _client() is not None
+    except ProviderKeyStoreUnavailable:
+        return False
 
 
 def _encrypt(owner_id: str, provider: str, api_key: str) -> str:
@@ -69,48 +76,55 @@ def _encrypt(owner_id: str, provider: str, api_key: str) -> str:
     return _fernet().encrypt(payload).decode("ascii")
 
 
-def _decrypt(owner_id: str, provider: str, ciphertext: str) -> str | None:
+def _decrypt(owner_id: str, provider: str, ciphertext: str) -> str:
     try:
         payload = json.loads(_fernet().decrypt(ciphertext.encode("ascii")))
     except (InvalidToken, ValueError, TypeError, UnicodeEncodeError, json.JSONDecodeError):
         logger.warning("Ignoring an unreadable stored %s provider credential.", provider)
-        return None
+        raise ProviderKeyStoreUnavailable("A stored provider credential is unreadable.")
     if not isinstance(payload, dict):
         logger.warning("Ignoring an unreadable stored %s provider credential.", provider)
-        return None
+        raise ProviderKeyStoreUnavailable("A stored provider credential is unreadable.")
     if (
         payload.get("version") != 1
         or payload.get("owner_id") != owner_id
         or payload.get("provider") != provider
     ):
         logger.warning("Ignoring a provider credential with mismatched account binding.")
-        return None
+        raise ProviderKeyStoreUnavailable("A stored provider credential has invalid account binding.")
     value = str(payload.get("api_key") or "")
-    return value or None
+    if not value:
+        raise ProviderKeyStoreUnavailable("A stored provider credential is empty.")
+    return value
 
 
 def load_provider_keys(owner_id: str) -> dict[str, str]:
-    client = _client()
-    if client is None or not settings.byok_encryption_key.strip():
+    if not settings.byok_encryption_key.strip():
+        if settings.auth_required:
+            raise ProviderKeyStoreUnavailable("Provider-key encryption is not configured.")
         return {}
+    client = _client()
+    if client is None:
+        raise ProviderKeyStoreUnavailable("Provider-key storage is unavailable.")
     try:
         snapshot = client.collection(COLLECTION).document(_document_id(owner_id)).get()
     except Exception as exc:
         logger.warning("Provider-key read failed: %s", type(exc).__name__)
-        return {}
+        raise ProviderKeyStoreUnavailable("Provider-key storage read failed.") from exc
     if not snapshot.exists:
         return {}
-    encrypted = (snapshot.to_dict() or {}).get("encrypted_keys") or {}
+    payload = snapshot.to_dict() or {}
+    encrypted = payload.get("encrypted_keys")
     if not isinstance(encrypted, dict):
-        return {}
+        raise ProviderKeyStoreUnavailable("Stored provider-key data is malformed.")
     out: dict[str, str] = {}
     for provider in PROVIDERS:
         ciphertext = encrypted.get(provider)
-        if not isinstance(ciphertext, str):
+        if ciphertext is None:
             continue
-        value = _decrypt(owner_id, provider, ciphertext)
-        if value:
-            out[provider] = value
+        if not isinstance(ciphertext, str):
+            raise ProviderKeyStoreUnavailable("A stored provider credential is malformed.")
+        out[provider] = _decrypt(owner_id, provider, ciphertext)
     return out
 
 
@@ -122,7 +136,7 @@ def provider_key_presence(owner_id: str) -> dict[str, bool]:
 def store_provider_keys(owner_id: str, updates: Mapping[str, str]) -> dict[str, bool]:
     client = _client()
     if client is None:
-        raise RuntimeError("Provider-key persistence is unavailable.")
+        raise ProviderKeyStoreUnavailable("Provider-key persistence is unavailable.")
     encrypted: dict[str, str] = {}
     for provider, value in updates.items():
         if provider not in PROVIDERS:
@@ -143,23 +157,24 @@ def store_provider_keys(owner_id: str, updates: Mapping[str, str]) -> dict[str, 
         )
     except Exception as exc:
         logger.warning("Provider-key write failed: %s", type(exc).__name__)
-        raise RuntimeError("Provider-key persistence failed.") from exc
+        raise ProviderKeyStoreUnavailable("Provider-key persistence failed.") from exc
     return provider_key_presence(owner_id)
 
 
 def clear_provider_keys(owner_id: str) -> None:
     client = _client()
     if client is None:
-        raise RuntimeError("Provider-key persistence is unavailable.")
+        raise ProviderKeyStoreUnavailable("Provider-key persistence is unavailable.")
     try:
         client.collection(COLLECTION).document(_document_id(owner_id)).delete()
     except Exception as exc:
         logger.warning("Provider-key deletion failed: %s", type(exc).__name__)
-        raise RuntimeError("Provider-key deletion failed.") from exc
+        raise ProviderKeyStoreUnavailable("Provider-key deletion failed.") from exc
 
 
 __all__ = [
     "PROVIDERS",
+    "ProviderKeyStoreUnavailable",
     "clear_provider_keys",
     "load_provider_keys",
     "persistence_configured",

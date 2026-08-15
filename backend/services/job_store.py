@@ -226,6 +226,21 @@ def list_jobs_for_project(project_id: str, limit: int = 50) -> list[Dict[str, An
         return []
 
 
+def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Return a job only when it belongs to the current authenticated owner."""
+    client = _get_firestore()
+    if client is None:
+        return None
+    try:
+        snapshot = client.collection(JOBS_COLLECTION).document(job_id).get()
+    except Exception as exc:
+        logger.warning("Firestore get job failed: %s", type(exc).__name__)
+        return None
+    if not snapshot.exists or (snapshot.to_dict() or {}).get("owner_id") != _current_owner():
+        return None
+    return _serialize_snapshot(snapshot)
+
+
 def ensure_job(job_id: str, data: Dict[str, Any]) -> None:
     client = _get_firestore()
     if client is None:

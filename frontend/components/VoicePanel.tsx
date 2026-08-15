@@ -193,6 +193,7 @@ export default function VoicePanel({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               glb_url: generation.glb_url,
+              job_id: generation.job_id,
               provider: "meshy",
               input_type: "text",
               prompt,

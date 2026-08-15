@@ -29,8 +29,10 @@ the supported security configuration.
 
 ## Security boundaries
 
-- Customer-provided provider keys must remain request-scoped and must never
-  silently fall back to Pulsai billing.
+- Unsaved customer provider keys remain request-scoped. Explicitly saved keys
+  must be account-bound, encrypted at rest with a Secret Manager-backed key,
+  never returned to the browser, and must never silently fall back to Pulsai
+  billing when secure storage is unavailable or unreadable.
 - Public deployments require authentication, owner isolation, private
   artifacts, strict CORS, quotas, and public-safe mode.
 - Untrusted Python CAD execution is not supported in the public web service.

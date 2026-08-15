@@ -104,7 +104,7 @@ def test_step_upload_filename_cannot_escape_output(tmp_path: Path, monkeypatch) 
     assert not (tmp_path.parent / "outside.step").exists()
 
 
-def test_public_safe_mode_hides_legacy_compute_route() -> None:
+def test_public_safe_mode_hides_legacy_compute_routes_but_admits_owned_mesh_flow() -> None:
     original_required = config.settings.auth_required
     original_dev = config.settings.insecure_local_dev
     original_safe = config.settings.public_safe_mode
@@ -113,12 +113,103 @@ def test_public_safe_mode_hides_legacy_compute_route() -> None:
     object.__setattr__(config.settings, "public_safe_mode", True)
     try:
         with TestClient(app_module.app) as client:
-            assert client.post("/process-model", json={"glb_url": "http://127.0.0.1"}).status_code == 404
+            process_response = client.post("/process-model", json={"glb_url": "http://127.0.0.1"})
+            assert process_response.status_code == 400
+            assert "owned generation job" in process_response.json()["detail"]
+            assert client.post("/generate", json={"prompt": "a figure", "provider": "meshy"}).status_code == 422
             assert client.post("/preview-useful", json={}).status_code == 404
             assert client.post("/build-useful", json={}).status_code == 404
             assert client.post("/import-model").status_code == 404
             assert client.get("/projects").status_code == 404
             assert client.post("/workspace/create", json={}).status_code == 404
+    finally:
+        object.__setattr__(config.settings, "auth_required", original_required)
+        object.__setattr__(config.settings, "insecure_local_dev", original_dev)
+        object.__setattr__(config.settings, "public_safe_mode", original_safe)
+
+
+def test_public_safe_mode_rejects_process_source_not_bound_to_owned_job(monkeypatch) -> None:
+    original_required = config.settings.auth_required
+    original_dev = config.settings.insecure_local_dev
+    original_safe = config.settings.public_safe_mode
+    object.__setattr__(config.settings, "auth_required", False)
+    object.__setattr__(config.settings, "insecure_local_dev", True)
+    object.__setattr__(config.settings, "public_safe_mode", True)
+    called = False
+
+    def forbidden_process(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        app_module,
+        "get_job",
+        lambda _job_id: {
+            "generation": {"glb_source_url": "/cloud-artifacts/three-d/jobs/" + "a" * 32 + "/provider-source.glb"}
+        },
+    )
+    monkeypatch.setattr(app_module, "process_model", forbidden_process)
+    try:
+        with TestClient(app_module.app) as client:
+            response = client.post(
+                "/process-model",
+                json={"job_id": "a" * 32, "glb_url": "https://attacker.example/model.glb"},
+            )
+        assert response.status_code == 400
+        assert called is False
+    finally:
+        object.__setattr__(config.settings, "auth_required", original_required)
+        object.__setattr__(config.settings, "insecure_local_dev", original_dev)
+        object.__setattr__(config.settings, "public_safe_mode", original_safe)
+
+
+def test_public_safe_mode_persists_provider_output_as_owned_artifact(monkeypatch) -> None:
+    original_required = config.settings.auth_required
+    original_dev = config.settings.insecure_local_dev
+    original_safe = config.settings.public_safe_mode
+    object.__setattr__(config.settings, "auth_required", False)
+    object.__setattr__(config.settings, "insecure_local_dev", True)
+    object.__setattr__(config.settings, "public_safe_mode", True)
+    updates: list[dict] = []
+
+    async def fake_generate(*_args, **_kwargs):
+        return app_module.GenerationResult(
+            provider="meshy",
+            task_id="provider-task",
+            status="completed",
+            glb_url="https://provider.example/signed-model.glb",
+            raw={},
+        )
+
+    async def fake_persist(job_id: str, provider_url: str) -> str:
+        assert len(job_id) == 32
+        assert provider_url == "https://provider.example/signed-model.glb"
+        return f"/cloud-artifacts/three-d/jobs/{job_id}/provider-source.glb"
+
+    monkeypatch.setattr(app_module, "_request_provider_key", lambda *_args: "customer-key-123456")
+    monkeypatch.setattr(app_module, "ensure_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(app_module, "_job_belongs_to", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(app_module, "generate_model", fake_generate)
+    monkeypatch.setattr(app_module, "_persist_provider_glb", fake_persist)
+    monkeypatch.setattr(app_module, "update_job", lambda _job_id, payload: updates.append(payload))
+    monkeypatch.setattr(
+        app_module,
+        "get_job",
+        lambda _job_id: {
+            "generation": {"glb_source_url": updates[-1]["generation.glb_source_url"]}
+        } if updates else None,
+    )
+    try:
+        with TestClient(app_module.app) as client:
+            response = client.post(
+                "/generate",
+                json={"prompt": "a figure", "provider": "meshy", "job_id": "b" * 32},
+            )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["job_id"] != "b" * 32
+        assert payload["glb_url"].startswith("/cloud-artifacts/three-d/jobs/")
+        assert updates[-1]["generation.glb_source_url"] == payload["glb_url"]
     finally:
         object.__setattr__(config.settings, "auth_required", original_required)
         object.__setattr__(config.settings, "insecure_local_dev", original_dev)

@@ -38,6 +38,18 @@ for service in "${services[@]}"; do
       | @tsv
     ' <<<"$service_json"
   )
+  if [[ "$service" == "pulsai-3d-backend" ]]; then
+    if jq -e '
+      [.spec.template.spec.containers[].env[]?
+       | select(.name == "PULSAI_BYOK_ENCRYPTION_KEY" and .valueFrom.secretKeyRef.name != null)]
+      | length == 1
+    ' <<<"$service_json" >/dev/null; then
+      echo "PASS: $service PULSAI_BYOK_ENCRYPTION_KEY is configured"
+    else
+      echo "FAIL: $service PULSAI_BYOK_ENCRYPTION_KEY is missing or not secret-backed"
+      failed=1
+    fi
+  fi
 done
 
 frontend_json=$(gcloud run services describe pulsai-3d-frontend \

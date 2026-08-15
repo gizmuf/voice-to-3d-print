@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 import config
+import pytest
 from services.auth import Principal
 from services import provider_key_store
 
@@ -92,7 +93,8 @@ def test_account_provider_keys_are_encrypted_bound_and_clearable(monkeypatch) ->
         owner_one_document = next(iter(firestore.documents.values()))
         owner_two_id = provider_key_store._document_id("owner-two")
         firestore.documents[owner_two_id] = owner_one_document
-        assert provider_key_store.load_provider_keys("owner-two") == {}
+        with pytest.raises(provider_key_store.ProviderKeyStoreUnavailable):
+            provider_key_store.load_provider_keys("owner-two")
 
         provider_key_store.clear_provider_keys("owner-one")
         assert provider_key_store.load_provider_keys("owner-one") == {}
@@ -134,6 +136,45 @@ def test_explicit_request_key_overrides_stored_key(monkeypatch) -> None:
     assert app_module._request_provider_key(request, app_module._MESHY_BYOK_HEADER) == (
         "draft-meshy-123456789"
     )
+
+
+def test_stored_key_read_failure_does_not_fall_back_to_platform(monkeypatch) -> None:
+    def unavailable(_owner_id: str):
+        raise provider_key_store.ProviderKeyStoreUnavailable("unavailable")
+
+    monkeypatch.setattr(app_module.provider_key_store, "load_provider_keys", unavailable)
+    request = Request({"type": "http", "method": "POST", "path": "/design/x/chat", "headers": []})
+    request.state.principal = Principal(subject="owner-one", email="entitled@example.com")
+
+    with pytest.raises(app_module.HTTPException) as exc:
+        app_module._request_provider_key(request, app_module._ANTHROPIC_BYOK_HEADER)
+    assert exc.value.status_code == 503
+
+
+def test_missing_encryption_config_fails_closed_when_auth_is_required(monkeypatch) -> None:
+    original_key = config.settings.byok_encryption_key
+    original_required = config.settings.auth_required
+    object.__setattr__(config.settings, "byok_encryption_key", "")
+    object.__setattr__(config.settings, "auth_required", True)
+    try:
+        with pytest.raises(provider_key_store.ProviderKeyStoreUnavailable):
+            provider_key_store.load_provider_keys("owner-one")
+    finally:
+        object.__setattr__(config.settings, "byok_encryption_key", original_key)
+        object.__setattr__(config.settings, "auth_required", original_required)
+
+
+def test_malformed_encrypted_key_map_fails_closed(monkeypatch) -> None:
+    original_key = config.settings.byok_encryption_key
+    firestore = _Firestore()
+    object.__setattr__(config.settings, "byok_encryption_key", Fernet.generate_key().decode("ascii"))
+    firestore.documents[provider_key_store._document_id("owner-one")] = {"encrypted_keys": "invalid"}
+    monkeypatch.setattr(provider_key_store.job_store, "_get_firestore", lambda: firestore)
+    try:
+        with pytest.raises(provider_key_store.ProviderKeyStoreUnavailable):
+            provider_key_store.load_provider_keys("owner-one")
+    finally:
+        object.__setattr__(config.settings, "byok_encryption_key", original_key)
 
 
 def test_provider_key_api_saves_presence_without_returning_secrets(monkeypatch) -> None:

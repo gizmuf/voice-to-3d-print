@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -55,7 +56,13 @@ def _request_provider_key(request: Request, header: str) -> str | None:
         return None
     stored = getattr(request.state, "stored_provider_keys", None)
     if stored is None:
-        stored = provider_key_store.load_provider_keys(owner_id)
+        try:
+            stored = provider_key_store.load_provider_keys(owner_id)
+        except provider_key_store.ProviderKeyStoreUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Secure provider-key storage is temporarily unavailable.",
+            ) from exc
         request.state.stored_provider_keys = stored
     return stored.get(provider)
 
@@ -130,6 +137,7 @@ from services.generation import (
     generate_model_from_image,
     select_mesh_provider,
 )
+from services.generated_artifact import download_generated_glb
 from services.jewelry_trace import (
     generate_jewelry_concepts,
     jewelry_profile_catalog,
@@ -144,6 +152,7 @@ from services.job_store import (
     create_project,
     ensure_job,
     ensure_project,
+    get_job,
     get_project,
     list_jobs_for_project,
     list_projects,
@@ -260,7 +269,6 @@ _CLOUD_JOB_PATH_RE = re.compile(r"^/cloud-artifacts/three-d/jobs/([a-f0-9]{32})(
 _SAFE_MODE_BLOCKED_PREFIXES = (
     "/workspace",
     "/projects",
-    "/process-model",
     "/preview-useful",
     "/build-useful",
     "/import-model",
@@ -270,7 +278,6 @@ _SAFE_MODE_BLOCKED_PREFIXES = (
     "/preview-edit",
     "/apply-edit",
     "/bundle/",
-    "/generate",
     "/intent",
     "/image-intent",
     "/stt",
@@ -651,6 +658,58 @@ def _write_metadata(job_id: str, metadata: dict) -> None:
         metadata_path.write_text(json.dumps(payload, indent=2))
     except Exception:
         pass
+
+
+async def _persist_provider_glb(job_id: str, provider_url: str) -> str:
+    source_path = settings.output_dir / job_id / "provider-source.glb"
+    await download_generated_glb(
+        provider_url,
+        source_path,
+        max_bytes=settings.max_cad_artifact_bytes,
+    )
+    upload = upload_artifact(job_id, source_path)
+    if settings.public_safe_mode and upload is None:
+        source_path.unlink(missing_ok=True)
+        raise RuntimeError("Generated model storage is unavailable.")
+    return _artifact_url(upload, source_path, job_id)
+
+
+def _materialize_owned_provider_glb(job_id: str, source_url: str) -> str:
+    local_prefix = f"/artifacts/{job_id}/"
+    cloud_prefix = f"/cloud-artifacts/three-d/jobs/{job_id}/"
+    if source_url.startswith(local_prefix):
+        filename = source_url.removeprefix(local_prefix)
+        if not filename or filename != Path(filename).name:
+            raise HTTPException(status_code=400, detail="Invalid generated model artifact.")
+        path = settings.output_dir / job_id / filename
+        if not path.is_file():
+            raise HTTPException(status_code=503, detail="Generated model cache is unavailable.")
+        return source_url
+    if not source_url.startswith(cloud_prefix):
+        raise HTTPException(status_code=400, detail="Invalid generated model artifact.")
+    filename = source_url.removeprefix(cloud_prefix)
+    if not filename or filename != Path(filename).name:
+        raise HTTPException(status_code=400, detail="Invalid generated model artifact.")
+    path = settings.output_dir / job_id / filename
+    if not path.is_file():
+        bucket = _get_bucket()
+        if bucket is None:
+            raise HTTPException(status_code=503, detail="Generated model storage is unavailable.")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            bucket.blob(f"three-d/jobs/{job_id}/{filename}").download_to_filename(str(path))
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            raise HTTPException(status_code=503, detail="Generated model could not be loaded.") from exc
+    return f"{local_prefix}{filename}"
+
+
+def _safe_provider_failure(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"Provider returned HTTP {exc.response.status_code}."
+    if isinstance(exc, ValueError):
+        return str(exc)[:300]
+    return "Provider generation or model download failed."
 
 
 class GenerateRequest(BaseModel):
@@ -1730,7 +1789,7 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest, http_request: Request) -> GenerateResponse:
-    job_id = request.job_id or uuid.uuid4().hex
+    job_id = uuid.uuid4().hex if settings.public_safe_mode else (request.job_id or uuid.uuid4().hex)
     meshy_key = _request_provider_key(http_request, _MESHY_BYOK_HEADER)
     tripo_key = _request_provider_key(http_request, _TRIPO_BYOK_HEADER)
     try:
@@ -1742,6 +1801,8 @@ async def generate(request: GenerateRequest, http_request: Request) -> GenerateR
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if settings.public_safe_mode and provider not in {"meshy", "tripo"}:
+        raise HTTPException(status_code=422, detail="Only Meshy and Tripo are available here.")
     ensure_job(
         job_id,
         _compact_payload(
@@ -1758,6 +1819,9 @@ async def generate(request: GenerateRequest, http_request: Request) -> GenerateR
             }
         ),
     )
+    owner_id = current_owner_id()
+    if settings.public_safe_mode and (not owner_id or not _job_belongs_to(job_id, owner_id)):
+        raise HTTPException(status_code=503, detail="Owned job storage is unavailable.")
     try:
         result: GenerationResult = await generate_model(
             request.prompt,
@@ -1765,9 +1829,11 @@ async def generate(request: GenerateRequest, http_request: Request) -> GenerateR
             api_key=meshy_key if provider == "meshy" else tripo_key,
             quality_tier=request.quality_tier,
         )
+        owned_glb_url = await _persist_provider_glb(job_id, result.glb_url)
     except Exception as exc:
-        record_error(job_id, "generate", str(exc))
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        detail = _safe_provider_failure(exc)
+        record_error(job_id, "generate", detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     update_job(
         job_id,
@@ -1775,10 +1841,14 @@ async def generate(request: GenerateRequest, http_request: Request) -> GenerateR
             "status": "generated",
             "generation.task_id": result.task_id,
             "generation.provider": result.provider,
-            "generation.glb_source_url": result.glb_url,
+            "generation.glb_source_url": owned_glb_url,
         },
     )
-    return GenerateResponse(job_id=job_id, provider=result.provider, task_id=result.task_id, glb_url=result.glb_url)
+    if settings.public_safe_mode:
+        persisted_job = get_job(job_id)
+        if ((persisted_job or {}).get("generation") or {}).get("glb_source_url") != owned_glb_url:
+            raise HTTPException(status_code=503, detail="Generated model record was not persisted.")
+    return GenerateResponse(job_id=job_id, provider=result.provider, task_id=result.task_id, glb_url=owned_glb_url)
 
 
 @app.post("/generate-image", response_model=GenerateResponse)
@@ -1793,7 +1863,7 @@ async def generate_image(
     image: UploadFile = File(...),
     quality_tier: str = Form("balanced"),
 ) -> GenerateResponse:
-    job_id = job_id or uuid.uuid4().hex
+    job_id = uuid.uuid4().hex if settings.public_safe_mode else (job_id or uuid.uuid4().hex)
     ensure_job(
         job_id,
         _compact_payload(
@@ -1810,6 +1880,9 @@ async def generate_image(
             }
         ),
     )
+    owner_id = current_owner_id()
+    if settings.public_safe_mode and (not owner_id or not _job_belongs_to(job_id, owner_id)):
+        raise HTTPException(status_code=503, detail="Owned job storage is unavailable.")
     try:
         content = await _read_upload_limited(image, settings.max_image_upload_bytes)
         update_job(job_id, {"input.image_size": len(content)})
@@ -1819,6 +1892,8 @@ async def generate_image(
             meshy_available=bool(_request_provider_key(request, _MESHY_BYOK_HEADER) or (settings.allow_platform_ai_spend and settings.meshy_api_key)),
             tripo_available=bool(_request_provider_key(request, _TRIPO_BYOK_HEADER) or (settings.allow_platform_ai_spend and settings.tripo_api_key)),
         )
+        if settings.public_safe_mode and selected_provider not in {"meshy", "tripo"}:
+            raise ValueError("Only Meshy and Tripo are available here.")
         provider_key = _request_provider_key(
             request,
             _MESHY_BYOK_HEADER if selected_provider == "meshy" else _TRIPO_BYOK_HEADER,
@@ -1832,9 +1907,11 @@ async def generate_image(
             api_key=provider_key,
             quality_tier=quality_tier,
         )
+        owned_glb_url = await _persist_provider_glb(job_id, result.glb_url)
     except Exception as exc:
-        record_error(job_id, "generate-image", str(exc))
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        detail = _safe_provider_failure(exc)
+        record_error(job_id, "generate-image", detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     update_job(
         job_id,
@@ -1842,15 +1919,30 @@ async def generate_image(
             "status": "generated",
             "generation.task_id": result.task_id,
             "generation.provider": result.provider,
-            "generation.glb_source_url": result.glb_url,
+            "generation.glb_source_url": owned_glb_url,
         },
     )
-    return GenerateResponse(job_id=job_id, provider=result.provider, task_id=result.task_id, glb_url=result.glb_url)
+    if settings.public_safe_mode:
+        persisted_job = get_job(job_id)
+        if ((persisted_job or {}).get("generation") or {}).get("glb_source_url") != owned_glb_url:
+            raise HTTPException(status_code=503, detail="Generated model record was not persisted.")
+    return GenerateResponse(job_id=job_id, provider=result.provider, task_id=result.task_id, glb_url=owned_glb_url)
 
 
 @app.post("/process-model", response_model=ProcessResponse)
 def process(request: ProcessRequest) -> ProcessResponse:
     job_id = request.job_id or uuid.uuid4().hex
+    source_url = request.glb_url
+    if settings.public_safe_mode:
+        if not request.job_id or _DESIGN_ID_RE.fullmatch(request.job_id) is None:
+            raise HTTPException(status_code=400, detail="An owned generation job is required.")
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Generation job not found.")
+        expected_url = ((job.get("generation") or {}).get("glb_source_url"))
+        if not isinstance(expected_url, str) or request.glb_url != expected_url:
+            raise HTTPException(status_code=400, detail="Generated model artifact does not match its job.")
+        source_url = _materialize_owned_provider_glb(job_id, expected_url)
     ensure_job(
         job_id,
         _compact_payload(
@@ -1870,7 +1962,7 @@ def process(request: ProcessRequest) -> ProcessResponse:
         ),
     )
     try:
-        result: ProcessResult = process_model(request.glb_url, job_id=job_id)
+        result: ProcessResult = process_model(source_url, job_id=job_id)
     except Exception as exc:
         record_error(job_id, "process-model", str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
