@@ -76,6 +76,29 @@ jobs:
           NEXT_PUBLIC_STT_URL: http://127.0.0.1:8010
         run: npm run build
 
+  stt-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: stt-service/requirements.txt
+      - name: Install STT dependencies and audit tools
+        working-directory: stt-service
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest pip-audit
+          python -m pip check
+      - name: Reject vulnerable dependencies
+        working-directory: stt-service
+        run: python -m pip_audit -r requirements.txt
+      - name: Test STT authentication boundary
+        working-directory: stt-service
+        run: python -m pytest -q test_app.py
+
   secret-scan:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
