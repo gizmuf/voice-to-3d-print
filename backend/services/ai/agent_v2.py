@@ -52,6 +52,54 @@ MAX_FAILED_TOOL_CALLS = 2
 
 _PARAMOTOR_OFFER_MARKER = "stylizowaną, geometryczną figurkę motoparalotniarza"
 
+_STALE_RUNTIME_HISTORY_MARKERS = (
+    "untrusted python cad execution is disabled",
+    "ast audit refused the new script",
+    "blokadę infrastruktury",
+    "blokade infrastruktury",
+    "silnik odrzuca teraz każdą modyfikację",
+    "silnik odrzuca teraz kazda modyfikacje",
+)
+_STALE_RUNTIME_REFUSAL_MARKERS = (
+    "blokadę infrastruktury",
+    "blokade infrastruktury",
+    "silnik odrzuca teraz każdą modyfikację",
+    "silnik odrzuca teraz kazda modyfikacje",
+    "sandbox jest wyłączony",
+    "sandbox jest wylaczony",
+    "runtime is unavailable",
+    "runtime unavailable",
+    "cad execution is disabled",
+)
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(block.get("text") or block.get("content") or "")
+        for block in content
+        if isinstance(block, dict)
+    )
+
+
+def _history_has_stale_runtime_failure(history: list[dict]) -> bool:
+    """Return true when an earlier turn records a now-historical runtime failure."""
+    transcript = "\n".join(_message_text(message) for message in history[-20:]).lower()
+    return any(marker in transcript for marker in _STALE_RUNTIME_HISTORY_MARKERS)
+
+
+def _assistant_claims_runtime_unavailable(blocks: list[dict[str, Any]]) -> bool:
+    text = "\n".join(
+        str(block.get("text", ""))
+        for block in blocks
+        if block.get("type") == "text"
+    ).lower()
+    return any(marker in text for marker in _STALE_RUNTIME_REFUSAL_MARKERS)
+
 
 def _organic_paramotor_offer(user_message: str) -> str | None:
     """Handle an unsupported realistic sculpt request without spending AI credit."""
@@ -201,6 +249,7 @@ def _system_blocks(
     selected_feature_id: str | None = None,
     selected_feature_label: str | None = None,
     selected_topology_ref: str | None = None,
+    require_current_runtime_attempt: bool = False,
 ) -> list[dict[str, Any]]:
     selected_block = _selected_feature_context(
         ctx,
@@ -211,6 +260,14 @@ def _system_blocks(
     turn_context = render_turn_context(ctx.design, ctx.last_build)
     if selected_block:
         turn_context = f"{turn_context}\n{selected_block}"
+    if require_current_runtime_attempt:
+        turn_context = (
+            f"{turn_context}\n\n"
+            "## Current runtime recovery\n"
+            "The previous response repeated a historical runtime failure without calling a tool. "
+            "That old failure is not evidence about the current deployment. Attempt the appropriate "
+            "CAD tool now. Report runtime unavailability only if a tool called in this current turn fails."
+        )
     return [
         {
             "type": "text",
@@ -297,6 +354,7 @@ def stream_turn(
     history = _repair_dangling_tool_uses(
         _repair_malformed_thinking_blocks(load_conversation(design_id))
     )
+    history_has_stale_runtime_failure = _history_has_stale_runtime_failure(history)
 
     organic_offer = _organic_paramotor_offer(user_message)
     wants_stylized_paramotor = _accepts_stylized_paramotor(user_message, history)
@@ -566,6 +624,8 @@ def stream_turn(
     failed_tool_calls = 0
     persisted = False
     recovery_announced = False
+    stale_runtime_retry_used = False
+    require_current_runtime_attempt = False
     turn_cost_usd = 0.0
 
     def _persist_history() -> None:
@@ -630,6 +690,7 @@ def stream_turn(
                             selected_feature_id=selected_feature_id,
                             selected_feature_label=selected_feature_label,
                             selected_topology_ref=selected_topology_ref,
+                            require_current_runtime_attempt=require_current_runtime_attempt,
                         ),
                         "tools": TOOL_DEFINITIONS,
                         "messages": history,
@@ -683,10 +744,11 @@ def stream_turn(
 
             assistant_blocks: list[dict[str, Any]] = []
             tool_uses: list[dict[str, Any]] = []
+            assistant_texts: list[str] = []
             for block in response.content:
                 if block.type == "text":
                     assistant_blocks.append({"type": "text", "text": block.text})
-                    yield _sse("assistant_text", {"text": block.text})
+                    assistant_texts.append(block.text)
                 elif block.type == "tool_use":
                     use = {
                         "type": "tool_use",
@@ -698,6 +760,30 @@ def stream_turn(
                     tool_uses.append(use)
                 else:
                     assistant_blocks.append(_serialize_response_block(block))
+
+            if (
+                history_has_stale_runtime_failure
+                and not stale_runtime_retry_used
+                and not tool_uses
+                and _assistant_claims_runtime_unavailable(assistant_blocks)
+            ):
+                stale_runtime_retry_used = True
+                require_current_runtime_attempt = True
+                yield _sse(
+                    "model_activity",
+                    {
+                        "model": active_model,
+                        "mode": "runtime_recheck",
+                        "activity": (
+                            "Poprzedni błąd pochodził ze starszej wersji — "
+                            "sprawdzam bieżący silnik CAD…"
+                        ),
+                    },
+                )
+                continue
+
+            for text in assistant_texts:
+                yield _sse("assistant_text", {"text": text})
 
             history.append({"role": "assistant", "content": assistant_blocks})
 

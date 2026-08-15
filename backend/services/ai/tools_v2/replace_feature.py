@@ -6,12 +6,14 @@ from pydantic import BaseModel, Field
 
 from services.ai.tools_v2 import DesignContext
 from services.codegen.engine import (
+    DesignBuildError,
     audit_then_run,
     derive_named_features,
     derive_parameters,
     design_script_is_trusted,
     trusted_script_metadata,
 )
+from services.codegen.ast_audit import audit_generated_cad_fragment
 from services.codegen.store import new_revision_id, save_design
 
 
@@ -86,6 +88,13 @@ def execute(payload: dict, ctx: DesignContext) -> dict:
                 f"Known features: {existing}. Use append_feature to add a new one."
             ),
         }
+
+    fragment_audit = audit_generated_cad_fragment(params.new_code)
+    if not fragment_audit.ok:
+        raise DesignBuildError(
+            "Generated feature failed the strict CAD allowlist audit.",
+            audit_errors=fragment_audit.errors,
+        )
 
     source_is_trusted = design_script_is_trusted(ctx.design)
     overrides = {p.name: p.value for p in ctx.design.parameters}

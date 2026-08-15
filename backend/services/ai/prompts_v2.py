@@ -49,6 +49,12 @@ has to copy. The available tools (read their schemas for inputs):
 
 ## Editing strategy
 
+Historical tool errors and earlier assistant statements describe past turns, not
+the capabilities of the current deployment. When a user retries a previously
+failed edit, call the appropriate tool in the current turn. Never claim the CAD
+runtime, sandbox, or an editing tool is unavailable unless a tool called in this
+current turn actually failed.
+
 1. **The current script and parameters are already in your context below \
 (under "Active design"). You do NOT need to call `read_design` at the start \
 of a turn — you already have what it would return. Only call it if you suspect \

@@ -180,6 +180,48 @@ BUILD123D_PRIMITIVES: frozenset[str] = frozenset(
     }
 )
 
+# Feature edits are model-generated Python inserted into an otherwise reviewed
+# template.  They need a substantially narrower contract than a full built-in
+# source file: no imports, definitions, exception machinery, or arbitrary
+# calls.  The allowlist covers the build123d/trimesh construction vocabulary
+# exposed in the agent prompt and built-in templates, plus inert numeric and
+# collection helpers.
+GENERATED_CAD_ALLOWED_CALLS: frozenset[str] = frozenset(
+    {
+        "abs", "add", "all", "any", "append", "apply_scale",
+        "apply_transform", "apply_translation", "atan2", "bounding_box",
+        "Box", "BuildLine", "BuildPart", "BuildSketch", "CenterArc",
+        "chamfer", "Circle", "clean", "Compound", "Cone", "cos", "count",
+        "CounterBoreHole", "CounterSinkHole", "cut", "Cylinder", "deg2rad",
+        "difference", "edges", "enumerate", "extend", "extrude", "faces",
+        "fillet", "filter_by", "filter_by_position", "float", "GridLocations",
+        "group_by", "HexLocations", "Hole", "icosphere", "int", "intersect",
+        "len", "list", "Location", "Locations", "loft", "make_face", "max",
+        "min", "mirror", "move", "moved", "offset", "offset_2d", "PolarLocations",
+        "Pos", "project", "range", "Rectangle", "RegularPolygon", "revolve",
+        "Rot", "rotate", "rotation_matrix", "round", "scale", "sin", "Slot",
+        "solids", "sort_by", "Sphere", "split", "sqrt", "sum", "sweep",
+        "tan", "Torus", "tuple", "Vector", "vertices", "Wedge", "wires", "zip",
+    }
+)
+
+_GENERATED_CAD_FORBIDDEN_NODES = (
+    ast.AsyncFunctionDef,
+    ast.Await,
+    ast.ClassDef,
+    ast.Delete,
+    ast.FunctionDef,
+    ast.Global,
+    ast.Import,
+    ast.ImportFrom,
+    ast.Lambda,
+    ast.Nonlocal,
+    ast.Raise,
+    ast.Try,
+    ast.Yield,
+    ast.YieldFrom,
+)
+
 
 @dataclass
 class AuditResult:
@@ -360,6 +402,51 @@ def audit_script(source: str) -> AuditResult:
     return AuditResult(ok=not errors, errors=errors)
 
 
+def audit_generated_cad_fragment(source: str) -> AuditResult:
+    """Audit an LLM-generated feature body before it inherits template trust.
+
+    This is intentionally an allowlist.  The full-script audit protects
+    reviewed built-ins from obvious mistakes; it is not a declassification
+    boundary for attacker-influenced Python.  A generated fragment may only
+    call known CAD/numeric helpers and cannot introduce imports or executable
+    definitions.
+    """
+    try:
+        tree = ast.parse(source, filename="<generated-cad-feature>", mode="exec")
+    except SyntaxError as exc:
+        return AuditResult(ok=False, errors=[f"SyntaxError: {exc}"])
+
+    errors: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, _GENERATED_CAD_FORBIDDEN_NODES):
+            errors.append(
+                f"line {getattr(node, 'lineno', '?')}: "
+                f"{type(node).__name__} is not allowed in generated CAD features"
+            )
+        elif isinstance(node, ast.Call):
+            call_name = _call_name(node)
+            if call_name is None or call_name not in GENERATED_CAD_ALLOWED_CALLS:
+                errors.append(
+                    f"line {node.lineno}: call '{call_name or '<dynamic>'}' is not "
+                    "allowed in generated CAD features"
+                )
+        elif isinstance(node, ast.Name):
+            if node.id in DENIED_NAMES and isinstance(node.ctx, ast.Load):
+                errors.append(f"line {node.lineno}: use of '{node.id}' is not allowed")
+        elif isinstance(node, ast.Attribute):
+            if node.attr in DENIED_ATTRS or node.attr in DENIED_TRANSITIVE_ATTRS:
+                errors.append(
+                    f"line {node.lineno}: attribute access '.{node.attr}' is not allowed"
+                )
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if "__" in node.value:
+                errors.append(
+                    f"line {node.lineno}: dunder strings are not allowed in CAD source"
+                )
+
+    return AuditResult(ok=not errors, errors=errors)
+
+
 __all__ = [
     "audit_script",
     "AuditResult",
@@ -367,4 +454,6 @@ __all__ = [
     "DENIED_NAMES",
     "DENIED_TRANSITIVE_ATTRS",
     "BUILD123D_PRIMITIVES",
+    "GENERATED_CAD_ALLOWED_CALLS",
+    "audit_generated_cad_fragment",
 ]

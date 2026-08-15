@@ -115,9 +115,15 @@ def _serialized_design_build(design_id: str) -> Iterator[None]:
                 _design_thread_locks.pop(lock_key, None)
 
 
+_TRUST_POLICY_VERSION = "generated-cad-allowlist-v1"
+
+
 def trusted_script_metadata(script: str) -> dict[str, str]:
     """Bind trusted provenance to the exact reviewed script bytes."""
-    return {"trusted_script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest()}
+    return {
+        "trusted_script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
+        "trusted_script_policy": _TRUST_POLICY_VERSION,
+    }
 
 
 def design_script_is_trusted(design: Design) -> bool:
@@ -125,7 +131,24 @@ def design_script_is_trusted(design: Design) -> bool:
 
     expected = str(design.metadata.get("trusted_script_sha256") or "")
     actual = hashlib.sha256(design.script.encode("utf-8")).hexdigest()
-    return bool(expected and secrets.compare_digest(expected, actual))
+    if not (expected and secrets.compare_digest(expected, actual)):
+        return False
+    if design.metadata.get("trusted_script_policy") == _TRUST_POLICY_VERSION:
+        return True
+
+    # Migrate legacy trust only for exact built-in seed bytes.  Scripts changed
+    # by the former trust-propagation policy must not remain executable merely
+    # because their old digest still matches.
+    template_id = str(design.metadata.get("template_id") or "")
+    if not template_id:
+        return False
+    try:
+        from services.codegen.templates import get_seed_script
+
+        _, reviewed_script = get_seed_script(template_id)
+    except (KeyError, ValueError):
+        return False
+    return secrets.compare_digest(reviewed_script, design.script)
 
 
 class DesignBuildError(RuntimeError):

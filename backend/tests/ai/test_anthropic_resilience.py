@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
+import services.ai.agent_v2 as agent_v2
 from services.ai.agent_v2 import (
     _accepts_stylized_paramotor,
+    _assistant_claims_runtime_unavailable,
     _compact_for_persist,
+    _history_has_stale_runtime_failure,
     _organic_paramotor_offer,
     _repair_dangling_tool_uses,
 )
+from services.codegen.models import Design
 from services.ai.anthropic_resilience import (
     AnthropicCircuitOpen,
     InvalidAnthropicApiKey,
@@ -113,6 +120,146 @@ def test_realistic_paramotor_is_offered_a_free_stylized_fallback() -> None:
     assert "bez kosztu" in offer
     history = [{"role": "assistant", "content": [{"type": "text", "text": offer}]}]
     assert _accepts_stylized_paramotor("tak", history) is True
+
+
+def test_historical_runtime_failure_is_detected_after_a_deployment_fix() -> None:
+    history = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool-old",
+                    "content": '{"error":"Untrusted Python CAD execution is disabled in this deployment."}',
+                    "is_error": True,
+                }
+            ],
+        }
+    ]
+
+    assert _history_has_stale_runtime_failure(history) is True
+
+
+def test_stale_runtime_refusal_requires_a_current_tool_attempt() -> None:
+    blocks = [
+        {
+            "type": "text",
+            "text": "Napotykam blokadę infrastruktury; silnik odrzuca teraz każdą modyfikację.",
+        }
+    ]
+
+    assert _assistant_claims_runtime_unavailable(blocks) is True
+    assert _assistant_claims_runtime_unavailable(
+        [{"type": "text", "text": "Dopytam o promień zaokrąglenia."}]
+    ) is False
+
+
+def test_stale_runtime_refusal_is_hidden_and_retried_with_a_current_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    design = Design(
+        id="design-1",
+        revision_id="revision-1",
+        name="Olga cage leg",
+        script="# @feature: hollow\nresult = None\n# @end\n",
+        process="fdm",
+    )
+    history = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool-old",
+                    "content": '{"error":"Untrusted Python CAD execution is disabled in this deployment."}',
+                    "is_error": True,
+                }
+            ],
+        }
+    ]
+    responses = iter(
+        [
+            SimpleNamespace(
+                model="claude-test",
+                usage=None,
+                stop_reason="end_turn",
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text="Napotykam blokadę infrastruktury; silnik odrzuca teraz każdą modyfikację.",
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                model="claude-test",
+                usage=None,
+                stop_reason="tool_use",
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="tool-current",
+                        name="read_design",
+                        input={},
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                model="claude-test",
+                usage=None,
+                stop_reason="end_turn",
+                content=[SimpleNamespace(type="text", text="Bieżący silnik CAD odpowiada.")],
+            ),
+        ]
+    )
+    system_calls: list[list[dict]] = []
+    executed: list[str] = []
+    persisted: list[list[dict]] = []
+
+    monkeypatch.setattr(agent_v2, "get_design", lambda _design_id: design)
+    monkeypatch.setattr(agent_v2, "get_build", lambda _design_id: None)
+    monkeypatch.setattr(agent_v2, "load_conversation", lambda _design_id: history)
+    monkeypatch.setattr(
+        agent_v2,
+        "save_conversation",
+        lambda _design_id, transcript: persisted.append(transcript),
+    )
+    monkeypatch.setattr(
+        agent_v2,
+        "resolve_anthropic_credentials",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            api_key="sk-ant-test",
+            billing_source="customer_byok",
+            circuit_scope="test",
+        ),
+    )
+    monkeypatch.setattr(agent_v2, "Anthropic", lambda **_kwargs: object())
+    monkeypatch.setattr(agent_v2, "maybe_compact_history", lambda transcript, **_kwargs: (transcript, False))
+
+    def fake_call(_client, **kwargs):
+        system_calls.append(kwargs["request_kwargs"]["system"])
+        response = next(responses)
+        return SimpleNamespace(response=response, model=response.model, attempts=1, fallback_used=False)
+
+    monkeypatch.setattr(agent_v2, "call_messages_with_resilience", fake_call)
+    monkeypatch.setattr(
+        agent_v2,
+        "execute_tool",
+        lambda name, _payload, _ctx: executed.append(name) or {"ok": True},
+    )
+    monkeypatch.setattr(agent_v2, "record_tool_call", lambda **_kwargs: None)
+    monkeypatch.setattr(agent_v2, "evaluate_spec_compliance", lambda *_args: {"status": "unknown"})
+    monkeypatch.setattr(agent_v2, "record_spec_targets", lambda *_args, **_kwargs: False)
+
+    events = "".join(agent_v2.stream_turn("design-1", "spróbuj ponownie"))
+
+    assert "silnik odrzuca teraz" not in events
+    assert '"mode": "runtime_recheck"' in events
+    assert "odpowiada." in events
+    assert executed == ["read_design"]
+    assert "Current runtime recovery" not in system_calls[0][1]["text"]
+    assert "Current runtime recovery" in system_calls[1][1]["text"]
+    assert persisted
+    assert "silnik odrzuca teraz" not in repr(persisted[-1])
 
 
 def test_invalid_explicit_byok_never_falls_back_to_platform_billing() -> None:
