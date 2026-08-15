@@ -36,16 +36,17 @@ class GeminiPromptResult:
         return (self.input_tokens * 0.30 + self.output_tokens * 2.50) / 1_000_000
 
 
-async def _generate(payload: dict) -> tuple[str | None, dict]:
-    if not settings.allow_platform_ai_spend:
+async def _generate(payload: dict, *, api_key: str | None = None) -> tuple[str | None, dict]:
+    key = api_key or settings.gemini_api_key
+    if not api_key and not settings.allow_platform_ai_spend:
         raise ValueError(
-            "Platform-paid Gemini intent extraction is disabled; use Anthropic BYOK vision."
+            "Platform-paid Gemini intent extraction is disabled; add your own Gemini key."
         )
     async with httpx.AsyncClient(timeout=90) as client:
-        if settings.gemini_api_key:
+        if key:
             response = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-                headers={"x-goog-api-key": settings.gemini_api_key},
+                headers={"x-goog-api-key": key},
                 json={"contents": payload["contents"]},
             )
             response.raise_for_status()
@@ -75,7 +76,7 @@ def _parse_prompt(text: str | None) -> Optional[str]:
     return text.strip() or None
 
 
-async def extract_prompt(user_text: str) -> Optional[str]:
+async def extract_prompt(user_text: str, *, api_key: str | None = None) -> Optional[str]:
     payload = {
         "contents": [
             {
@@ -90,20 +91,24 @@ async def extract_prompt(user_text: str) -> Optional[str]:
         "modelName": settings.gemini_model,
     }
 
-    text, _ = await _generate(payload)
+    text, _ = await _generate(payload, api_key=api_key)
     return _parse_prompt(text)
 
 
 async def extract_prompt_from_image(
     content: bytes,
     content_type: str,
+    *,
+    api_key: str | None = None,
 ) -> Optional[str]:
-    return (await extract_prompt_from_image_with_usage(content, content_type)).prompt
+    return (await extract_prompt_from_image_with_usage(content, content_type, api_key=api_key)).prompt
 
 
 async def extract_prompt_from_image_with_usage(
     content: bytes,
     content_type: str,
+    *,
+    api_key: str | None = None,
 ) -> GeminiPromptResult:
     encoded = base64.b64encode(content).decode("ascii")
     mime_type = content_type or "image/jpeg"
@@ -120,7 +125,7 @@ async def extract_prompt_from_image_with_usage(
         "modelName": settings.gemini_model,
     }
 
-    text, usage = await _generate(payload)
+    text, usage = await _generate(payload, api_key=api_key)
     return GeminiPromptResult(
         prompt=_parse_prompt(text),
         input_tokens=int(usage.get("promptTokenCount") or 0),

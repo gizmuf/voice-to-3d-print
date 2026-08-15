@@ -195,13 +195,15 @@ DEFAULT_PRINTER_PROFILE_ID=prusa_mk4_default
 If used, it must point to a runtime owned by this 3D Stack; another product is
 never a dependency or credential source.
 
-### Anthropic reliability and customer BYOK
+### Provider reliability and customer BYOK
 
 Transient 429/5xx/529 failures use bounded exponential backoff with jitter,
 `Retry-After`, a circuit breaker, and `ANTHROPIC_FALLBACK_MODEL`. The browser
-can optionally send the customer's own Anthropic key for a turn, so Anthropic
-bills that customer's account. The key stays in the current tab's memory and is
-not persisted. BYOK never silently falls back to the Pulsai platform key.
+can optionally send the customer's own Anthropic key for a CAD turn. The studio
+also accepts request-scoped OpenAI, Gemini, Meshy, and Tripo keys for concept,
+intent/image, and organic-mesh tasks. Keys stay in the current tab's memory;
+only the selected provider key is sent, and it is not persisted. BYOK never
+silently falls back to a Pulsai platform key.
 
 See `docs/SECURITY_AND_SECRETS.md`, `docs/RUNBOOK_LINUX.md`, and
 `docs/PRODUCTION_RUNBOOK.md` for Cloud Run Secret Manager verification, the

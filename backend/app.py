@@ -16,6 +16,19 @@ from pydantic import BaseModel, Field
 
 _DESIGN_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _ANTHROPIC_BYOK_HEADER = "x-pulsai-anthropic-key"
+_OPENAI_BYOK_HEADER = "x-pulsai-openai-key"
+_GEMINI_BYOK_HEADER = "x-pulsai-gemini-key"
+_MESHY_BYOK_HEADER = "x-pulsai-meshy-key"
+_TRIPO_BYOK_HEADER = "x-pulsai-tripo-key"
+
+
+def _request_provider_key(request: Request, header: str) -> str | None:
+    value = (request.headers.get(header) or "").strip()
+    if not value:
+        return None
+    if len(value) > 1024 or any(character.isspace() for character in value):
+        raise HTTPException(status_code=400, detail="Invalid provider API key format.")
+    return value
 
 
 def _validate_design_id(design_id: str) -> str:
@@ -81,7 +94,12 @@ from services.auth import (
 from services.ai_edit import ai_edit_workspace_model
 from services.deepgram_stt import transcribe_audio
 from services.gemini_intent import extract_prompt, extract_prompt_from_image_with_usage
-from services.generation import GenerationResult, generate_model, generate_model_from_image
+from services.generation import (
+    GenerationResult,
+    generate_model,
+    generate_model_from_image,
+    select_mesh_provider,
+)
 from services.jewelry_trace import (
     generate_jewelry_concepts,
     jewelry_profile_catalog,
@@ -548,6 +566,7 @@ class GenerateRequest(BaseModel):
     project_id: str | None = None
     parent_job_id: str | None = None
     edit_mode: str | None = None
+    quality_tier: str = "balanced"
 
 
 class GenerateResponse(BaseModel):
@@ -862,7 +881,7 @@ def health() -> dict:
 
 
 @app.post("/route-intent", response_model=RouteIntentResponse)
-async def route_intent_endpoint(request: RouteIntentRequest) -> RouteIntentResponse:
+async def route_intent_endpoint(request: RouteIntentRequest, http_request: Request) -> RouteIntentResponse:
     job_id = request.job_id or uuid.uuid4().hex
     route = route_mode(
         request.raw_text,
@@ -902,7 +921,10 @@ async def route_intent_endpoint(request: RouteIntentRequest) -> RouteIntentRespo
     else:
         if request.raw_text.strip():
             try:
-                prompt = await extract_prompt(request.raw_text) or request.raw_text.strip()
+                prompt = await extract_prompt(
+                    request.raw_text,
+                    api_key=_request_provider_key(http_request, _GEMINI_BYOK_HEADER),
+                ) or request.raw_text.strip()
             except Exception:
                 prompt = request.raw_text.strip()
 
@@ -1611,14 +1633,25 @@ def apply_edit_endpoint(request: ApplyEditRequest) -> ApplyEditResponse:
 
 
 @app.post("/generate", response_model=GenerateResponse)
-async def generate(request: GenerateRequest) -> GenerateResponse:
+async def generate(request: GenerateRequest, http_request: Request) -> GenerateResponse:
     job_id = request.job_id or uuid.uuid4().hex
+    meshy_key = _request_provider_key(http_request, _MESHY_BYOK_HEADER)
+    tripo_key = _request_provider_key(http_request, _TRIPO_BYOK_HEADER)
+    try:
+        provider = select_mesh_provider(
+            request.prompt,
+            request.provider,
+            meshy_available=bool(meshy_key or (settings.allow_platform_ai_spend and settings.meshy_api_key)),
+            tripo_available=bool(tripo_key or (settings.allow_platform_ai_spend and settings.tripo_api_key)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     ensure_job(
         job_id,
         _compact_payload(
             {
                 "status": "generating",
-                "provider": (request.provider or settings.threed_provider).lower(),
+                "provider": provider,
                 "input.type": request.input_type,
                 "input.prompt_raw": request.prompt_raw,
                 "input.prompt_final": request.prompt,
@@ -1630,7 +1663,12 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         ),
     )
     try:
-        result: GenerationResult = await generate_model(request.prompt, provider=request.provider)
+        result: GenerationResult = await generate_model(
+            request.prompt,
+            provider=provider,
+            api_key=meshy_key if provider == "meshy" else tripo_key,
+            quality_tier=request.quality_tier,
+        )
     except Exception as exc:
         record_error(job_id, "generate", str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1649,6 +1687,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
 
 @app.post("/generate-image", response_model=GenerateResponse)
 async def generate_image(
+    request: Request,
     provider: str | None = None,
     job_id: str | None = Form(None),
     input_type: str | None = Form(None),
@@ -1656,6 +1695,7 @@ async def generate_image(
     parent_job_id: str | None = Form(None),
     edit_mode: str | None = Form(None),
     image: UploadFile = File(...),
+    quality_tier: str = Form("balanced"),
 ) -> GenerateResponse:
     job_id = job_id or uuid.uuid4().hex
     ensure_job(
@@ -1677,12 +1717,24 @@ async def generate_image(
     try:
         content = await _read_upload_limited(image, settings.max_image_upload_bytes)
         update_job(job_id, {"input.image_size": len(content)})
+        selected_provider = select_mesh_provider(
+            image.filename or "image",
+            provider,
+            meshy_available=bool(_request_provider_key(request, _MESHY_BYOK_HEADER) or (settings.allow_platform_ai_spend and settings.meshy_api_key)),
+            tripo_available=bool(_request_provider_key(request, _TRIPO_BYOK_HEADER) or (settings.allow_platform_ai_spend and settings.tripo_api_key)),
+        )
+        provider_key = _request_provider_key(
+            request,
+            _MESHY_BYOK_HEADER if selected_provider == "meshy" else _TRIPO_BYOK_HEADER,
+        )
         result: GenerationResult = await generate_model_from_image(
             content,
             image.filename or "upload.jpg",
             image.content_type or "image/jpeg",
             job_id=job_id,
-            provider=provider,
+            provider=selected_provider,
+            api_key=provider_key,
+            quality_tier=quality_tier,
         )
     except Exception as exc:
         record_error(job_id, "generate-image", str(exc))
@@ -1831,6 +1883,7 @@ async def intent(request: IntentRequest) -> IntentResponse:
 
 @app.post("/image-intent", response_model=ImageIntentResponse)
 async def image_intent(
+    request: Request,
     image: UploadFile = File(...),
     job_id: str | None = Form(None),
     input_type: str | None = Form(None),
@@ -1858,7 +1911,11 @@ async def image_intent(
     try:
         content = await _read_upload_limited(image, settings.max_image_upload_bytes)
         update_job(job_id, {"input.image_size": len(content)})
-        result = await extract_prompt_from_image_with_usage(content, image.content_type or "image/jpeg")
+        result = await extract_prompt_from_image_with_usage(
+            content,
+            image.content_type or "image/jpeg",
+            api_key=_request_provider_key(request, _GEMINI_BYOK_HEADER),
+        )
         prompt = result.prompt
     except Exception as exc:
         public_error = "Image understanding provider is unavailable."
@@ -2410,13 +2467,14 @@ def design_jewelry_profiles_endpoint() -> dict:
 
 
 @app.post("/design/jewelry/concepts")
-async def design_jewelry_concepts_endpoint(request: JewelryConceptRequest) -> dict:
+async def design_jewelry_concepts_endpoint(request: JewelryConceptRequest, http_request: Request) -> dict:
     try:
         return await generate_jewelry_concepts(
             prompt=request.prompt,
             context=request.context,
             profile_id=request.profile_id,
             count=request.count,
+            openai_api_key=_request_provider_key(http_request, _OPENAI_BYOK_HEADER),
         )
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

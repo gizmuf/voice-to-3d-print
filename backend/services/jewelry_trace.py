@@ -136,15 +136,17 @@ async def generate_jewelry_concepts(
     context: str = "Pendant",
     profile_id: str = "resin_print",
     count: int = 3,
+    openai_api_key: str | None = None,
 ) -> dict[str, Any]:
-    if not settings.allow_platform_ai_spend:
+    if not openai_api_key and not settings.allow_platform_ai_spend:
         return {
             "configured": False,
             "profile_id": profile_id,
             "concepts": [],
             "message": "Platform-paid image generation is disabled.",
         }
-    if not settings.openai_api_key:
+    api_key = openai_api_key or settings.openai_api_key
+    if not api_key:
         return {
             "configured": False,
             "profile_id": profile_id,
@@ -174,7 +176,7 @@ async def generate_jewelry_concepts(
             response = await client.post(
                 "https://api.openai.com/v1/images/generations",
                 headers={
-                    "authorization": f"Bearer {settings.openai_api_key}",
+                    "authorization": f"Bearer {api_key}",
                     "content-type": "application/json",
                 },
                 json={

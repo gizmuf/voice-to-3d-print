@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 
 import { resolveBackendUrl } from "../../lib/backend";
+import { isLikelyEmbeddedBrowser } from "../../lib/embedded-browser";
 
 type AuthConfig = {
   required: boolean;
@@ -41,6 +42,9 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
   const [sessionChecked, setSessionChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [error, setError] = useState("");
+  const [embeddedBrowser] = useState(
+    () => typeof window !== "undefined" && isLikelyEmbeddedBrowser(window.navigator.userAgent),
+  );
   const buttonRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -152,7 +156,9 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
   if (pathname === "/privacy" || pathname === "/terms") {
     return <AppWithSource>{children}</AppWithSource>;
   }
-  if (error) return <AuthShell message={error} buttonRef={buttonRef} />;
+  if (error) {
+    return <AuthShell message={error} buttonRef={buttonRef} embeddedBrowser={embeddedBrowser} />;
+  }
   if (!config) return <AuthShell message="Sprawdzam bezpieczne logowanie…" />;
   if (!config.required) return <AppWithSource>{children}</AppWithSource>;
   if (!config.google_client_id) {
@@ -164,6 +170,7 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
       <AuthShell
         message="Zaloguj się przez Google, aby projekty i pliki były widoczne tylko dla Ciebie."
         buttonRef={buttonRef}
+        embeddedBrowser={embeddedBrowser}
       />
     );
   }
@@ -189,16 +196,30 @@ function AppWithSource({ children }: { children: ReactNode }) {
 function AuthShell({
   message,
   buttonRef,
+  embeddedBrowser = false,
 }: {
   message: string;
   buttonRef?: React.RefObject<HTMLDivElement | null>;
+  embeddedBrowser?: boolean;
 }) {
   return (
     <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
       <section style={{ width: "min(440px, 100%)", padding: 32, border: "1px solid rgba(0,0,0,.12)", borderRadius: 20, background: "rgba(255,255,255,.9)", textAlign: "center", boxShadow: "0 20px 60px rgba(23,34,44,.12)" }}>
         <strong style={{ display: "block", fontSize: 24, marginBottom: 12 }}>Pulsai 3D</strong>
         <p style={{ lineHeight: 1.55, opacity: 0.75 }}>{message}</p>
-        {buttonRef ? <div ref={buttonRef} style={{ display: "flex", justifyContent: "center", marginTop: 20 }} /> : null}
+        {buttonRef ? (
+          <>
+            <div ref={buttonRef} style={{ display: "flex", justifyContent: "center", marginTop: 20 }} />
+            <p
+              role="note"
+              style={{ margin: "14px auto 0", maxWidth: 340, fontSize: 12, lineHeight: 1.5, opacity: 0.68 }}
+            >
+              {embeddedBrowser
+                ? "To jest przeglądarka osadzona. Google może blokować w niej logowanie. W menu tej karty wybierz „Open in external browser” i zaloguj się w Chrome lub Safari."
+                : "Puste okno logowania? Otwórz tę stronę w Chrome lub Safari."}
+            </p>
+          </>
+        ) : null}
         <nav style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 22, fontSize: 12 }}>
           <a href="/privacy">Privacy</a>
           <a href="/terms">Terms</a>

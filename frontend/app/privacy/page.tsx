@@ -30,12 +30,12 @@ export default function PrivacyPage() {
           provider are also processed under that provider&apos;s terms and privacy policy.
         </p>
 
-        <h2>Your Anthropic key</h2>
+        <h2>Your provider API keys</h2>
         <p>
-          If you provide your own Anthropic API key, the web app keeps it in browser memory and sends
-          it to the backend only for the requests that need Anthropic. Pulsai 3D is designed not to
-          persist that key in project records, browser storage, or logs. Closing or reloading the page
-          clears it from browser memory.
+          If you provide Anthropic, OpenAI, Gemini, Meshy, or Tripo API keys, the web app keeps them
+          in browser memory and sends only the key needed for the requested task to the backend over
+          HTTPS. Pulsai 3D is designed not to persist those keys in account or project records,
+          browser storage, or logs. Closing or reloading the page clears them from browser memory.
         </p>
 
         <h2>Sharing and retention</h2>

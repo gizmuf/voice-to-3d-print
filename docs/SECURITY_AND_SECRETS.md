@@ -29,10 +29,11 @@ recover a user's project; use an explicit owner migration instead.
   allowlisted users receive only an account entitlement flag.
 - VPS services receive credentials through `*_FILE` paths backed by systemd
   credentials, Docker secrets, or another approved secret mount.
-- A customer Anthropic key is request-scoped BYOK data. It is held in the
-  browser tab's memory, sent in `X-Pulsai-Anthropic-Key` over HTTPS, and must
-  never be logged, persisted, copied into a design, or silently replaced with
-  the platform key.
+- Customer Anthropic, OpenAI, Gemini, Meshy, and Tripo keys are request-scoped
+  BYOK data. They are held in the browser tab's memory and sent over HTTPS in a
+  dedicated `X-Pulsai-<Provider>-Key` header only when that provider is needed.
+  They must never be logged, persisted, copied into a design, or silently
+  replaced with a platform key.
 - CAD sandbox subprocesses receive only the allowlisted non-secret environment.
 - Public safe mode executes only repository-controlled templates and
   deterministic macro code. Caller/model-authored Python remains disabled

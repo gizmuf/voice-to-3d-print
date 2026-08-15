@@ -42,15 +42,67 @@ def _extract_glb_url(payload: Dict[str, Any]) -> Optional[str]:
             value = model_urls.get(key)
             if isinstance(value, str) and value:
                 return value
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        return _extract_glb_url(nested)
     return None
 
 
-async def generate_model(prompt: str, *, provider: Optional[str] = None) -> GenerationResult:
+def _provider_key(explicit_key: str | None, platform_key: str | None, provider: str) -> str:
+    if explicit_key:
+        return explicit_key
+    if not settings.allow_platform_ai_spend:
+        raise ValueError(f"Platform-paid {provider} generation is disabled; add your own provider key.")
+    if not platform_key:
+        raise ValueError(f"{provider} API key is not configured.")
+    return platform_key
+
+
+def _quality(value: str | None) -> str:
+    normalized = (value or "balanced").lower()
+    if normalized not in {"draft", "balanced", "quality"}:
+        raise ValueError("quality_tier must be draft, balanced, or quality")
+    return normalized
+
+
+def select_mesh_provider(
+    prompt: str,
+    requested: str | None,
+    *,
+    meshy_available: bool,
+    tripo_available: bool,
+) -> str:
+    requested = (requested or "auto").lower()
+    if requested in {"meshy", "tripo"}:
+        available = meshy_available if requested == "meshy" else tripo_available
+        if not available:
+            raise ValueError(f"Add a {requested.title()} API key before using this provider.")
+        return requested
+    if requested not in {"auto", ""}:
+        return requested
+    if not meshy_available and not tripo_available:
+        raise ValueError("Add a Meshy or Tripo API key to generate organic models.")
+    if meshy_available and tripo_available:
+        organic = any(term in prompt.lower() for term in (
+            "figur", "character", "postać", "postac", "pilot", "paraglider",
+            "motoparalotni", "creature", "animal", "dragon", "sculpture", "statue",
+        ))
+        return "tripo" if organic else "meshy"
+    return "tripo" if tripo_available else "meshy"
+
+
+async def generate_model(
+    prompt: str,
+    *,
+    provider: Optional[str] = None,
+    api_key: str | None = None,
+    quality_tier: str = "balanced",
+) -> GenerationResult:
     provider = (provider or settings.threed_provider).lower()
     if provider == "meshy":
-        return await _generate_meshy(prompt)
+        return await _generate_meshy(prompt, api_key=api_key, quality_tier=quality_tier)
     if provider == "tripo":
-        return await _generate_tripo(prompt)
+        return await _generate_tripo(prompt, api_key=api_key, quality_tier=quality_tier)
     if provider == "trellis2":
         return await _generate_trellis2(prompt)
     if provider == "triposr":
@@ -77,18 +129,23 @@ def _generate_parametric(prompt: str) -> GenerationResult:
     )
 
 
-async def _generate_meshy(prompt: str) -> GenerationResult:
-    if not settings.allow_platform_ai_spend:
-        raise ValueError("Platform-paid Meshy generation is disabled; use a customer-owned provider key.")
-    if not settings.meshy_api_key:
-        raise ValueError("MESHY_API_KEY is required for Meshy generation")
-
+async def _generate_meshy(
+    prompt: str,
+    *,
+    api_key: str | None = None,
+    quality_tier: str = "balanced",
+) -> GenerationResult:
+    key = _provider_key(api_key, settings.meshy_api_key, "Meshy")
+    tier = _quality(quality_tier)
     url = f"{settings.meshy_base_url}{settings.meshy_create_endpoint}"
-    headers = {"Authorization": f"Bearer {settings.meshy_api_key}"}
+    headers = {"Authorization": f"Bearer {key}"}
     payload = {
         "prompt": prompt,
-        "art_style": "realistic",
         "mode": "preview",
+        "ai_model": "meshy-6" if tier == "quality" else "latest",
+        "should_remesh": tier != "quality",
+        "target_polycount": {"draft": 20_000, "balanced": 60_000, "quality": 150_000}[tier],
+        "target_formats": ["glb"],
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -109,17 +166,23 @@ async def _generate_meshy(prompt: str) -> GenerationResult:
     )
 
 
-async def _generate_tripo(prompt: str) -> GenerationResult:
-    if not settings.allow_platform_ai_spend:
-        raise ValueError("Platform-paid Tripo generation is disabled; use a customer-owned provider key.")
-    if not settings.tripo_api_key:
-        raise ValueError("TRIPO_API_KEY is required for Tripo generation")
-
+async def _generate_tripo(
+    prompt: str,
+    *,
+    api_key: str | None = None,
+    quality_tier: str = "balanced",
+) -> GenerationResult:
+    key = _provider_key(api_key, settings.tripo_api_key, "Tripo")
+    tier = _quality(quality_tier)
     url = f"{settings.tripo_base_url}{settings.tripo_create_endpoint}"
-    headers = {"Authorization": f"Bearer {settings.tripo_api_key}"}
+    headers = {"Authorization": f"Bearer {key}"}
     payload = {
         "type": "text_to_model",
         "prompt": prompt,
+        "model_version": "P1-20260311" if tier == "draft" else "v3.1-20260211",
+        "geometry_quality": "detailed" if tier == "quality" else "standard",
+        "texture": False,
+        "pbr": False,
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -127,7 +190,8 @@ async def _generate_tripo(prompt: str) -> GenerationResult:
         response.raise_for_status()
         data = response.json()
 
-    task_id = data.get("task_id") or data.get("id") or data.get("result")
+    nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+    task_id = data.get("task_id") or data.get("id") or data.get("result") or nested.get("task_id")
     if not task_id:
         raise RuntimeError(f"Tripo response missing task id: {data}")
 
@@ -205,9 +269,10 @@ async def _upload_tripo_image(
     content: bytes,
     filename: str,
     content_type: str,
+    api_key: str,
 ) -> Tuple[str, str]:
     url = f"{settings.tripo_base_url}{settings.tripo_upload_endpoint}"
-    headers = {"Authorization": f"Bearer {settings.tripo_api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}"}
     file_type = _file_type_from_content_type(content_type)
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
@@ -244,21 +309,25 @@ async def _generate_tripo_from_image(
     content: bytes,
     filename: str,
     content_type: str,
+    *,
+    api_key: str | None = None,
+    quality_tier: str = "balanced",
 ) -> GenerationResult:
-    if not settings.allow_platform_ai_spend:
-        raise ValueError("Platform-paid Tripo generation is disabled; use a customer-owned provider key.")
-    if not settings.tripo_api_key:
-        raise ValueError("TRIPO_API_KEY is required for Tripo generation")
-
-    token, file_type = await _upload_tripo_image(content, filename, content_type)
+    key = _provider_key(api_key, settings.tripo_api_key, "Tripo")
+    tier = _quality(quality_tier)
+    token, file_type = await _upload_tripo_image(content, filename, content_type, key)
     url = f"{settings.tripo_base_url}{settings.tripo_create_endpoint}"
-    headers = {"Authorization": f"Bearer {settings.tripo_api_key}"}
+    headers = {"Authorization": f"Bearer {key}"}
     payload = {
         "type": "image_to_model",
         "file": {
             "type": file_type,
             "file_token": token,
         },
+        "model_version": "P1-20260311" if tier == "draft" else "v3.1-20260211",
+        "geometry_quality": "detailed" if tier == "quality" else "standard",
+        "texture": False,
+        "pbr": False,
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -266,7 +335,8 @@ async def _generate_tripo_from_image(
         response.raise_for_status()
         data = response.json()
 
-    task_id = data.get("task_id") or data.get("id") or data.get("result")
+    nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+    task_id = data.get("task_id") or data.get("id") or data.get("result") or nested.get("task_id")
     if not task_id:
         raise RuntimeError(f"Tripo response missing task id: {data}")
 
@@ -282,19 +352,20 @@ async def _generate_tripo_from_image(
 async def _generate_meshy_from_image(
     content: bytes,
     content_type: str,
+    *,
+    api_key: str | None = None,
+    quality_tier: str = "balanced",
 ) -> GenerationResult:
-    if not settings.allow_platform_ai_spend:
-        raise ValueError("Platform-paid Meshy generation is disabled; use a customer-owned provider key.")
-    if not settings.meshy_api_key:
-        raise ValueError("MESHY_API_KEY is required for Meshy generation")
-
+    key = _provider_key(api_key, settings.meshy_api_key, "Meshy")
+    tier = _quality(quality_tier)
     url = f"{settings.meshy_base_url}{settings.meshy_image_create_endpoint}"
-    headers = {"Authorization": f"Bearer {settings.meshy_api_key}"}
+    headers = {"Authorization": f"Bearer {key}"}
     payload = {
         "image_url": _image_data_uri(content, content_type),
         "should_texture": False,
         "should_remesh": True,
         "topology": "triangle",
+        "target_polycount": {"draft": 20_000, "balanced": 60_000, "quality": 150_000}[tier],
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -470,12 +541,18 @@ async def generate_model_from_image(
     *,
     job_id: Optional[str] = None,
     provider: Optional[str] = None,
+    api_key: str | None = None,
+    quality_tier: str = "balanced",
 ) -> GenerationResult:
     provider = (provider or settings.threed_provider).lower()
     if provider == "tripo":
-        return await _generate_tripo_from_image(content, filename, content_type)
+        return await _generate_tripo_from_image(
+            content, filename, content_type, api_key=api_key, quality_tier=quality_tier
+        )
     if provider == "meshy":
-        return await _generate_meshy_from_image(content, content_type)
+        return await _generate_meshy_from_image(
+            content, content_type, api_key=api_key, quality_tier=quality_tier
+        )
     if provider == "trellis2":
         return await _generate_trellis2_from_image(content, filename, content_type)
     if provider == "triposr":
@@ -505,7 +582,8 @@ async def _poll_generation(
             response.raise_for_status()
             data = response.json()
 
-            status = (data.get("status") or data.get("state") or "").lower()
+            nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+            status = (data.get("status") or data.get("state") or nested.get("status") or nested.get("state") or "").lower()
             glb_url = _extract_glb_url(data) or _extract_glb_url(data.get("result", {}))
             if status in {"succeeded", "completed", "success"} and glb_url:
                 return GenerationResult(

@@ -193,6 +193,12 @@ CREATIVE_KEYWORDS = (
     "monster",
     "art",
     "sculpture",
+    "figurka",
+    "postać",
+    "postac",
+    "rzeźba",
+    "rzezba",
+    "motoparalotniarz",
 )
 
 UNSUPPORTED_SEMANTIC_SHAPES = (

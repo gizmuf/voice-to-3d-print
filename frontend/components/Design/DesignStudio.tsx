@@ -12,6 +12,16 @@ import {
   anthropicByokHeaders,
   looksLikeAnthropicApiKey,
 } from "../../lib/anthropic-byok";
+import {
+  EMPTY_PROVIDER_KEYS,
+  looksLikeProviderKey,
+  providerKeyHeaders,
+  selectMeshProvider,
+  type GenerationQuality,
+  type MeshProviderPreference,
+  type ProviderKeyId,
+  type ProviderKeys,
+} from "../../lib/provider-keys";
 import { displayModelName, formatUsd } from "../../lib/ai-cost";
 import { cadPointToViewer } from "../../lib/cad-coordinates";
 import { uiText, useUiLanguage, type UiLanguage } from "../../lib/ui-language";
@@ -144,7 +154,13 @@ export default function DesignStudio() {
   const [prompt, setPrompt] = useState("");
   // BYOK is deliberately memory-only: never localStorage/sessionStorage and
   // never persisted with a design. Reloading or closing the tab clears it.
-  const [anthropicApiKey, setAnthropicApiKey] = useState("");
+  const [providerKeys, setProviderKeys] = useState<ProviderKeys>(EMPTY_PROVIDER_KEYS);
+  const [meshProviderPreference, setMeshProviderPreference] = useState<MeshProviderPreference>("auto");
+  const [generationQuality, setGenerationQuality] = useState<GenerationQuality>("balanced");
+  const anthropicApiKey = providerKeys.anthropic;
+  const setProviderKey = useCallback((provider: ProviderKeyId, value: string) => {
+    setProviderKeys((current) => ({ ...current, [provider]: value }));
+  }, []);
   const [jewelryContext, setJewelryContext] = useState(JEWELRY_CONTEXTS[0]);
   const [jewelryBrief, setJewelryBrief] = useState("");
   const [jewelryReferenceLabel, setJewelryReferenceLabel] = useState("overall width");
@@ -517,6 +533,104 @@ export default function DesignStudio() {
       setCreateError(null);
       try {
         const targetProcess = processOverride ?? process;
+        if (!templateId) {
+          const routeResponse = await fetch(`${backendUrl}/route-intent`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...providerKeyHeaders(providerKeys, ["gemini"]),
+            },
+            body: JSON.stringify({
+              raw_text: creationPrompt,
+              source: "text",
+              mode_hint: null,
+              has_image: false,
+              preview_only: true,
+            }),
+          });
+          if (routeResponse.ok) {
+            const route = await routeResponse.json() as { mode?: string };
+            if (route.mode === "creative") {
+              const selectedProvider = selectMeshProvider(
+                creationPrompt,
+                meshProviderPreference,
+                providerKeys,
+              );
+              if (!selectedProvider) {
+                throw new Error(tx(
+                  "To jest model organiczny. Dodaj klucz Meshy lub Tripo w ustawieniach AI, aby wygenerować figurkę.",
+                  "This is an organic model. Add a Meshy or Tripo key in AI settings to generate it.",
+                ));
+              }
+              const generatedResponse = await fetch(`${backendUrl}/generate`, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  ...providerKeyHeaders(providerKeys, [selectedProvider]),
+                },
+                body: JSON.stringify({
+                  prompt: creationPrompt,
+                  provider: selectedProvider,
+                  quality_tier: generationQuality,
+                  input_type: "text",
+                }),
+              });
+              if (!generatedResponse.ok) {
+                const failure = await generatedResponse.json().catch(() => null);
+                throw new Error(failure?.detail || `Organic generation failed: ${generatedResponse.status}`);
+              }
+              const generated = await generatedResponse.json() as { job_id: string; glb_url: string; provider: string };
+              const processedResponse = await fetch(`${backendUrl}/process-model`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  glb_url: generated.glb_url,
+                  job_id: generated.job_id,
+                  provider: generated.provider,
+                  input_type: "text",
+                  prompt: creationPrompt,
+                  mode: "creative",
+                }),
+              });
+              if (!processedResponse.ok) {
+                const failure = await processedResponse.json().catch(() => null);
+                throw new Error(failure?.detail || `Mesh repair failed: ${processedResponse.status}`);
+              }
+              const processed = await processedResponse.json() as { stl_url: string };
+              const repairedStlUrl = resolveUrl(backendUrl, processed.stl_url);
+              if (!repairedStlUrl) throw new Error("The repaired STL artifact URL is missing.");
+              const stlResponse = await fetch(repairedStlUrl);
+              if (!stlResponse.ok) throw new Error("Could not load the repaired STL artifact.");
+              const form = new FormData();
+              form.append("model", new File([await stlResponse.blob()], "organic-model.stl", { type: "model/stl" }));
+              form.append("process", targetProcess);
+              form.append("name", creationPrompt.slice(0, 80) || "Organic model");
+              const importedResponse = await fetch(`${backendUrl}/design/import-cad`, { method: "POST", body: form });
+              if (!importedResponse.ok) {
+                const failure = await importedResponse.json().catch(() => null);
+                throw new Error(failure?.detail || `Import failed: ${importedResponse.status}`);
+              }
+              const imported = await importedResponse.json();
+              setDesign({
+                design_id: imported.design_id,
+                revision_id: imported.revision_id,
+                name: imported.name,
+                process: targetProcess,
+                script: imported.script,
+                parameters: imported.parameters ?? [],
+                features: imported.features ?? [],
+                latest_build: imported.initial_build ?? null,
+              });
+              setPrompt("");
+              if (typeof window !== "undefined") {
+                const url = new URL(window.location.href);
+                url.searchParams.set("design", imported.design_id);
+                window.history.replaceState({}, "", url.toString());
+              }
+              return true;
+            }
+          }
+        }
         const body: Record<string, unknown> = { process: targetProcess };
         if (templateId) body.template_id = templateId;
         else body.prompt = creationPrompt;
@@ -585,7 +699,7 @@ export default function DesignStudio() {
         setCreating(false);
       }
     },
-    [anthropicApiKey, backendUrl, process],
+    [anthropicApiKey, backendUrl, generationQuality, meshProviderPreference, process, providerKeys, tx],
   );
 
   const onImportCAD = useCallback(
@@ -764,7 +878,10 @@ export default function DesignStudio() {
         `${backendUrl}/design/jewelry/concepts`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...providerKeyHeaders(providerKeys, ["openai"]),
+          },
           body: JSON.stringify({
             prompt: brief,
             context: jewelryContext,
@@ -794,7 +911,7 @@ export default function DesignStudio() {
     } finally {
       setJewelryStatus("idle");
     }
-  }, [backendUrl, jewelryBrief, jewelryContext, jewelryProfileId, prompt]);
+  }, [backendUrl, jewelryBrief, jewelryContext, jewelryProfileId, prompt, providerKeys]);
 
   const onUseJewelryConcept = useCallback(async (concept: JewelryConcept) => {
     try {
@@ -978,9 +1095,13 @@ export default function DesignStudio() {
             </p>
           </div>
           <div style={headerActionsStyle}>
-            <AnthropicBillingControl
-              apiKey={anthropicApiKey}
-              onChange={setAnthropicApiKey}
+            <ProviderBillingControl
+              keys={providerKeys}
+              onKeyChange={setProviderKey}
+              meshProviderPreference={meshProviderPreference}
+              onMeshProviderPreferenceChange={setMeshProviderPreference}
+              generationQuality={generationQuality}
+              onGenerationQualityChange={setGenerationQuality}
               language={uiLanguage}
               platformBillingEnabled={platformBillingEnabled}
             />
@@ -1537,9 +1658,13 @@ export default function DesignStudio() {
           </p>
         </div>
         <div style={headerActionsStyle}>
-          <AnthropicBillingControl
-            apiKey={anthropicApiKey}
-            onChange={setAnthropicApiKey}
+          <ProviderBillingControl
+            keys={providerKeys}
+            onKeyChange={setProviderKey}
+            meshProviderPreference={meshProviderPreference}
+            onMeshProviderPreferenceChange={setMeshProviderPreference}
+            generationQuality={generationQuality}
+            onGenerationQualityChange={setGenerationQuality}
             language={uiLanguage}
             platformBillingEnabled={platformBillingEnabled}
             disabled={stream.state.status === "streaming"}
@@ -4139,21 +4264,36 @@ function PrintResultCard({
   );
 }
 
-function AnthropicBillingControl({
-  apiKey,
-  onChange,
+function ProviderBillingControl({
+  keys,
+  onKeyChange,
+  meshProviderPreference,
+  onMeshProviderPreferenceChange,
+  generationQuality,
+  onGenerationQualityChange,
   language,
   platformBillingEnabled,
   disabled = false,
 }: {
-  apiKey: string;
-  onChange: (value: string) => void;
+  keys: ProviderKeys;
+  onKeyChange: (provider: ProviderKeyId, value: string) => void;
+  meshProviderPreference: MeshProviderPreference;
+  onMeshProviderPreferenceChange: (value: MeshProviderPreference) => void;
+  generationQuality: GenerationQuality;
+  onGenerationQualityChange: (value: GenerationQuality) => void;
   language: UiLanguage;
   platformBillingEnabled: boolean;
   disabled?: boolean;
 }) {
-  const configured = Boolean(apiKey.trim());
-  const valid = !configured || looksLikeAnthropicApiKey(apiKey);
+  const providers: { id: ProviderKeyId; label: string; placeholder: string }[] = [
+    { id: "anthropic", label: "Anthropic · parametric CAD", placeholder: "sk-ant-…" },
+    { id: "openai", label: "OpenAI · concepts", placeholder: "sk-…" },
+    { id: "gemini", label: "Gemini · image/intent", placeholder: "AIza…" },
+    { id: "meshy", label: "Meshy · organic 3D", placeholder: "Meshy API key" },
+    { id: "tripo", label: "Tripo · figures/organic 3D", placeholder: "tsk_…" },
+  ];
+  const configuredCount = providers.filter(({ id }) => Boolean(keys[id].trim())).length;
+  const configured = configuredCount > 0;
   return (
     <details style={{ position: "relative" }}>
       <summary
@@ -4170,7 +4310,7 @@ function AnthropicBillingControl({
         }}
       >
         {configured
-          ? uiText(language, "AI: Twój klucz", "AI: Your key")
+          ? uiText(language, `AI: ${configuredCount} klucze`, `AI: ${configuredCount} keys`)
           : platformBillingEnabled
             ? uiText(language, "AI: konto Pulsai", "AI: Pulsai account")
             : uiText(language, "AI: dodaj swój klucz", "AI: add your key")}
@@ -4181,7 +4321,7 @@ function AnthropicBillingControl({
           zIndex: 40,
           right: 0,
           top: "calc(100% + 6px)",
-          width: 310,
+          width: 360,
           padding: 12,
           borderRadius: 10,
           border: "1px solid rgba(15,23,32,0.16)",
@@ -4194,56 +4334,75 @@ function AnthropicBillingControl({
         }}
       >
         <strong style={{ fontSize: 12 }}>
-          {platformBillingEnabled && !configured
-            ? uiText(language, "Claude w ramach dostępu Pulsai", "Claude through Pulsai access")
-            : uiText(language, "Rozliczaj Claude na swoim koncie", "Bill Claude to your account")}
+          {uiText(language, "Modele i klucze providerów", "Models and provider keys")}
         </strong>
-        <input
-          type="password"
-          name="pulsai-anthropic-byok"
-          autoComplete="new-password"
-          spellCheck={false}
-          value={apiKey}
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder="sk-ant-…"
-          aria-invalid={!valid}
-          style={{
-            width: "100%",
-            boxSizing: "border-box",
-            border: `1px solid ${valid ? "rgba(15,23,32,0.2)" : "#c2413b"}`,
-            borderRadius: 7,
-            padding: "8px 9px",
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-            fontSize: 11,
-          }}
-        />
+        {providers.map(({ id, label, placeholder }) => {
+          const valid = !keys[id].trim() || looksLikeProviderKey(id, keys[id]);
+          return (
+            <label key={id} style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10, fontWeight: 750 }}>
+              {label}
+              <input
+                type="password"
+                name={`pulsai-${id}-byok`}
+                autoComplete="new-password"
+                spellCheck={false}
+                value={keys[id]}
+                disabled={disabled}
+                onChange={(event) => onKeyChange(id, event.target.value)}
+                placeholder={placeholder}
+                aria-invalid={!valid}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  border: `1px solid ${valid ? "rgba(15,23,32,0.2)" : "#c2413b"}`,
+                  borderRadius: 7,
+                  padding: "8px 9px",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontSize: 11,
+                }}
+              />
+            </label>
+          );
+        })}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10, fontWeight: 750 }}>
+            {uiText(language, "Figurki", "Organic models")}
+            <select value={meshProviderPreference} disabled={disabled} onChange={(event) => onMeshProviderPreferenceChange(event.target.value as MeshProviderPreference)} style={compactInputStyle}>
+              <option value="auto">Auto</option>
+              <option value="meshy">Meshy</option>
+              <option value="tripo">Tripo</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10, fontWeight: 750 }}>
+            {uiText(language, "Jakość / koszt", "Quality / cost")}
+            <select value={generationQuality} disabled={disabled} onChange={(event) => onGenerationQualityChange(event.target.value as GenerationQuality)} style={compactInputStyle}>
+              <option value="draft">{uiText(language, "Szkic", "Draft")}</option>
+              <option value="balanced">{uiText(language, "Balans", "Balanced")}</option>
+              <option value="quality">{uiText(language, "Jakość", "Quality")}</option>
+            </select>
+          </label>
+        </div>
         <span style={{ fontSize: 10, lineHeight: 1.45, opacity: 0.68 }}>
           {platformBillingEnabled && !configured
             ? uiText(
                 language,
-                "To konto ma dostęp do klucza zarządzanego przez Pulsai. Sekret pozostaje na serwerze i nigdy nie trafia do przeglądarki.",
-                "This account can use a Pulsai-managed key. The secret stays on the server and never reaches the browser.",
+                "To konto ma dostęp do zarządzanego projektanta CAD. Własne klucze poniżej są używane tylko dla wskazanego zadania.",
+                "This account has access to a managed CAD designer. Your keys below are used only for the selected task.",
               )
             : uiText(
                 language,
-                "Klucz pozostaje tylko w pamięci tej karty i jest wysyłany przez HTTPS wyłącznie z żądaniem do projektanta. Nie zapisujemy go w projekcie ani przeglądarce.",
-                "The key stays only in this tab's memory and is sent over HTTPS only with a designer request. It is not stored with the project or in browser storage.",
+                "Klucze pozostają tylko w pamięci tej karty. Wysyłamy wyłącznie klucz providera potrzebnego do danego żądania; nie zapisujemy kluczy w koncie, projekcie ani przeglądarce.",
+                "Keys stay only in this tab's memory. Only the provider key needed for a request is sent; keys are not stored with your account, design, or browser.",
               )}
         </span>
-        {!valid ? (
-          <span role="alert" style={{ color: "#a62f29", fontSize: 10 }}>
-            {uiText(language, "Klucz powinien zaczynać się od sk-ant-.", "The key should start with sk-ant-.")}
-          </span>
-        ) : null}
         {configured ? (
           <button
             type="button"
             disabled={disabled}
-            onClick={() => onChange("")}
+            onClick={() => providers.forEach(({ id }) => onKeyChange(id, ""))}
             style={{ alignSelf: "flex-start", border: 0, background: "transparent", color: "#156b61", padding: 0, fontWeight: 800, cursor: "pointer" }}
           >
-            {uiText(language, "Wyczyść klucz", "Clear key")}
+            {uiText(language, "Wyczyść wszystkie klucze", "Clear all keys")}
           </button>
         ) : null}
       </div>
