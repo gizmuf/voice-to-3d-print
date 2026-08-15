@@ -495,7 +495,7 @@ def auth_session_delete_endpoint() -> Response:
     return response
 
 
-@app.get("/cloud-artifacts/{object_path:path}")
+@app.api_route("/cloud-artifacts/{object_path:path}", methods=["GET", "HEAD"])
 def private_cloud_artifact_endpoint(object_path: str):
     """Proxy an owner-authorized private GCS design or legacy job artifact."""
     normalized = object_path

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+
 from fastapi.testclient import TestClient
 
 import app as app_module
@@ -97,6 +99,21 @@ def test_google_auth_blocks_anonymous_and_cross_owner_access(tmp_path, monkeypat
     monkeypatch.setattr("services.codegen.cloud_store.load_design_payload", lambda *_: None)
     monkeypatch.setattr("services.codegen.cloud_store.list_design_payloads", lambda: [])
     monkeypatch.setattr("services.codegen.cloud_store.load_build_payload", lambda *_: None)
+    class _PrivateCloudBlob:
+        content_type = "model/gltf-binary"
+
+        def exists(self) -> bool:
+            return True
+
+        def open(self, mode: str):
+            assert mode == "rb"
+            return io.BytesIO(b"private-glb")
+
+    class _PrivateCloudBucket:
+        def blob(self, _object_path: str) -> _PrivateCloudBlob:
+            return _PrivateCloudBlob()
+
+    monkeypatch.setattr(app_module, "_get_bucket", lambda: _PrivateCloudBucket())
     app_module._cors_origins = ["https://3d.pulsai.app"]
     try:
         context = set_current_principal(Principal(subject="owner-one"))
@@ -153,6 +170,15 @@ def test_google_auth_blocks_anonymous_and_cross_owner_access(tmp_path, monkeypat
                 f"/cloud-artifacts/three-d/designs/{design.id}/model.glb",
                 headers={"authorization": "Bearer owner-two"},
             ).status_code == 404
+            cloud_artifact_url = (
+                f"/cloud-artifacts/three-d/designs/{design.id}/model.glb"
+            )
+            cloud_artifact_head = client.head(
+                cloud_artifact_url,
+                headers={"authorization": "Bearer owner-one"},
+            )
+            assert cloud_artifact_head.status_code == 200
+            assert cloud_artifact_head.content == b""
             other_list = client.get("/design", headers={"authorization": "Bearer owner-two"})
             assert other_list.status_code == 200
             assert other_list.json()["designs"] == []

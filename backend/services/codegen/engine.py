@@ -139,16 +139,21 @@ def design_script_is_trusted(design: Design) -> bool:
     # Migrate legacy trust only for exact built-in seed bytes.  Scripts changed
     # by the former trust-propagation policy must not remain executable merely
     # because their old digest still matches.
-    template_id = str(design.metadata.get("template_id") or "")
-    if not template_id:
-        return False
-    try:
-        from services.codegen.templates import get_seed_script
+    from services.codegen.templates import get_seed_script, list_template_ids
 
-        _, reviewed_script = get_seed_script(template_id)
-    except (KeyError, ValueError):
-        return False
-    return secrets.compare_digest(reviewed_script, design.script)
+    template_id = str(design.metadata.get("template_id") or "")
+    candidate_ids = [template_id] if template_id else list_template_ids()
+    for candidate_id in candidate_ids:
+        try:
+            _, reviewed_script = get_seed_script(candidate_id)
+        except (KeyError, ValueError):
+            continue
+        if secrets.compare_digest(
+            reviewed_script.encode("utf-8"),
+            design.script.encode("utf-8"),
+        ):
+            return True
+    return False
 
 
 class DesignBuildError(RuntimeError):

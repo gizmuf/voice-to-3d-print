@@ -229,6 +229,21 @@ def test_legacy_exact_builtin_template_can_migrate_to_current_policy() -> None:
     assert design_script_is_trusted(design) is True
 
 
+def test_legacy_exact_builtin_template_can_migrate_without_template_id() -> None:
+    _, script = get_seed_script("simple_box")
+    legacy_metadata = trusted_script_metadata(script)
+    legacy_metadata.pop("trusted_script_policy")
+    design = Design(
+        id="legacy-simple-box-without-template-id",
+        revision_id="rev-1",
+        name="Legacy simple box",
+        script=script,
+        metadata=legacy_metadata,
+    )
+
+    assert design_script_is_trusted(design) is True
+
+
 def test_trusted_replace_changes_geometry_and_rebuilds_current_preview(
     monkeypatch,
     tmp_path: Path,
@@ -240,6 +255,8 @@ def test_trusted_replace_changes_geometry_and_rebuilds_current_preview(
     monkeypatch.setattr("services.ai.tools_v2.replace_feature.save_design", lambda *_: None)
     monkeypatch.setattr("services.ai.tools_v2.run_build.save_build", lambda *_: None)
     _, script = get_seed_script("simple_box")
+    legacy_metadata = trusted_script_metadata(script)
+    legacy_metadata.pop("trusted_script_policy")
     design = Design(
         id="olga-cage-leg",
         revision_id="rev-1",
@@ -255,7 +272,9 @@ def test_trusted_replace_changes_geometry_and_rebuilds_current_preview(
         ],
         features=[NamedFeature(name="hollow", source="")],
         process="fdm",
-        metadata={**trusted_script_metadata(script), "template_id": "simple_box"},
+        # Matches Olga's pre-migration Firestore document: an exact reviewed
+        # seed hash, but no policy marker and no template_id.
+        metadata=legacy_metadata,
     )
     ctx = DesignContext(
         design_id=design.id,
