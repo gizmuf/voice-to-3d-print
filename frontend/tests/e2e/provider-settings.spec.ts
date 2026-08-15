@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-test("provider settings accept multiple memory-only keys and routing choices", async ({ page }) => {
+test("provider settings explicitly save encrypted account keys and routing choices", async ({ page }) => {
+  const storedKeys = { anthropic: false, openai: false, gemini: false, meshy: false, tripo: false };
   await page.route("http://localhost:8000/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     let body: unknown = {};
@@ -15,8 +16,16 @@ test("provider settings accept multiple memory-only keys and routing choices", a
         meshy: { platform_access: false },
         tripo: { platform_access: false },
       },
-      keys_persisted: false,
+      keys_persisted: true,
+      stored_keys: storedKeys,
     };
+    else if (path === "/account/provider-keys" && route.request().method() === "PATCH") {
+      const payload = route.request().postDataJSON() as { keys: Record<string, string> };
+      expect(payload.keys).toEqual({ anthropic: "sk-ant-example", openai: "sk-example" });
+      storedKeys.anthropic = true;
+      storedKeys.openai = true;
+      body = { ok: true, stored_keys: storedKeys };
+    }
     else if (path === "/design/templates") body = { templates: [] };
     else if (path === "/design/recent") body = { designs: [] };
     else if (path === "/printers") body = { profiles: [], default_id: null };
@@ -33,11 +42,17 @@ test("provider settings accept multiple memory-only keys and routing choices", a
 
   await expect(page.locator('input[name="pulsai-anthropic-byok"]')).toHaveValue("sk-ant-example");
   await expect(page.locator('input[name="pulsai-openai-byok"]')).toHaveValue("sk-example");
-  await expect(page.getByTestId("provider-access-anthropic")).toHaveText("Your key: added");
-  await expect(page.getByTestId("provider-access-openai")).toHaveText("Your key: added");
+  await expect(page.getByTestId("provider-access-anthropic")).toHaveText("Ready to save");
+  await expect(page.getByTestId("provider-access-openai")).toHaveText("Ready to save");
   await expect(page.getByTestId("provider-access-tripo")).toHaveText("No key added");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status")).toHaveText("Saved securely");
+  await expect(page.locator('input[name="pulsai-anthropic-byok"]')).toHaveValue("");
+  await expect(page.locator('input[name="pulsai-openai-byok"]')).toHaveValue("");
+  await expect(page.getByTestId("provider-access-anthropic")).toHaveText("Your key: saved");
+  await expect(page.getByTestId("provider-access-openai")).toHaveText("Your key: saved");
   await expect(page.locator("summary").filter({ hasText: /AI:/ })).toContainText("2 own keys");
-  await expect(page.getByText(/Keys stay only in this tab's memory/)).toBeVisible();
+  await expect(page.getByText(/Saved keys are encrypted for your account/)).toBeVisible();
 });
 
 test("account-funded provider is visible without exposing a key", async ({ page }) => {

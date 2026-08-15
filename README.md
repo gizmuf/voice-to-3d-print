@@ -200,10 +200,12 @@ never a dependency or credential source.
 Transient 429/5xx/529 failures use bounded exponential backoff with jitter,
 `Retry-After`, a circuit breaker, and `ANTHROPIC_FALLBACK_MODEL`. The browser
 can optionally send the customer's own Anthropic key for a CAD turn. The studio
-also accepts request-scoped OpenAI, Gemini, Meshy, and Tripo keys for concept,
-intent/image, and organic-mesh tasks. Keys stay in the current tab's memory;
-only the selected provider key is sent, and it is not persisted. BYOK never
-silently falls back to a Pulsai platform key.
+also accepts OpenAI, Gemini, Meshy, and Tripo keys for concept, intent/image,
+and organic-mesh tasks. Unsaved drafts stay in the current tab's memory. An
+authenticated user may explicitly save them; the backend stores only
+account-bound encrypted ciphertext and never returns the values. Only the
+selected provider key is sent. BYOK never silently falls back to a Pulsai
+platform key.
 
 See `docs/SECURITY_AND_SECRETS.md`, `docs/RUNBOOK_LINUX.md`, and
 `docs/PRODUCTION_RUNBOOK.md` for Cloud Run Secret Manager verification, the

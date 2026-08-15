@@ -13,6 +13,7 @@ import {
   looksLikeAnthropicApiKey,
 } from "../../lib/anthropic-byok";
 import {
+  EMPTY_PROVIDER_KEY_PRESENCE,
   EMPTY_PROVIDER_KEYS,
   looksLikeProviderKey,
   providerKeyHeaders,
@@ -20,6 +21,7 @@ import {
   type GenerationQuality,
   type MeshProviderPreference,
   type ProviderKeyId,
+  type ProviderKeyPresence,
   type ProviderKeys,
 } from "../../lib/provider-keys";
 import { displayModelName, formatUsd } from "../../lib/ai-cost";
@@ -142,9 +144,6 @@ export default function DesignStudio() {
   );
   const health = useHealth();
   const accountAiSettings = useAccountAiSettings();
-  const platformBillingEnabled = Boolean(
-    health?.platform_ai_spend_enabled || accountAiSettings?.anthropic.platform_access,
-  );
   const providerPlatformAccess = useMemo<Partial<Record<ProviderKeyId, boolean>>>(() => {
     const providerAccess = accountAiSettings?.providers ?? {};
     return {
@@ -166,15 +165,81 @@ export default function DesignStudio() {
   const [openingDeepLink, setOpeningDeepLink] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
-  // BYOK is deliberately memory-only: never localStorage/sessionStorage and
-  // never persisted with a design. Reloading or closing the tab clears it.
+  // Unsaved BYOK drafts stay only in memory. Explicit Save encrypts them on
+  // the backend under the authenticated account; values are never read back.
   const [providerKeys, setProviderKeys] = useState<ProviderKeys>(EMPTY_PROVIDER_KEYS);
+  const [storedProviderKeys, setStoredProviderKeys] = useState<ProviderKeyPresence>(
+    EMPTY_PROVIDER_KEY_PRESENCE,
+  );
+  const [providerKeySaveState, setProviderKeySaveState] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
   const [meshProviderPreference, setMeshProviderPreference] = useState<MeshProviderPreference>("auto");
   const [generationQuality, setGenerationQuality] = useState<GenerationQuality>("balanced");
   const anthropicApiKey = providerKeys.anthropic;
   const setProviderKey = useCallback((provider: ProviderKeyId, value: string) => {
     setProviderKeys((current) => ({ ...current, [provider]: value }));
+    setProviderKeySaveState("idle");
   }, []);
+  useEffect(() => {
+    if (!accountAiSettings?.stored_keys) return;
+    setStoredProviderKeys({
+      ...EMPTY_PROVIDER_KEY_PRESENCE,
+      ...accountAiSettings.stored_keys,
+    });
+  }, [accountAiSettings?.stored_keys]);
+  const saveProviderKeys = useCallback(async () => {
+    const updates = Object.fromEntries(
+      (Object.keys(providerKeys) as ProviderKeyId[])
+        .map((provider) => [provider, providerKeys[provider].trim()] as const)
+        .filter(([, value]) => Boolean(value)),
+    );
+    if (!Object.keys(updates).length) return;
+    if (
+      Object.entries(updates).some(
+        ([provider, value]) => !looksLikeProviderKey(provider as ProviderKeyId, value),
+      )
+    ) {
+      setProviderKeySaveState("error");
+      return;
+    }
+    setProviderKeySaveState("saving");
+    try {
+      const response = await fetch(`${backendUrl}/account/provider-keys`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ keys: updates }),
+      });
+      if (!response.ok) throw new Error(`save failed: ${response.status}`);
+      const payload = await response.json() as { stored_keys?: Partial<ProviderKeyPresence> };
+      setStoredProviderKeys({
+        ...EMPTY_PROVIDER_KEY_PRESENCE,
+        ...(payload.stored_keys ?? {}),
+      });
+      setProviderKeys({ ...EMPTY_PROVIDER_KEYS });
+      setProviderKeySaveState("saved");
+    } catch {
+      setProviderKeySaveState("error");
+    }
+  }, [backendUrl, providerKeys]);
+  const clearProviderKeys = useCallback(async () => {
+    if (!window.confirm(tx(
+      "Usunąć wszystkie zapisane klucze providerów z Twojego konta?",
+      "Remove all saved provider keys from your account?",
+    ))) return;
+    setProviderKeySaveState("saving");
+    try {
+      const response = await fetch(`${backendUrl}/account/provider-keys`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error(`clear failed: ${response.status}`);
+      setProviderKeys({ ...EMPTY_PROVIDER_KEYS });
+      setStoredProviderKeys({ ...EMPTY_PROVIDER_KEY_PRESENCE });
+      setProviderKeySaveState("idle");
+    } catch {
+      setProviderKeySaveState("error");
+    }
+  }, [backendUrl, tx]);
   const [jewelryContext, setJewelryContext] = useState(JEWELRY_CONTEXTS[0]);
   const [jewelryBrief, setJewelryBrief] = useState("");
   const [jewelryReferenceLabel, setJewelryReferenceLabel] = useState("overall width");
@@ -569,6 +634,7 @@ export default function DesignStudio() {
                 creationPrompt,
                 meshProviderPreference,
                 providerKeys,
+                storedProviderKeys,
               );
               if (!selectedProvider) {
                 throw new Error(tx(
@@ -713,7 +779,7 @@ export default function DesignStudio() {
         setCreating(false);
       }
     },
-    [anthropicApiKey, backendUrl, generationQuality, meshProviderPreference, process, providerKeys, tx],
+    [anthropicApiKey, backendUrl, generationQuality, meshProviderPreference, process, providerKeys, storedProviderKeys, tx],
   );
 
   const onImportCAD = useCallback(
@@ -1111,13 +1177,16 @@ export default function DesignStudio() {
           <div style={headerActionsStyle}>
             <ProviderBillingControl
               keys={providerKeys}
+              storedKeys={storedProviderKeys}
               onKeyChange={setProviderKey}
+              onSave={saveProviderKeys}
+              onClear={clearProviderKeys}
+              saveState={providerKeySaveState}
               meshProviderPreference={meshProviderPreference}
               onMeshProviderPreferenceChange={setMeshProviderPreference}
               generationQuality={generationQuality}
               onGenerationQualityChange={setGenerationQuality}
               language={uiLanguage}
-              platformBillingEnabled={platformBillingEnabled}
               providerPlatformAccess={providerPlatformAccess}
             />
             <LanguageSwitcher language={uiLanguage} onChange={setUiLanguage} />
@@ -1675,13 +1744,16 @@ export default function DesignStudio() {
         <div style={headerActionsStyle}>
           <ProviderBillingControl
             keys={providerKeys}
+            storedKeys={storedProviderKeys}
             onKeyChange={setProviderKey}
+            onSave={saveProviderKeys}
+            onClear={clearProviderKeys}
+            saveState={providerKeySaveState}
             meshProviderPreference={meshProviderPreference}
             onMeshProviderPreferenceChange={setMeshProviderPreference}
             generationQuality={generationQuality}
             onGenerationQualityChange={setGenerationQuality}
             language={uiLanguage}
-            platformBillingEnabled={platformBillingEnabled}
             providerPlatformAccess={providerPlatformAccess}
             disabled={stream.state.status === "streaming"}
           />
@@ -2203,7 +2275,9 @@ export default function DesignStudio() {
           <DesignChatInput
             disabled={stream.state.status === "streaming"}
             byokConfigured={
-              looksLikeAnthropicApiKey(anthropicApiKey) || platformBillingEnabled
+              looksLikeAnthropicApiKey(anthropicApiKey)
+              || storedProviderKeys.anthropic
+              || Boolean(providerPlatformAccess.anthropic)
             }
             selectedFeature={selectedFeature}
             parameters={design.parameters}
@@ -4282,24 +4356,30 @@ function PrintResultCard({
 
 function ProviderBillingControl({
   keys,
+  storedKeys,
   onKeyChange,
+  onSave,
+  onClear,
+  saveState,
   meshProviderPreference,
   onMeshProviderPreferenceChange,
   generationQuality,
   onGenerationQualityChange,
   language,
-  platformBillingEnabled,
   providerPlatformAccess,
   disabled = false,
 }: {
   keys: ProviderKeys;
+  storedKeys: ProviderKeyPresence;
   onKeyChange: (provider: ProviderKeyId, value: string) => void;
+  onSave: () => Promise<void>;
+  onClear: () => Promise<void>;
+  saveState: "idle" | "saving" | "saved" | "error";
   meshProviderPreference: MeshProviderPreference;
   onMeshProviderPreferenceChange: (value: MeshProviderPreference) => void;
   generationQuality: GenerationQuality;
   onGenerationQualityChange: (value: GenerationQuality) => void;
   language: UiLanguage;
-  platformBillingEnabled: boolean;
   providerPlatformAccess: Partial<Record<ProviderKeyId, boolean>>;
   disabled?: boolean;
 }) {
@@ -4310,8 +4390,15 @@ function ProviderBillingControl({
     { id: "meshy", label: "Meshy · organic 3D", placeholder: "Meshy API key" },
     { id: "tripo", label: "Tripo · figures/organic 3D", placeholder: "tsk_…" },
   ];
-  const configuredCount = providers.filter(({ id }) => Boolean(keys[id].trim())).length;
+  const configuredCount = providers.filter(
+    ({ id }) => Boolean(keys[id].trim()) || storedKeys[id],
+  ).length;
   const configured = configuredCount > 0;
+  const hasStored = providers.some(({ id }) => storedKeys[id]);
+  const hasDraft = providers.some(({ id }) => Boolean(keys[id].trim()));
+  const draftsValid = providers.every(
+    ({ id }) => !keys[id].trim() || looksLikeProviderKey(id, keys[id]),
+  );
   const managedCount = providers.filter(({ id }) => providerPlatformAccess[id]).length;
   return (
     <details style={{ position: "relative" }}>
@@ -4359,7 +4446,9 @@ function ProviderBillingControl({
         </strong>
         {providers.map(({ id, label, placeholder }) => {
           const valid = !keys[id].trim() || looksLikeProviderKey(id, keys[id]);
-          const ownKeyPresent = Boolean(keys[id].trim());
+          const draftPresent = Boolean(keys[id].trim());
+          const storedKeyPresent = storedKeys[id];
+          const ownKeyPresent = draftPresent || storedKeyPresent;
           const managedAccess = Boolean(providerPlatformAccess[id]);
           return (
             <label key={id} style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 10, fontWeight: 750 }}>
@@ -4383,7 +4472,11 @@ function ProviderBillingControl({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {managedAccess && ownKeyPresent && valid
+                  {draftPresent && valid
+                    ? uiText(language, "Gotowy do zapisu", "Ready to save")
+                    : storedKeyPresent
+                      ? uiText(language, "Twój klucz: zapisany", "Your key: saved")
+                    : managedAccess && ownKeyPresent && valid
                     ? uiText(language, "Pulsai + Twój klucz", "Pulsai + your key")
                     : managedAccess
                       ? uiText(language, "Pulsai: aktywny", "Pulsai: active")
@@ -4402,7 +4495,9 @@ function ProviderBillingControl({
                 value={keys[id]}
                 disabled={disabled}
                 onChange={(event) => onKeyChange(id, event.target.value)}
-                placeholder={managedAccess
+                placeholder={storedKeyPresent
+                  ? uiText(language, "Zapisany — wpisz nowy, aby zastąpić", "Saved — enter a new key to replace")
+                  : managedAccess
                   ? uiText(language, "Opcjonalnie: użyj własnego klucza", "Optional: use your own key")
                   : placeholder}
                 aria-invalid={!valid}
@@ -4451,26 +4546,41 @@ function ProviderBillingControl({
           </label>
         </div>
         <span style={{ fontSize: 10, lineHeight: 1.45, opacity: 0.68 }}>
-          {platformBillingEnabled
-            ? uiText(
-                language,
-                "Zielony status „Pulsai: aktywny” oznacza dostęp opłacany przez Pulsai dla tego konta. Własny klucz jest opcjonalnym nadpisaniem i pozostaje tylko w pamięci tej karty.",
-                "A green “Pulsai: active” status means this account has Pulsai-funded access. Your own key is an optional override and stays only in this tab's memory.",
-              )
-            : uiText(
-                language,
-                "Klucze pozostają tylko w pamięci tej karty. Wysyłamy wyłącznie klucz providera potrzebnego do danego żądania; nie zapisujemy kluczy w koncie, projekcie ani przeglądarce.",
-                "Keys stay only in this tab's memory. Only the provider key needed for a request is sent; keys are not stored with your account, design, or browser.",
-              )}
+          {uiText(
+            language,
+            "Do kliknięcia „Zapisz zmiany” klucz pozostaje tylko w pamięci tej karty. Po zapisaniu jest szyfrowany dla Twojego konta i nigdy nie jest ponownie wyświetlany. Wysyłamy go wyłącznie do wybranego providera.",
+            "Until you click “Save changes”, a key stays only in this tab's memory. Saved keys are encrypted for your account and never displayed again. They are sent only to the selected provider.",
+          )}
         </span>
-        {configured ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            disabled={disabled || !hasDraft || !draftsValid || saveState === "saving"}
+            onClick={() => void onSave()}
+            style={{ border: 0, borderRadius: 7, background: "#156b61", color: "#fff", padding: "7px 10px", fontWeight: 800, cursor: "pointer" }}
+          >
+            {saveState === "saving"
+              ? uiText(language, "Zapisuję…", "Saving…")
+              : uiText(language, "Zapisz zmiany", "Save changes")}
+          </button>
+          {saveState === "saved" ? (
+            <span role="status" style={{ color: "#156b61", fontSize: 10, fontWeight: 800 }}>
+              {uiText(language, "Zapisano bezpiecznie", "Saved securely")}
+            </span>
+          ) : saveState === "error" ? (
+            <span role="alert" style={{ color: "#a73530", fontSize: 10, fontWeight: 800 }}>
+              {uiText(language, "Nie udało się zapisać", "Could not save")}
+            </span>
+          ) : null}
+        </div>
+        {hasStored ? (
           <button
             type="button"
             disabled={disabled}
-            onClick={() => providers.forEach(({ id }) => onKeyChange(id, ""))}
+            onClick={() => void onClear()}
             style={{ alignSelf: "flex-start", border: 0, background: "transparent", color: "#156b61", padding: 0, fontWeight: 800, cursor: "pointer" }}
           >
-            {uiText(language, "Wyczyść wszystkie klucze", "Clear all keys")}
+            {uiText(language, "Usuń wszystkie zapisane klucze", "Remove all saved keys")}
           </button>
         ) : null}
       </div>

@@ -20,6 +20,7 @@ export type AccountAiSettings = {
     platform_access: boolean;
   }>>;
   keys_persisted: boolean;
+  stored_keys?: Partial<Record<"anthropic" | "openai" | "gemini" | "meshy" | "tripo", boolean>>;
 };
 
 let cached: HealthSnapshot | null = null;

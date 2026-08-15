@@ -8,6 +8,7 @@ export const PROVIDER_KEY_HEADERS = {
 
 export type ProviderKeyId = keyof typeof PROVIDER_KEY_HEADERS;
 export type ProviderKeys = Record<ProviderKeyId, string>;
+export type ProviderKeyPresence = Record<ProviderKeyId, boolean>;
 export type MeshProviderPreference = "auto" | "meshy" | "tripo";
 export type GenerationQuality = "draft" | "balanced" | "quality";
 
@@ -17,6 +18,14 @@ export const EMPTY_PROVIDER_KEYS: ProviderKeys = {
   gemini: "",
   meshy: "",
   tripo: "",
+};
+
+export const EMPTY_PROVIDER_KEY_PRESENCE: ProviderKeyPresence = {
+  anthropic: false,
+  openai: false,
+  gemini: false,
+  meshy: false,
+  tripo: false,
 };
 
 export function providerKeyHeaders(
@@ -46,9 +55,10 @@ export function selectMeshProvider(
   prompt: string,
   preference: MeshProviderPreference,
   keys: Pick<ProviderKeys, "meshy" | "tripo">,
+  stored: Partial<Pick<ProviderKeyPresence, "meshy" | "tripo">> = {},
 ): "meshy" | "tripo" | null {
-  const meshy = looksLikeProviderKey("meshy", keys.meshy);
-  const tripo = looksLikeProviderKey("tripo", keys.tripo);
+  const meshy = looksLikeProviderKey("meshy", keys.meshy) || Boolean(stored.meshy);
+  const tripo = looksLikeProviderKey("tripo", keys.tripo) || Boolean(stored.tripo);
   if (preference === "meshy") return meshy ? "meshy" : null;
   if (preference === "tripo") return tripo ? "tripo" : null;
   if (meshy && tripo) return TRIPO_FRIENDLY.test(prompt) ? "tripo" : "meshy";

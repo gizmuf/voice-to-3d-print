@@ -26,3 +26,15 @@ test("routes organic characters to Tripo when both keys exist", () => {
   assert.equal(selectMeshProvider("decorative vase", "auto", keys), "meshy");
   assert.equal(selectMeshProvider("anything", "meshy", keys), "meshy");
 });
+
+test("routes with account-stored organic provider keys without exposing values", () => {
+  const empty = { meshy: "", tripo: "" };
+  assert.equal(
+    selectMeshProvider("figurka motoparalotniarza", "auto", empty, { tripo: true }),
+    "tripo",
+  );
+  assert.equal(
+    selectMeshProvider("decorative vase", "auto", empty, { meshy: true }),
+    "meshy",
+  );
+});

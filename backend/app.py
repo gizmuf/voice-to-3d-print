@@ -20,15 +20,44 @@ _OPENAI_BYOK_HEADER = "x-pulsai-openai-key"
 _GEMINI_BYOK_HEADER = "x-pulsai-gemini-key"
 _MESHY_BYOK_HEADER = "x-pulsai-meshy-key"
 _TRIPO_BYOK_HEADER = "x-pulsai-tripo-key"
+_PROVIDER_BYOK_HEADERS = {
+    _ANTHROPIC_BYOK_HEADER: "anthropic",
+    _OPENAI_BYOK_HEADER: "openai",
+    _GEMINI_BYOK_HEADER: "gemini",
+    _MESHY_BYOK_HEADER: "meshy",
+    _TRIPO_BYOK_HEADER: "tripo",
+}
+
+
+def _provider_key_format_is_valid(provider: str, value: str) -> bool:
+    if not value or len(value) > 1024 or any(character.isspace() for character in value):
+        return False
+    if provider == "anthropic":
+        return value.startswith("sk-ant-")
+    if provider == "openai":
+        return value.startswith("sk-")
+    if provider == "gemini":
+        return value.startswith("AIza")
+    return len(value) >= 16
 
 
 def _request_provider_key(request: Request, header: str) -> str | None:
     value = (request.headers.get(header) or "").strip()
-    if not value:
-        return None
-    if len(value) > 1024 or any(character.isspace() for character in value):
+    provider = _PROVIDER_BYOK_HEADERS[header]
+    if value and not _provider_key_format_is_valid(provider, value):
         raise HTTPException(status_code=400, detail="Invalid provider API key format.")
-    return value
+    if value:
+        return value
+
+    principal = getattr(request.state, "principal", None)
+    owner_id = str(getattr(principal, "subject", "") or "")
+    if not owner_id:
+        return None
+    stored = getattr(request.state, "stored_provider_keys", None)
+    if stored is None:
+        stored = provider_key_store.load_provider_keys(owner_id)
+        request.state.stored_provider_keys = stored
+    return stored.get(provider)
 
 
 def _validate_design_id(design_id: str) -> str:
@@ -52,6 +81,7 @@ from services.editability import assess as assess_editability
 from services.export_bundle import export_bundle as export_bundle_service
 from services.export_bundle import export_dry_run as export_bundle_dry_run
 from services.printer_profiles import list_profiles as list_printer_profiles
+from services import provider_key_store
 from services.codegen.engine import (
     DesignBuildError,
     audit_then_run,
@@ -420,6 +450,13 @@ def account_ai_settings_endpoint(request: Request) -> dict:
         "meshy": bool(settings.allow_platform_ai_spend and settings.meshy_api_key),
         "tripo": bool(settings.allow_platform_ai_spend and settings.tripo_api_key),
     }
+    principal = getattr(request.state, "principal", None)
+    owner_id = str(getattr(principal, "subject", "") or "")
+    stored_keys = (
+        provider_key_store.provider_key_presence(owner_id)
+        if owner_id and provider_key_store.persistence_configured()
+        else {provider: False for provider in provider_key_store.PROVIDERS}
+    )
     return {
         "anthropic": {
             "platform_access": anthropic_access,
@@ -432,8 +469,54 @@ def account_ai_settings_endpoint(request: Request) -> dict:
             provider: {"platform_access": allowed}
             for provider, allowed in provider_access.items()
         },
-        "keys_persisted": False,
+        "keys_persisted": provider_key_store.persistence_configured(),
+        "stored_keys": stored_keys,
     }
+
+
+class ProviderKeyPatchRequest(BaseModel):
+    keys: dict[str, str] = Field(default_factory=dict)
+
+
+@app.patch("/account/provider-keys")
+def account_provider_keys_patch_endpoint(
+    payload: ProviderKeyPatchRequest,
+    request: Request,
+) -> dict:
+    principal = getattr(request.state, "principal", None)
+    owner_id = str(getattr(principal, "subject", "") or "")
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="Google Login required.")
+    updates: dict[str, str] = {}
+    for provider, raw_value in payload.keys.items():
+        value = raw_value.strip()
+        if provider not in provider_key_store.PROVIDERS:
+            raise HTTPException(status_code=400, detail="Unsupported provider.")
+        if not _provider_key_format_is_valid(provider, value):
+            raise HTTPException(status_code=400, detail="Invalid provider API key format.")
+        updates[provider] = value
+    if not updates:
+        raise HTTPException(status_code=400, detail="Add at least one provider key.")
+    try:
+        presence = provider_key_store.store_provider_keys(owner_id, updates)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Secure key storage is unavailable.") from exc
+    request.state.stored_provider_keys = provider_key_store.load_provider_keys(owner_id)
+    return {"ok": True, "stored_keys": presence}
+
+
+@app.delete("/account/provider-keys", status_code=204)
+def account_provider_keys_delete_endpoint(request: Request) -> Response:
+    principal = getattr(request.state, "principal", None)
+    owner_id = str(getattr(principal, "subject", "") or "")
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="Google Login required.")
+    try:
+        provider_key_store.clear_provider_keys(owner_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Secure key storage is unavailable.") from exc
+    request.state.stored_provider_keys = {}
+    return Response(status_code=204)
 
 
 @app.post("/auth/session", status_code=204)
@@ -2154,7 +2237,7 @@ async def workspace_chat_endpoint(
             printer_profile_id=request.printer_profile_id,
             selected_feature_id=request.selected_feature_id,
             selected_feature_label=request.selected_feature_label,
-            anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+            anthropic_api_key=_request_provider_key(http_request, _ANTHROPIC_BYOK_HEADER),
             allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
         )
         return StreamingResponse(
@@ -2168,7 +2251,7 @@ async def workspace_chat_endpoint(
         workspace_id,
         request.message,
         printer_profile_id=request.printer_profile_id,
-        anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+        anthropic_api_key=_request_provider_key(http_request, _ANTHROPIC_BYOK_HEADER),
         allow_platform_billing=_anthropic_platform_billing_allowed(http_request),
     )
     return StreamingResponse(
@@ -2335,7 +2418,7 @@ def design_create_endpoint(
     request: DesignCreateRequest,
     http_request: Request,
 ) -> DesignCreateResponse:
-    request_byok = http_request.headers.get(_ANTHROPIC_BYOK_HEADER)
+    request_byok = _request_provider_key(http_request, _ANTHROPIC_BYOK_HEADER)
     template_id, name, script = _seed_design_record(
         request,
         anthropic_available=bool(
@@ -3204,7 +3287,7 @@ async def design_chat_endpoint(
         selected_feature_id=request.selected_feature_id,
         selected_feature_label=request.selected_feature_label,
         selected_topology_ref=request.selected_topology_ref,
-        anthropic_api_key=http_request.headers.get(_ANTHROPIC_BYOK_HEADER),
+        anthropic_api_key=_request_provider_key(http_request, _ANTHROPIC_BYOK_HEADER),
         reference_image_base64=request.reference_image_base64,
         reference_image_media_type=image_media_type,
         reference_image_name=request.reference_image_name,

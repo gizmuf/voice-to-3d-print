@@ -12,7 +12,7 @@ export default function PrivacyPage() {
       <article style={cardStyle}>
         <p style={eyebrowStyle}>PULSAI 3D</p>
         <h1>Privacy Policy</h1>
-        <p><strong>Effective date:</strong> 14 August 2026</p>
+        <p><strong>Effective date:</strong> 16 August 2026</p>
 
         <h2>What we process</h2>
         <p>
@@ -32,10 +32,12 @@ export default function PrivacyPage() {
 
         <h2>Your provider API keys</h2>
         <p>
-          If you provide Anthropic, OpenAI, Gemini, Meshy, or Tripo API keys, the web app keeps them
-          in browser memory and sends only the key needed for the requested task to the backend over
-          HTTPS. Pulsai 3D is designed not to persist those keys in account or project records,
-          browser storage, or logs. Closing or reloading the page clears them from browser memory.
+          Unsaved Anthropic, OpenAI, Gemini, Meshy, or Tripo API keys stay in browser memory. If you
+          explicitly choose Save, Pulsai 3D encrypts the key before storing it in an account-scoped
+          Google Cloud record. Saved values are never returned to the browser or displayed again;
+          the service decrypts only the provider key required for the requested task. Keys are not
+          stored in projects, conversations, browser storage, or application logs. You can remove all
+          saved provider keys from AI settings.
         </p>
 
         <h2>Sharing and retention</h2>

@@ -37,6 +37,8 @@ done
   `https://3d.pulsai.app`
 - `CORS_ORIGINS=https://3d.pulsai.app`
 - `PULSAI_ALLOW_PLATFORM_AI_SPEND=false`
+- `PULSAI_BYOK_ENCRYPTION_KEY` is a Secret Manager reference containing a
+  dedicated Fernet key used only for account-stored customer provider keys
 - `ANTHROPIC_PLATFORM_EMAIL_ALLOWLIST` is a Secret Manager reference containing
   only explicitly approved Google account emails; it never enables other paid
   providers
@@ -99,8 +101,10 @@ Verify the tagged candidate URL with an authenticated test account. At minimum:
 3. CAD creation, deterministic edit, changed geometry hash and current preview;
 4. revision persistence and private artifact download;
 5. manufacturability check, slicing and ZIP/STL/G-code download;
-6. an invalid customer key and an intentionally unavailable provider;
-7. Cloud Logging errors and Secret Manager source verification.
+6. save, reload, use, replace, and delete a customer key; verify that API
+   responses and logs never contain its value;
+7. an invalid customer key and an intentionally unavailable provider;
+8. Cloud Logging errors and Secret Manager source verification.
 
 Only then move traffic, one service at a time, and re-run public-domain smoke
 tests. Keep the previous revision available for immediate rollback.

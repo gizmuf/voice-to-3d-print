@@ -29,11 +29,14 @@ recover a user's project; use an explicit owner migration instead.
   allowlisted users receive only an account entitlement flag.
 - VPS services receive credentials through `*_FILE` paths backed by systemd
   credentials, Docker secrets, or another approved secret mount.
-- Customer Anthropic, OpenAI, Gemini, Meshy, and Tripo keys are request-scoped
-  BYOK data. They are held in the browser tab's memory and sent over HTTPS in a
-  dedicated `X-Pulsai-<Provider>-Key` header only when that provider is needed.
-  They must never be logged, persisted, copied into a design, or silently
-  replaced with a platform key.
+- Unsaved customer Anthropic, OpenAI, Gemini, Meshy, and Tripo key drafts stay
+  only in the browser tab's memory. An authenticated user may explicitly save a
+  key to their account; the backend encrypts it with Fernet before writing it to
+  the account-scoped `three_d_provider_keys` Firestore collection. The
+  `PULSAI_BYOK_ENCRYPTION_KEY` encryption key must be a Secret Manager reference.
+  API responses expose presence booleans only: plaintext values are never read
+  back into the browser, logged, copied into designs, or silently replaced with
+  a platform key. The selected provider receives only its own key.
 - CAD sandbox subprocesses receive only the allowlisted non-secret environment.
 - Public safe mode executes only repository-controlled templates and
   deterministic macro code. Caller/model-authored Python remains disabled
@@ -87,6 +90,11 @@ BYOK never falls back to the Pulsai platform key. Invalid credentials or a
 customer rate limit produce customer-specific errors, leaving the design
 unchanged. Usage records persist only model, token counts, estimated cost, and
 `billing_source`; they never persist the key or its fingerprint.
+
+Account-stored BYOK credentials are bound to the authenticated Google subject
+inside their encrypted payload. Decryption rejects a ciphertext copied to a
+different account document. Users can replace selected credentials or delete
+all account-stored credentials from the provider settings panel.
 
 ## Public safe mode
 

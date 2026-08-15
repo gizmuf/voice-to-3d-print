@@ -119,6 +119,9 @@ class Settings:
         and _env_bool("PULSAI_ALLOW_UNTRUSTED_CAD_CODE", False)
     )
     google_oauth_client_id: str = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    # Fernet key used only to encrypt account-scoped BYOK provider credentials
+    # before Firestore persistence. Production supplies it via Secret Manager.
+    byok_encryption_key: str = _secret_env("PULSAI_BYOK_ENCRYPTION_KEY")
     # Fail closed: public/anonymous requests must not spend Pulsai provider
     # credits. Enable only in a separately protected operator environment.
     allow_platform_ai_spend: bool = (
