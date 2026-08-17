@@ -74,6 +74,9 @@ external users or contributors.
 - Publish a clean tagged release from a reviewed commit, then change GitHub
   visibility. Do not expose the current working tree directly.
 
-Current status: repository `gizmuf/voice-to-3d-print` is private and now has an
-AGPL-3.0-or-later license. It must not be made public until the remaining
-history/secret/security/CI release gate passes.
+Current status: repository `gizmuf/voice-to-3d-print` is public under
+AGPL-3.0-or-later. History and staged secret scans passed before publication,
+documented public-safe defaults are in place, and CI covers backend, frontend,
+STT, secret scanning, and a free CAD-to-print flow. The v0.1.0 alpha release is
+the first public milestone. The next gates are real-user feedback, public issue
+triage, and small external contributions.

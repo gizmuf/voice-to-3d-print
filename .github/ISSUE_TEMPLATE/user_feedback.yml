@@ -1,0 +1,52 @@
+name: Non-coder feedback
+description: Share a real demo attempt without technical language
+title: "[Feedback]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You do not need to know CAD or code. Honest feedback about one real attempt is useful.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What did you want to make or change?
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: What did you start with?
+      options:
+        - Speaker grille
+        - Phone stand
+        - Pen holder
+        - Box
+        - Parametric template
+        - My own file
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: What happened?
+      description: Tell us where you succeeded, became confused, or stopped.
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: What one change would help most?
+  - type: input
+    id: environment
+    attributes:
+      label: Device and browser
+      placeholder: iPhone Safari, Mac Chrome, Windows Edge...
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I did not include provider keys, personal data, or private customer/model information.
+          required: true

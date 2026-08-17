@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/gizmuf/voice-to-3d-print/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.
+  - name: Ten-minute non-coder test
+    url: https://github.com/gizmuf/voice-to-3d-print/blob/main/docs/HELP_WITHOUT_CODING.md
+    about: Follow the simple hosted-alpha checklist before sharing feedback.
