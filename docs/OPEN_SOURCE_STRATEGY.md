@@ -77,6 +77,6 @@ external users or contributors.
 Current status: repository `gizmuf/voice-to-3d-print` is public under
 AGPL-3.0-or-later. History and staged secret scans passed before publication,
 documented public-safe defaults are in place, and CI covers backend, frontend,
-STT, secret scanning, and a free CAD-to-print flow. The next OSS gate is the
-v0.1.0 alpha release, followed by real-user feedback, public issue triage, and
-small external contributions.
+STT, secret scanning, and a free CAD-to-print flow. The v0.1.0 alpha release is
+the first public milestone. The next gates are real-user feedback, public issue
+triage, and small external contributions.
