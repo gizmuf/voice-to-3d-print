@@ -949,6 +949,7 @@ def stream_turn(
                         "cache_creation_tokens": cache_write,
                         "cost_usd": turn_cost_usd,
                     },
+                    design=ctx.design,
                 )
             except Exception as exc:  # noqa: BLE001 - accounting must not break the turn
                 logger.warning("AI usage persistence failed for design %s: %s", design_id, exc)

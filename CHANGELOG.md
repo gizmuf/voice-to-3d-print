@@ -4,6 +4,14 @@ Notable public changes to Pulsai 3D are recorded here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep the latest successful CAD revision visible after chat or local edits
+  instead of snapping the preview and sliders back to the first version.
+- Download export bundles and STL/GLB/STEP files through the signed-in session
+  instead of opening a raw unauthenticated artifact tab.
+- Rewrite the non-coder tester guide so it matches the live hosted flow.
+
 ## [0.1.0] - 2026-08-17
 
 ### Added

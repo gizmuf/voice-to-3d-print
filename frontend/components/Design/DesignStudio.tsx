@@ -530,16 +530,23 @@ export default function DesignStudio() {
   }, []);
 
   const refreshDesign = useCallback(
-    async (designId: string) => {
+    async (designId: string, expectedRevisionId?: string | null) => {
       try {
         const res = await fetch(`${backendUrl}/design/${designId}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (expectedRevisionId) reloadAfterRef.current = null;
+          return;
+        }
         const payload = (await res.json()) as Design & {
           editable_model?: unknown;
         };
+        if (expectedRevisionId && payload.revision_id !== expectedRevisionId) {
+          reloadAfterRef.current = null;
+          return;
+        }
         setDesign(payload);
       } catch {
-        // silent
+        if (expectedRevisionId) reloadAfterRef.current = null;
       }
     },
     [backendUrl],
@@ -562,7 +569,7 @@ export default function DesignStudio() {
     if (reloadAfterRef.current === lastRevision) return;
     if (lastRevision !== design.revision_id) {
       reloadAfterRef.current = lastRevision;
-      refreshDesign(design.design_id);
+      void refreshDesign(design.design_id, lastRevision);
     }
   }, [design, lastRevision, refreshDesign]);
 
@@ -2214,15 +2221,28 @@ export default function DesignStudio() {
                 const url = raw ? resolveUrl(backendUrl, raw) : null;
                 if (!url) return null;
                 return (
-                  <a
+                  <button
                     key={kind}
-                    href={url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={downloadLinkStyle}
+                    type="button"
+                    onClick={() => {
+                      void (async () => {
+                        const fileRes = await fetch(url);
+                        if (!fileRes.ok) return;
+                        const blob = await fileRes.blob();
+                        const objectUrl = URL.createObjectURL(blob);
+                        const link = document.createElement("a");
+                        link.href = objectUrl;
+                        link.download = url.split("/").pop()?.split("?")[0] || `model.${kind}`;
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+                      })();
+                    }}
+                    style={{ ...downloadLinkStyle, background: "transparent", cursor: "pointer" }}
                   >
                     {kind.toUpperCase()}
-                  </a>
+                  </button>
                 );
               })
             ) : null}
@@ -4174,6 +4194,7 @@ function ExportMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const presets = [
     { id: "fdm", label: "Export for 3D printing", desc: "STL · G-code · manifest" },
@@ -4203,6 +4224,7 @@ function ExportMenu({
   const trigger = async (preset: string) => {
     if (busy) return;
     setBusy(preset);
+    setError(null);
     try {
       const res = await fetch(`${backendUrl}/design/${designId}/export`, {
         method: "POST",
@@ -4210,13 +4232,42 @@ function ExportMenu({
         body: JSON.stringify({ preset, expected_revision_id: revisionId }),
       });
       if (!res.ok) {
-        alert(`Export failed: ${res.status}`);
+        let detail = `Export failed (${res.status}).`;
+        try {
+          const payload = await res.json();
+          const message = payload?.detail?.message ?? payload?.detail ?? payload?.message;
+          if (typeof message === "string" && message.trim()) detail = message;
+        } catch {
+          // keep the status fallback
+        }
+        setError(detail);
         return;
       }
       const payload = await res.json();
-      const url = `${backendUrl.replace(/\/$/, "")}${payload.bundle_url}`;
-      window.open(url, "_blank");
+      const resolved = resolveUrl(backendUrl, payload.bundle_url);
+      if (!resolved) {
+        setError("Export finished, but no file was returned.");
+        return;
+      }
+      const fileRes = await fetch(resolved);
+      if (!fileRes.ok) {
+        setError(`Could not download the exported file (${fileRes.status}).`);
+        return;
+      }
+      const blob = await fileRes.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const filename =
+        resolved.split("/").pop()?.split("?")[0] || `${designId}-${preset}.zip`;
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
       setOpen(false);
+    } catch {
+      setError("Export could not start. Check your connection and try again.");
     } finally {
       setBusy(null);
     }
@@ -4241,6 +4292,11 @@ function ExportMenu({
       >
         {busy ? `${busy.toUpperCase()}…` : "Export ⌄"}
       </button>
+      {error ? (
+        <div role="alert" style={{ marginTop: 6, fontSize: 11, color: "#8a1f11", maxWidth: 240 }}>
+          {error}
+        </div>
+      ) : null}
       {open ? (
         <div
           role="menu"

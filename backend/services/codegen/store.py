@@ -119,30 +119,59 @@ def save_design(design: Design) -> Design:
     return design
 
 
+def _read_local_design(path: Path) -> Design | None:
+    try:
+        return Design.model_validate_json(path.read_text())
+    except Exception as exc:
+        logger.warning("Failed to load design from %s: %s", path, exc)
+        return None
+
+
+def _prefer_newer_design(local: Design | None, remote_payload: dict | None) -> Design | None:
+    if remote_payload is None:
+        return local
+    try:
+        remote = Design.model_validate(remote_payload)
+    except Exception as exc:
+        logger.warning("Failed to validate remote design payload: %s", exc)
+        return local
+    if local is None:
+        return remote
+    if remote.revision_id != local.revision_id:
+        return remote
+    return local
+
+
 def get_design(design_id: str) -> Design:
     path = _design_path(design_id)
-    if not path.exists():
-        payload = cloud_store.load_design_payload(design_id)
-        if payload is None:
-            raise HTTPException(status_code=404, detail=f"Design {design_id} not found.")
-        path.write_text(json.dumps(payload, indent=2))
-    return Design.model_validate_json(path.read_text())
+    local = _read_local_design(path) if path.exists() else None
+    remote_payload = None
+    try:
+        remote_payload = cloud_store.load_design_payload(design_id)
+    except Exception as exc:
+        if local is None:
+            raise
+        logger.warning("Durable design load failed for %s: %s", design_id, exc)
+    chosen = _prefer_newer_design(local, remote_payload)
+    if chosen is None:
+        raise HTTPException(status_code=404, detail=f"Design {design_id} not found.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(chosen.model_dump(mode="json"), indent=2))
+    return chosen
 
 
 def get_design_or_none(design_id: str) -> Design | None:
-    path = _design_path(design_id)
-    if not path.exists():
-        payload = cloud_store.load_design_payload(design_id)
-        if payload is None:
-            return None
-        path.write_text(json.dumps(payload, indent=2))
     try:
-        return Design.model_validate_json(path.read_text())
+        return get_design(design_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
     except Exception as exc:
         # Distinguish "file is corrupt" from "design doesn't exist". A bare
         # None return masks the difference and the caller has no signal that
         # something on disk needs attention.
-        logger.warning("Failed to load design %s from %s: %s", design_id, path, exc)
+        logger.warning("Failed to load design %s: %s", design_id, exc)
         return None
 
 
@@ -385,9 +414,9 @@ def save_conversation(design_id: str, messages: list[dict]) -> None:
     cloud_store.save_conversation_payload(design_id, messages)
 
 
-def record_ai_usage(design_id: str, entry: dict) -> dict:
+def record_ai_usage(design_id: str, entry: dict, *, design: Design | None = None) -> dict:
     """Persist an append-only, compact cost ledger with the design."""
-    design = get_design(design_id)
+    design = design or get_design(design_id)
     metadata = design.metadata
     events = metadata.setdefault("ai_usage_events", [])
     if not isinstance(events, list):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import json
 from pathlib import Path
 
 import config
@@ -100,3 +101,47 @@ def test_ai_usage_ledger_accumulates_and_persists(tmp_path: Path, monkeypatch) -
     assert "api_key" not in events[0]
     shutil.rmtree(tmp_path / "designs" / design.id)
     assert store.get_design(design.id).metadata["ai_usage_totals"]["cost_usd"] == 0.0005
+
+
+def test_get_design_prefers_newer_remote_revision(tmp_path: Path, monkeypatch) -> None:
+    object.__setattr__(config.settings, "output_dir", tmp_path)
+    remote: dict[str, object] = {}
+    monkeypatch.setattr(cloud_store, "save_design_payload", lambda design_id, payload: remote.update(design=payload))
+    monkeypatch.setattr(cloud_store, "load_design_payload", lambda design_id: remote.get("design"))
+
+    design = store.create_design(name="Stale local", script="result = Box(10, 10, 10)")
+    stale_revision = design.revision_id
+    newer = design.model_copy(update={"revision_id": "cafebabecafebabecafebabecafebabe", "name": "Remote head"})
+    store.save_design(newer)
+
+    local_path = tmp_path / "designs" / design.id / "design.json"
+    stale_payload = json.loads(local_path.read_text())
+    stale_payload["revision_id"] = stale_revision
+    stale_payload["name"] = "Stale local"
+    local_path.write_text(json.dumps(stale_payload, indent=2))
+
+    loaded = store.get_design(design.id)
+    assert loaded.revision_id == newer.revision_id
+    assert loaded.name == "Remote head"
+
+
+def test_record_ai_usage_keeps_in_memory_revision(tmp_path: Path, monkeypatch) -> None:
+    object.__setattr__(config.settings, "output_dir", tmp_path)
+    remote: dict[str, object] = {}
+    monkeypatch.setattr(cloud_store, "save_design_payload", lambda design_id, payload: remote.update(design=payload))
+    monkeypatch.setattr(cloud_store, "load_design_payload", lambda design_id: remote.get("design"))
+
+    design = store.create_design(name="Live design", script="result = Box(10, 10, 10)")
+    live = design.model_copy(deep=True)
+    live.revision_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    live.name = "Edited live"
+
+    store.record_ai_usage(
+        design.id,
+        {"provider": "anthropic", "model": "claude-sonnet-5", "cost_usd": 0.01},
+        design=live,
+    )
+    loaded = store.get_design(design.id)
+    assert loaded.revision_id == live.revision_id
+    assert loaded.name == "Edited live"
+    assert loaded.metadata["ai_usage_totals"]["cost_usd"] == 0.01
