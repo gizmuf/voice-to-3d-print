@@ -5,7 +5,7 @@ const BACKEND_URL = process.env.PLAYWRIGHT_BACKEND_URL ?? "http://127.0.0.1:8000
 const pause = (page: import("@playwright/test").Page, milliseconds: number) =>
   page.waitForTimeout(milliseconds);
 
-test("records prompt to editable CAD to print-bundle flow", async ({ page, request }) => {
+test("records flagship CAD edit to print-bundle flow", async ({ page, request }) => {
   test.setTimeout(300_000);
 
   await page.addInitScript(() => {
@@ -20,10 +20,15 @@ test("records prompt to editable CAD to print-bundle flow", async ({ page, reque
   await page.goto("/design");
   await pause(page, 1_200);
 
-  const createPrompt = page.getByPlaceholder(/uchwyt na telefon|phone holder/i);
-  await createPrompt.fill("phone stand 65 degrees, cable hole");
+  // Use the reviewed phone-stand flagship rather than asking an unavailable
+  // provider to regenerate a model. This keeps the public demo honest,
+  // deterministic and free while still demonstrating conversational editing.
+  const phoneStandFlagship = page.locator(
+    'button[title*="Angled back with base + lip"]',
+  );
+  await expect(phoneStandFlagship).toBeVisible({ timeout: 30_000 });
   await pause(page, 900);
-  await page.getByRole("button", { name: /Utwórz model|Create model/i }).click();
+  await phoneStandFlagship.click();
   await expect(page).toHaveURL(/\?design=[a-zA-Z0-9_-]+/, { timeout: 120_000 });
 
   const designId = new URL(page.url()).searchParams.get("design");
