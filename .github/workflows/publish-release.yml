@@ -1,0 +1,81 @@
+name: Publish GitHub release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/releases/v0.1.0.md
+      - .github/workflows/publish-release.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Git tag to publish or refresh
+        required: true
+        default: v0.1.0
+      notes_file:
+        description: Repository-relative Markdown release notes path
+        required: true
+        default: docs/releases/v0.1.0.md
+      title:
+        description: GitHub Release title
+        required: true
+        default: Pulsai 3D v0.1.0 — First Public Alpha
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve release inputs
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_NOTES_FILE: ${{ inputs.notes_file }}
+          INPUT_TITLE: ${{ inputs.title }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+            notes_file="$INPUT_NOTES_FILE"
+            title="$INPUT_TITLE"
+          else
+            tag="v0.1.0"
+            notes_file="docs/releases/v0.1.0.md"
+            title="Pulsai 3D v0.1.0 — First Public Alpha"
+          fi
+
+          test -n "$tag"
+          test -f "$notes_file"
+          git rev-parse --verify "refs/tags/$tag"
+
+          {
+            echo "tag=$tag"
+            echo "notes_file=$notes_file"
+            echo "title=$title"
+          } >> "$GITHUB_OUTPUT"
+      - name: Publish or refresh the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          NOTES_FILE: ${{ steps.release.outputs.notes_file }}
+          TITLE: ${{ steps.release.outputs.title }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes-file "$NOTES_FILE" \
+              --latest
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$TITLE" \
+              --notes-file "$NOTES_FILE" \
+              --latest
+          fi
