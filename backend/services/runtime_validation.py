@@ -59,6 +59,8 @@ def production_configuration_errors(
         errors.append("PULSAI_AUTH_REQUIRED must be true")
     if settings.insecure_local_dev:
         errors.append("PULSAI_INSECURE_LOCAL_DEV must be false")
+    if not settings.public_safe_mode:
+        errors.append("PULSAI_PUBLIC_SAFE_MODE must be true")
     if not settings.google_oauth_client_id.strip():
         errors.append("GOOGLE_OAUTH_CLIENT_ID must be configured")
     if not _valid_https_origins(settings.cors_origins):
