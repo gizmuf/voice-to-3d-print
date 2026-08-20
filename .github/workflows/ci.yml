@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - name: Install system dependencies
@@ -50,6 +50,38 @@ jobs:
           python -m pytest -q tests \
             --ignore=tests/ai/evals/test_eval_runner.py \
             --ignore=tests/ai/evals_v2/test_eval_runner_v2.py
+
+  container-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production backend image
+        run: docker build --tag pulsai-backend:ci backend
+      - name: Run container as non-root and verify health
+        run: |
+          docker run --detach --name pulsai-backend-smoke \
+            --publish 18080:8080 \
+            --env PULSAI_AUTH_REQUIRED=false \
+            --env PULSAI_INSECURE_LOCAL_DEV=true \
+            --env PULSAI_PUBLIC_SAFE_MODE=true \
+            --env PULSAI_ALLOW_PLATFORM_AI_SPEND=false \
+            pulsai-backend:ci
+          trap 'docker logs pulsai-backend-smoke || true; docker rm --force pulsai-backend-smoke || true' EXIT
+          test "$(docker exec pulsai-backend-smoke id -u)" != "0"
+          for attempt in {1..90}; do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              exit 0
+            fi
+            if ! docker inspect --format '{{.State.Running}}' pulsai-backend-smoke | grep -qx true; then
+              docker logs pulsai-backend-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs pulsai-backend-smoke
+          exit 1
 
   frontend:
     runs-on: ubuntu-24.04
@@ -129,7 +161,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - uses: actions/setup-node@v4
