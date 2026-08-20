@@ -90,7 +90,8 @@ jobs:
 
           ls -lh demo-output
 
-      - name: Upload demo assets
+      - name: Upload demo assets and failure diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pulsai-public-demo
@@ -99,6 +100,7 @@ jobs:
             demo-output/pulsai-demo-readme.gif
             demo-output/pulsai-demo-poster.png
             demo-output/pulsai-demo-raw.webm
+            demo-output/playwright/**
             /tmp/pulsai-demo-backend.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
