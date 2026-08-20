@@ -22,14 +22,13 @@ from pathlib import Path
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
-import trimesh
 from fastapi import HTTPException
 
 from config import settings
+from services.codegen.engine import run_manufacturability
 from services.editability import EditabilityAssessment, assess
 from services.editable_model import EditableModel, WorkspaceRecord
 from services.editable_rebuild import export_editable_build
-from services.manufacturability import _hash_mesh, check_mesh
 from services.printer_profiles import PrinterProfile, get_profile
 from services.workspace import get_workspace, record_build
 from slicer_service import _slice_mesh
@@ -109,6 +108,15 @@ def _validate_export_allowed(assessment: EditabilityAssessment) -> None:
     )
 
 
+def _canonical_report(stl_path: Path, profile: PrinterProfile) -> dict[str, Any]:
+    """Return the sole profile-aware manufacturability report for an STL."""
+    return run_manufacturability(
+        stl_path=stl_path,
+        process="fdm",
+        printer_profile_id=profile.id,
+    ).model_dump()
+
+
 def _rebuilt_artifacts(
     record: WorkspaceRecord, profile: PrinterProfile
 ) -> tuple[Path, Path, Path | None, dict[str, Any], dict[str, Any]]:
@@ -126,16 +134,13 @@ def _rebuilt_artifacts(
             pass
     final_gcode = gcode_path if gcode_generated else None
 
-    mesh = trimesh.load_mesh(stl_path, force="mesh")
-    if not isinstance(mesh, trimesh.Trimesh):
-        mesh = trimesh.util.concatenate(tuple(mesh.dump()))  # type: ignore[arg-type]
-    report = check_mesh(mesh, profile)
+    report = _canonical_report(stl_path, profile)
     return (
         glb_path,
         stl_path,
         final_gcode,
         validation,
-        report.model_dump(),
+        report,
     )
 
 
@@ -166,14 +171,10 @@ def _as_is_artifacts(
     report_dict: dict[str, Any] | None = None
     if stl_path is not None:
         try:
-            mesh = trimesh.load_mesh(stl_path, force="mesh")
-            if not isinstance(mesh, trimesh.Trimesh):
-                mesh = trimesh.util.concatenate(tuple(mesh.dump()))  # type: ignore[arg-type]
-            report = check_mesh(mesh, profile)
-            report_dict = report.model_dump()
-        except Exception as exc:
+            report_dict = _canonical_report(stl_path, profile)
+        except Exception:
             validation["warnings"].append(
-                f"Manufacturability check skipped: {exc}"
+                "Manufacturability check skipped because the cached mesh could not be inspected."
             )
     return (glb_path or stl_path, stl_path, None, validation, report_dict)
 
@@ -206,15 +207,7 @@ def export_bundle(
     else:  # pragma: no cover — _validate_export_allowed should have refused earlier
         raise HTTPException(status_code=500, detail="Unsupported export mode.")
 
-    mesh_hash = ""
-    if stl_path is not None:
-        try:
-            mesh = trimesh.load_mesh(stl_path, force="mesh")
-            if not isinstance(mesh, trimesh.Trimesh):
-                mesh = trimesh.util.concatenate(tuple(mesh.dump()))  # type: ignore[arg-type]
-            mesh_hash = _hash_mesh(mesh)
-        except Exception:
-            mesh_hash = ""
+    mesh_hash = str((report or {}).get("mesh_hash") or "")
 
     root_label = (
         record.editable_model.bodies[0].label if record.editable_model.bodies else workspace_id
