@@ -1,0 +1,104 @@
+name: Capture public demo
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/capture-demo.yml
+      - frontend/playwright.demo.config.ts
+      - frontend/tests/demo/**
+
+permissions:
+  contents: read
+
+jobs:
+  capture-demo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PULSAI_AUTH_REQUIRED: "false"
+      PULSAI_INSECURE_LOCAL_DEV: "true"
+      PULSAI_PUBLIC_SAFE_MODE: "true"
+      PULSAI_ALLOW_PLATFORM_AI_SPEND: "false"
+      PULSAI_ALLOW_UNTRUSTED_CAD_CODE: "false"
+      NEXT_PUBLIC_BACKEND_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_STT_URL: http://127.0.0.1:8010
+      PLAYWRIGHT_BACKEND_URL: http://127.0.0.1:8000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install CAD, browser and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgl1 libglib2.0-0 libgomp1 prusa-slicer ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-dev.txt
+          npm ci --prefix frontend
+          cd frontend
+          npx playwright install --with-deps chromium
+
+      - name: Start the local-safe backend
+        run: |
+          mkdir -p demo-output
+          cd backend
+          python -m uvicorn app:app --host 127.0.0.1 --port 8000 \
+            > /tmp/pulsai-demo-backend.log 2>&1 &
+          echo $! > /tmp/pulsai-demo-backend.pid
+          cd ..
+          for attempt in {1..90}; do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/pulsai-demo-backend.log
+          exit 1
+
+      - name: Record the deterministic product flow
+        working-directory: frontend
+        run: |
+          npx playwright test tests/demo/pulsai-public-demo.spec.ts \
+            --config=playwright.demo.config.ts
+
+      - name: Produce shareable MP4 and README GIF
+        run: |
+          raw_video="$(find demo-output/playwright -type f -name '*.webm' -print -quit)"
+          test -n "$raw_video"
+          cp "$raw_video" demo-output/pulsai-demo-raw.webm
+
+          ffmpeg -y -i "$raw_video" -an \
+            -vf "scale=1280:-2:flags=lanczos,fps=30" \
+            -c:v libx264 -preset medium -crf 22 -pix_fmt yuv420p \
+            -movflags +faststart demo-output/pulsai-demo.mp4
+
+          ffmpeg -y -i "$raw_video" -an \
+            -filter_complex "[0:v]setpts=0.45*PTS,fps=12,scale=960:-2:flags=lanczos,split[v0][v1];[v0]palettegen=max_colors=128:stats_mode=diff[p];[v1][p]paletteuse=dither=bayer:bayer_scale=5" \
+            -loop 0 demo-output/pulsai-demo-readme.gif
+
+          ls -lh demo-output
+
+      - name: Upload demo assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulsai-public-demo
+          path: |
+            demo-output/pulsai-demo.mp4
+            demo-output/pulsai-demo-readme.gif
+            demo-output/pulsai-demo-poster.png
+            demo-output/pulsai-demo-raw.webm
+            /tmp/pulsai-demo-backend.log
+          if-no-files-found: error
+          retention-days: 30
