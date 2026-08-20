@@ -16,6 +16,7 @@ def _valid_settings(**overrides):
     values = {
         "auth_required": True,
         "insecure_local_dev": False,
+        "public_safe_mode": True,
         "google_oauth_client_id": "google-web-client.apps.googleusercontent.com",
         "cors_origins": "https://3d.pulsai.app",
         "allow_untrusted_cad_code": False,
@@ -33,6 +34,7 @@ def test_local_and_ci_environments_are_not_subject_to_production_gate() -> None:
     unsafe = _valid_settings(
         auth_required=False,
         insecure_local_dev=True,
+        public_safe_mode=False,
         google_oauth_client_id="",
     )
 
@@ -62,6 +64,7 @@ def test_valid_cloud_run_configuration_passes() -> None:
     [
         ({"auth_required": False}, "PULSAI_AUTH_REQUIRED"),
         ({"insecure_local_dev": True}, "PULSAI_INSECURE_LOCAL_DEV"),
+        ({"public_safe_mode": False}, "PULSAI_PUBLIC_SAFE_MODE"),
         ({"google_oauth_client_id": ""}, "GOOGLE_OAUTH_CLIENT_ID"),
         ({"cors_origins": "*"}, "CORS_ORIGINS"),
         ({"cors_origins": "http://3d.pulsai.app"}, "CORS_ORIGINS"),
