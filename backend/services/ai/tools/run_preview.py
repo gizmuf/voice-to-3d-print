@@ -8,12 +8,11 @@ preview, never a stale one.
 
 from __future__ import annotations
 
-import trimesh
 from pydantic import BaseModel
 
 from services.ai.tools._context import AgentContext
+from services.codegen.engine import run_manufacturability
 from services.editable_rebuild import export_editable_preview
-from services.manufacturability import _hash_mesh, check_mesh
 from services.workspace import record_preview
 
 
@@ -47,11 +46,12 @@ def execute(payload: dict, ctx: AgentContext) -> dict:
     stl_url = ctx.workspace_artifact_url(stl_path)
 
     try:
-        mesh = trimesh.load_mesh(stl_path, force="mesh")
-        if not isinstance(mesh, trimesh.Trimesh):
-            mesh = trimesh.util.concatenate(tuple(mesh.dump()))  # type: ignore[arg-type]
-        mesh_hash = _hash_mesh(mesh)
-        report = check_mesh(mesh, ctx.printer_profile)
+        report = run_manufacturability(
+            stl_path=stl_path,
+            process="fdm",
+            printer_profile_id=ctx.printer_profile.id,
+        )
+        mesh_hash = report.mesh_hash
     except Exception as exc:
         mesh_hash = ""
         report = None
