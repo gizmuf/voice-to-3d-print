@@ -1,7 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const port = Number(process.env.PORT ?? 3000);
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${port}`;
+// Next.js development resources enforce their origin strictly. Using localhost
+// here matches the dev server and avoids the browser treating 127.0.0.1 as a
+// different origin during the recording run.
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${port}`;
 
 export default defineConfig({
   testDir: "./tests/demo",
