@@ -24,6 +24,10 @@ frontend/playwright-report/
 output/playwright/
 output/backups/
 
+# Generated runtime/debug state
+*.log
+backend/.triposr_run.json
+
 # Local secrets
 Keys/
 
