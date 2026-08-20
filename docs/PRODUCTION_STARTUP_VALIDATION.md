@@ -17,6 +17,7 @@ Local development and ordinary CI imports remain unchanged.
 A production process must have:
 
 - authentication enabled and insecure local mode disabled;
+- public safe mode enabled so legacy/unsafe routes remain unavailable;
 - a Google OAuth web client ID;
 - explicit HTTPS CORS origins, never `*` or `null`;
 - untrusted CAD execution disabled;
