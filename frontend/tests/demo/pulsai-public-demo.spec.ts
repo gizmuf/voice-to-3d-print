@@ -17,22 +17,26 @@ test("records flagship CAD edit to print-bundle flow", async ({ page, request })
   const healthPayload = await health.json();
   expect(healthPayload.platform_ai_spend_enabled).toBe(false);
 
+  // Briefly show the real product start screen, then create the reviewed
+  // phone-stand flagship through the same backend endpoint used by the UI.
+  // Calling the endpoint directly avoids depending on a responsive-layout
+  // card that may be off-screen in headless capture while preserving the
+  // exact production design/build path.
   await page.goto("/design");
-  await pause(page, 1_200);
+  await pause(page, 1_400);
 
-  // Use the reviewed phone-stand flagship rather than asking an unavailable
-  // provider to regenerate a model. This keeps the public demo honest,
-  // deterministic and free while still demonstrating conversational editing.
-  const phoneStandFlagship = page.locator(
-    'button[title*="Angled back with base + lip"]',
-  );
-  await expect(phoneStandFlagship).toBeVisible({ timeout: 30_000 });
-  await pause(page, 900);
-  await phoneStandFlagship.click();
-  await expect(page).toHaveURL(/\?design=[a-zA-Z0-9_-]+/, { timeout: 120_000 });
+  const forkResponse = await request.post(`${BACKEND_URL}/design/flagship/fork`, {
+    data: {
+      flagship_id: "phone_stand",
+      name: "Phone stand — public demo",
+    },
+  });
+  expect(forkResponse.ok()).toBeTruthy();
+  const forked = await forkResponse.json();
+  const designId = String(forked.design_id ?? "");
+  expect(designId).toMatch(/^[a-f0-9]{32}$/);
 
-  const designId = new URL(page.url()).searchParams.get("design");
-  expect(designId).toBeTruthy();
+  await page.goto(`/design?design=${designId}`);
 
   try {
     const canvas = page.locator("canvas").first();
@@ -101,8 +105,6 @@ test("records flagship CAD edit to print-bundle flow", async ({ page, request })
     });
     await pause(page, 1_200);
   } finally {
-    if (designId) {
-      await request.delete(`${BACKEND_URL}/design/${designId}`);
-    }
+    await request.delete(`${BACKEND_URL}/design/${designId}`);
   }
 });
