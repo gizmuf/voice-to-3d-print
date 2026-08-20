@@ -58,7 +58,7 @@ jobs:
             echo "notes_file=$notes_file"
             echo "title=$title"
           } >> "$GITHUB_OUTPUT"
-      - name: Publish or refresh the release
+      - name: Publish or refresh the public-alpha prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
@@ -70,12 +70,13 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "$TITLE" \
               --notes-file "$NOTES_FILE" \
-              --latest
+              --draft=false \
+              --prerelease
           else
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "$TITLE" \
               --notes-file "$NOTES_FILE" \
-              --latest
+              --prerelease
           fi
