@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 import { resolveBackendUrl } from "../../lib/backend";
 import { isLikelyEmbeddedBrowser } from "../../lib/embedded-browser";
+import { uiText, useUiLanguage, type UiLanguage } from "../../lib/ui-language";
 
 type AuthConfig = {
   required: boolean;
@@ -37,6 +38,8 @@ declare global {
 export default function GoogleAuthGate({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const backendUrl = resolveBackendUrl();
+  const { language } = useUiLanguage();
+  const t = (polish: string, english: string) => uiText(language, polish, english);
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [credential, setCredential] = useState("");
   const [sessionChecked, setSessionChecked] = useState(false);
@@ -54,8 +57,16 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
         return response.json() as Promise<AuthConfig>;
       })
       .then(setConfig)
-      .catch(() => setError("Nie udało się sprawdzić konfiguracji logowania."));
-  }, [backendUrl]);
+      .catch(() =>
+        setError(
+          uiText(
+            language,
+            "Nie udało się sprawdzić konfiguracji logowania.",
+            "Could not verify the sign-in configuration.",
+          ),
+        ),
+      );
+  }, [backendUrl, language]);
 
   useEffect(() => {
     if (!config) return;
@@ -79,7 +90,13 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
         auto_select: false,
         callback: async (response) => {
           if (!response.credential) {
-            setError("Google nie zwrócił ważnej sesji.");
+            setError(
+              uiText(
+                language,
+                "Google nie zwrócił ważnej sesji.",
+                "Google did not return a valid session.",
+              ),
+            );
             return;
           }
           try {
@@ -93,7 +110,13 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
             setCredential(response.credential);
             setAuthenticated(true);
           } catch {
-            setError("Nie udało się utworzyć bezpiecznej sesji. Spróbuj ponownie.");
+            setError(
+              uiText(
+                language,
+                "Nie udało się utworzyć bezpiecznej sesji. Spróbuj ponownie.",
+                "Could not create a secure session. Please try again.",
+              ),
+            );
           }
         },
       });
@@ -119,9 +142,20 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
     script.defer = true;
     script.dataset.pulsaiGoogleLogin = "true";
     script.addEventListener("load", initialize, { once: true });
-    script.addEventListener("error", () => setError("Nie udało się wczytać Google Login."), { once: true });
+    script.addEventListener(
+      "error",
+      () =>
+        setError(
+          uiText(
+            language,
+            "Nie udało się wczytać Google Login.",
+            "Could not load Google Login.",
+          ),
+        ),
+      { once: true },
+    );
     document.head.appendChild(script);
-  }, [authenticated, backendUrl, config, sessionChecked]);
+  }, [authenticated, backendUrl, config, language, sessionChecked]);
 
   useEffect(() => {
     // Local development deliberately runs without auth. Installing the
@@ -157,20 +191,53 @@ export default function GoogleAuthGate({ children }: { children: ReactNode }) {
     return <AppWithSource>{children}</AppWithSource>;
   }
   if (error) {
-    return <AuthShell message={error} buttonRef={buttonRef} embeddedBrowser={embeddedBrowser} />;
+    return (
+      <AuthShell
+        message={error}
+        buttonRef={buttonRef}
+        embeddedBrowser={embeddedBrowser}
+        language={language}
+      />
+    );
   }
-  if (!config) return <AuthShell message="Sprawdzam bezpieczne logowanie…" />;
+  if (!config) {
+    return (
+      <AuthShell
+        message={t("Sprawdzam bezpieczne logowanie…", "Checking secure sign-in…")}
+        language={language}
+      />
+    );
+  }
   if (!config.required) return <AppWithSource>{children}</AppWithSource>;
   if (!config.google_client_id) {
-    return <AuthShell message="Google Login nie jest jeszcze skonfigurowany po stronie serwera." />;
+    return (
+      <AuthShell
+        message={t(
+          "Google Login nie jest jeszcze skonfigurowany po stronie serwera.",
+          "Google Login is not configured on the server yet.",
+        )}
+        language={language}
+      />
+    );
   }
-  if (!sessionChecked) return <AuthShell message="Sprawdzam istniejącą sesję Google…" />;
+  if (!sessionChecked) {
+    return (
+      <AuthShell
+        message={t("Sprawdzam istniejącą sesję Google…", "Checking your existing Google session…")}
+        language={language}
+      />
+    );
+  }
   if (!authenticated) {
     return (
       <AuthShell
-        message="Zaloguj się przez Google, aby projekty i pliki były widoczne tylko dla Ciebie."
+        message={t(
+          "Zaloguj się przez Google, aby projekty i pliki były widoczne tylko dla Ciebie.",
+          "Sign in with Google so your projects and files remain private to your account.",
+        )}
         buttonRef={buttonRef}
         embeddedBrowser={embeddedBrowser}
+        language={language}
       />
     );
   }
@@ -197,10 +264,12 @@ function AuthShell({
   message,
   buttonRef,
   embeddedBrowser = false,
+  language,
 }: {
   message: string;
   buttonRef?: React.RefObject<HTMLDivElement | null>;
   embeddedBrowser?: boolean;
+  language: UiLanguage;
 }) {
   return (
     <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
@@ -215,8 +284,16 @@ function AuthShell({
               style={{ margin: "14px auto 0", maxWidth: 340, fontSize: 12, lineHeight: 1.5, opacity: 0.68 }}
             >
               {embeddedBrowser
-                ? "To jest przeglądarka osadzona. Google może blokować w niej logowanie. W menu tej karty wybierz „Open in external browser” i zaloguj się w Chrome lub Safari."
-                : "Puste okno logowania? Otwórz tę stronę w Chrome lub Safari."}
+                ? uiText(
+                    language,
+                    "To jest przeglądarka osadzona. Google może blokować w niej logowanie. W menu tej karty wybierz „Open in external browser” i zaloguj się w Chrome lub Safari.",
+                    "This is an embedded browser. Google may block sign-in here. Use this tab's menu to choose ‘Open in external browser’, then sign in with Chrome or Safari.",
+                  )
+                : uiText(
+                    language,
+                    "Puste okno logowania? Otwórz tę stronę w Chrome lub Safari.",
+                    "Blank sign-in window? Open this page in Chrome or Safari.",
+                  )}
             </p>
           </>
         ) : null}
