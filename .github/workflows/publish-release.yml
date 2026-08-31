@@ -69,13 +69,13 @@ jobs:
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$TITLE" \
-              --notes-file "$NOTES_FILE" \
-              --latest
+              --notes-file "$NOTES_FILE"
           else
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "$TITLE" \
               --notes-file "$NOTES_FILE" \
-              --latest
+              --prerelease \
+              --latest=false
           fi
