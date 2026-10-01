@@ -131,7 +131,7 @@ trianglesolver==1.2
 trimesh==5.0.0
 typing-extensions==4.16.0
 typing-inspection==0.4.4
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.3
 uvloop==0.22.1
 vtk==9.6.2
