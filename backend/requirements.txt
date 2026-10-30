@@ -21,7 +21,7 @@ cadquery-ocp==7.9.3.1.1
 cadquery-ocp-novtk==7.9.3.1.1
 cadquery-ocp-proxy==7.9.3.1.1
 casadi==3.7.2
-certifi==2026.7.22
+certifi==2026.10.18
 cffi==2.1.1
 charset-normalizer==3.5.0
 click==8.4.2
